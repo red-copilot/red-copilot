@@ -15,14 +15,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import WorldSnapshot
+from .models import TRUST_RANK, WorldSnapshot
 
 DEFAULT_FOCUS_CLAIM_THRESHOLD = 0.7
 DEFAULT_MAX_ESTABLISHED = 8
 DEFAULT_MAX_UNKNOWNS = 5
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
-_TRUST_RANK = {"unclassified": 1, "claim": 1, "evidence": 2, "verified": 3}
 # Record kinds that can be treated as established facts of the current state.
 _ESTABLISHED_KINDS = ("observation", "capability", "artifact", "entity", "relation")
 # Record kinds that represent an open question the next round could resolve.
@@ -237,7 +236,7 @@ class FocusBuilder:
                 ):
                     continue
                 score = (
-                    3.0 * _TRUST_RANK.get(status, 1)
+                    3.0 * TRUST_RANK.get(status, 1)
                     + 5.0 * _lexical(_search_text(kind, record), query_tokens)
                     + (confidence if confidence is not None else 0.0)
                     + 0.5 * recency.get(record.id, 0.0)

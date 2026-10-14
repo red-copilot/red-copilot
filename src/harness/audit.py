@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .secureio import open_beneath, open_regular_file
+from .world.models import is_agent_actor
 
 SCHEMA_VERSION = "harness/audit/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
@@ -660,11 +661,12 @@ def audit_run(run_dir: str | Path) -> AuditReport:
                     event_id=event.get("id"),
                 )
             obj = event.get("object")
+            actor = event.get("actor")
             if (
                 event.get("kind") == "goal"
                 and isinstance(obj, dict)
                 and obj.get("status") == "completed"
-                and str(event.get("actor", "")).startswith("agent:")
+                and is_agent_actor(actor if isinstance(actor, str) else None)
             ):
                 counts["claims"] += 1
                 _add(

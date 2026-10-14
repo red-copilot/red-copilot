@@ -13,17 +13,18 @@ import stat
 import threading
 import uuid
 from collections.abc import Callable
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
-from .agent import build_agent_adapter
+from .agent import AgentRunContext, build_agent_adapter
 from .agent_workspace import (
     create_agent_workspace,
     prepare_agent_task_view,
     sync_agent_workspace,
 )
-from .budget import UsageMetrics, enforced_budget_limits
+from .budget import UsageMetrics, apply_budget_limits
 from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
@@ -43,7 +44,7 @@ from .runtime.solver_profile import (
     solver_profile_settings,
 )
 from .secureio import read_regular_text
-from .session import AgentObservation
+from .session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
 from .trace import TraceRecorder
 from .verifier import VerifierError, run_verifier
 from .world import Goal, SQLiteWorldRepository, WorldRepository
@@ -119,6 +120,7 @@ class Orchestrator:
         resume_run_dir: Path | None = None,
         run_id: str | None = None,
         solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
+        context_token_budget: int | None = None,
     ) -> dict:
         if threading.current_thread() is not threading.main_thread():
             return self._run(
@@ -133,6 +135,7 @@ class Orchestrator:
                 resume_run_dir=resume_run_dir,
                 run_id=run_id,
                 solver_profile=solver_profile,
+                context_token_budget=context_token_budget,
             )
 
         previous_handlers: dict[int, object] = {}
@@ -161,6 +164,7 @@ class Orchestrator:
                 resume_run_dir=resume_run_dir,
                 run_id=run_id,
                 solver_profile=solver_profile,
+                context_token_budget=context_token_budget,
             )
         finally:
             for signum, handler in previous_handlers.items():
@@ -180,6 +184,7 @@ class Orchestrator:
         resume_run_dir: Path | None = None,
         run_id: str | None = None,
         solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
+        context_token_budget: int | None = None,
     ) -> dict:
         solver_profile = SolverProfile(solver_profile)
         solver_profile_settings(solver_profile)
@@ -249,13 +254,7 @@ class Orchestrator:
             attributes={"task_id": task.id, "category": task.category},
             required_states=list(task.objective.required_states),
         )
-        budget_limits, ignored_budgets = enforced_budget_limits(task.budgets)
-        if ignored_budgets:
-            trace.emit(
-                "budget.ignored",
-                actor="harness",
-                data={"ignored": ignored_budgets, "enforced": ["wall_time"]},
-            )
+        budget_limits = apply_budget_limits(task.budgets, trace)
         runtime = bootstrap_solver(
             run_dir=run_dir,
             trace=trace,
@@ -268,6 +267,7 @@ class Orchestrator:
             agent_workspace=agent_workspace,
             resume_existing=is_resume,
             solver_profile=solver_profile,
+            context_token_budget=context_token_budget,
         )
         world = runtime.world
         context_builder = runtime.context_builder
@@ -353,32 +353,46 @@ class Orchestrator:
                 allow_host_agent=allow_host_agent,
                 trace=trace,
             )
-            run_kwargs = {
-                "task": session_task,
-                "task_dir": task_dir,
-                "agent_task_dir": agent_task_dir,
-                "run_dir": agent_workspace,
-                "environment_project": handle.project_name,
-                "environment_network": handle.network_name,
-                "seed": seed,
-                "gateway_url": gateway_runtime.url if gateway_runtime else None,
-                "gateway_token": gateway_runtime.token if gateway_runtime else None,
-                "gateway_network": gateway_runtime.network_name if gateway_runtime else None,
-            }
+            # Unknown adapters (test doubles, future types) degrade to the
+            # least-capable contract rather than failing the run.
+            trace.emit(
+                "agent.capabilities",
+                actor="harness",
+                data=asdict(getattr(adapter, "capabilities", ONE_SHOT_AGENT_CAPABILITIES)),
+            )
+            run_context = AgentRunContext(
+                task=session_task,
+                task_dir=task_dir,
+                agent_task_dir=agent_task_dir,
+                run_dir=agent_workspace,
+                environment_project=handle.project_name,
+                environment_network=handle.network_name,
+                seed=seed,
+                gateway_url=gateway_runtime.url if gateway_runtime else None,
+                gateway_token=gateway_runtime.token if gateway_runtime else None,
+                gateway_network=gateway_runtime.network_name if gateway_runtime else None,
+            )
             pi_rpc_gateway = bool(
                 gateway_runtime and agent.type == "pi" and agent.pi and agent.pi.mode == "rpc"
             )
             if pi_rpc_gateway:
-                run_kwargs["gateway_usage_path"] = gateway_runtime.usage_event_path
+                run_context = replace(
+                    run_context,
+                    gateway_usage_path=gateway_runtime.usage_event_path,
+                )
             if is_resume and pi_rpc_gateway:
-                run_kwargs["resume_gateway_event_offset"] = (
-                    recovery_checkpoint.gateway_event_offset
+                run_context = replace(
+                    run_context,
+                    resume_gateway_event_offset=recovery_checkpoint.gateway_event_offset,
                 )
             if is_resume:
-                run_kwargs["resume_session_id"] = recovery_checkpoint.agent_session_id
+                run_context = replace(
+                    run_context,
+                    resume_session_id=recovery_checkpoint.agent_session_id,
+                )
 
             async def run_session():
-                agent_session = await adapter.start_session(**run_kwargs)
+                agent_session = await adapter.start_session(run_context)
                 try:
                     await save_session_checkpoint(
                         run_dir=run_dir,
@@ -465,7 +479,7 @@ class Orchestrator:
                 if callable(start_session):
                     agent_result = asyncio.run(run_session())
                 else:
-                    agent_result = adapter.run(**run_kwargs)
+                    agent_result = adapter.run(run_context)
             usage = UsageMetrics(**_sum_usage(recovered_usage, agent_result.metrics.as_dict()))
 
             if agent_result.timed_out:

@@ -1,26 +1,44 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import time
+from dataclasses import replace as dataclasses_replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from harness.agent import AgentResult, CLIAdapter
+from harness.agent import AgentResult, AgentRunContext, CLIAdapter
 from harness.budget import UsageMetrics
 from harness.failures import FailureClass, classify_failure
 from harness.pi_container import ContainerPiRpcSession, ContainerPiSession
 from harness.progress import ProgressLedger
-from harness.session import AgentEvent, AgentObservation, OneShotAgentSession
+from harness.session import (
+    ONE_SHOT_AGENT_CAPABILITIES,
+    RPC_AGENT_CAPABILITIES,
+    AgentEvent,
+    AgentObservation,
+    OneShotAgentSession,
+    SessionPhase,
+    SessionPhaseTracker,
+)
 from harness.trace import TraceRecorder
 from harness.verification import EvidenceRef, ObjectiveVerdict, VerifierRegistry
 
 
+def _run_context(run_dir: Path, **overrides) -> AgentRunContext:
+    """Minimal AgentRunContext for session-level tests (adapters never read task)."""
+    fields = {"task": object(), "task_dir": run_dir, "run_dir": run_dir, "seed": 1}
+    fields.update(overrides)
+    return AgentRunContext(**fields)
+
+
 class FakeStreamingAdapter:
-    def run(self, *, run_dir: Path, **_kwargs) -> AgentResult:
+    def run(self, context: AgentRunContext, **_kwargs) -> AgentResult:
+        run_dir = Path(context.run_dir)
         event_path = run_dir / "events.jsonl"
         event_path.write_text("", encoding="utf-8")
         for index in range(2):
@@ -78,8 +96,7 @@ def test_oneshot_agent_session_streams_events_and_feedback(tmp_path: Path) -> No
     async def scenario() -> None:
         session = await OneShotAgentSession.start(
             FakeStreamingAdapter(),
-            run_dir=tmp_path,
-            run_kwargs={"run_dir": tmp_path},
+            context=_run_context(tmp_path),
         )
         events = [event async for event in session.events()]
         assert [event.data["step"] for event in events] == [1, 2]
@@ -131,12 +148,12 @@ def test_oneshot_close_terminates_running_cli_process(tmp_path: Path) -> None:
         )
         task_path = Path("benchmarks/examples/hello/task.yaml").resolve()
         session = await adapter.start_session(
-            load_task(task_path),
-            task_dir=task_path.parent,
-            run_dir=run_dir,
-            environment_project=None,
-            environment_network=None,
-            seed=1,
+            AgentRunContext(
+                task=load_task(task_path),
+                task_dir=task_path.parent,
+                run_dir=run_dir,
+                seed=1,
+            )
         )
         try:
             await asyncio.sleep(0.2)
@@ -150,7 +167,7 @@ def test_oneshot_close_terminates_running_cli_process(tmp_path: Path) -> None:
 
 
 def test_oneshot_session_tracks_live_budget_usage(tmp_path: Path) -> None:
-    session = OneShotAgentSession(object(), run_kwargs={}, run_dir=tmp_path)
+    session = OneShotAgentSession(object(), context=_run_context(tmp_path))
     session._account(AgentEvent(type="model.request", data={}))
     session._account(
         AgentEvent(
@@ -188,7 +205,7 @@ def test_oneshot_session_tracks_live_budget_usage(tmp_path: Path) -> None:
 def test_oneshot_session_rejects_invalid_usage_without_corrupting_checkpoint_metrics(
     tmp_path: Path, event: AgentEvent
 ) -> None:
-    session = OneShotAgentSession(object(), run_kwargs={}, run_dir=tmp_path)
+    session = OneShotAgentSession(object(), context=_run_context(tmp_path))
 
     session._account(event)
 
@@ -198,12 +215,14 @@ def test_oneshot_session_rejects_invalid_usage_without_corrupting_checkpoint_met
 
 def test_oneshot_checkpoint_cursor_stops_at_last_yielded_event(tmp_path: Path) -> None:
     class BatchedAdapter:
-        def run(self, *, run_dir: Path, **_kwargs) -> AgentResult:
+        def run(self, context: AgentRunContext, **_kwargs) -> AgentResult:
             lines = [
                 json.dumps({"type": "progress.updated", "data": {"step": step}}) + "\n"
                 for step in (1, 2, 3)
             ]
-            (run_dir / "events.jsonl").write_text("".join(lines), encoding="utf-8")
+            (Path(context.run_dir) / "events.jsonl").write_text(
+                "".join(lines), encoding="utf-8"
+            )
             return AgentResult(
                 returncode=0,
                 timed_out=False,
@@ -215,7 +234,7 @@ def test_oneshot_checkpoint_cursor_stops_at_last_yielded_event(tmp_path: Path) -
 
     async def scenario() -> None:
         session = await OneShotAgentSession.start(
-            BatchedAdapter(), run_kwargs={"run_dir": tmp_path}, run_dir=tmp_path
+            BatchedAdapter(), context=_run_context(tmp_path)
         )
         stream = session.events()
         first = await anext(stream)
@@ -236,7 +255,7 @@ def test_oneshot_checkpoint_cursor_stops_at_last_yielded_event(tmp_path: Path) -
 def test_oneshot_session_refuses_symlinked_agent_event_log(tmp_path: Path) -> None:
     outside = tmp_path / "outside.jsonl"
     outside.write_text('{"type":"model.usage","data":{"total_tokens":999}}\n')
-    session = OneShotAgentSession(object(), run_kwargs={}, run_dir=tmp_path)
+    session = OneShotAgentSession(object(), context=_run_context(tmp_path))
     session.event_path.symlink_to(outside)
 
     async def scenario() -> None:
@@ -383,8 +402,7 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
     run_dir.mkdir()
     session = ContainerPiSession(
         object(),
-        run_kwargs={},
-        run_dir=run_dir,
+        context=_run_context(run_dir),
     )
     asyncio.run(session.close("objective-complete"))
 
@@ -415,7 +433,7 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
 def test_usage_accounting_rules_match_between_oneshot_and_pi_sessions(
     tmp_path: Path, event: AgentEvent
 ) -> None:
-    oneshot = OneShotAgentSession(object(), run_kwargs={}, run_dir=tmp_path)
+    oneshot = OneShotAgentSession(object(), context=_run_context(tmp_path))
     oneshot._account(event)
 
     pi_session = object.__new__(ContainerPiRpcSession)
@@ -430,3 +448,83 @@ def test_usage_accounting_rules_match_between_oneshot_and_pi_sessions(
     assert oneshot.usage_telemetry_valid is False
     assert pi_session._metrics.as_dict() == UsageMetrics().as_dict()
     assert pi_session._budget_exceeded == "invalid_telemetry"
+
+
+def test_session_phase_tracker_records_valid_transitions_in_trace(tmp_path: Path) -> None:
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test")
+    tracker = SessionPhaseTracker(trace=trace)
+
+    assert tracker.phase is SessionPhase.CREATED
+    tracker.transition(SessionPhase.STARTED)
+    tracker.transition(SessionPhase.PROMPTING)
+    tracker.transition(SessionPhase.SETTLED)
+    tracker.transition(SessionPhase.PROMPTING, cause="steer_prompt")
+    tracker.transition(SessionPhase.CLOSED, reason="objective-complete")
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    phases = [row["data"] for row in rows if row["type"] == "agent.session.phase"]
+    assert [(item["from"], item["to"]) for item in phases] == [
+        ("created", "started"),
+        ("started", "prompting"),
+        ("prompting", "settled"),
+        ("settled", "prompting"),
+        ("prompting", "closed"),
+    ]
+    assert phases[-1]["reason"] == "objective-complete"
+    assert phases[3]["cause"] == "steer_prompt"
+
+
+def test_session_phase_tracker_rejects_invalid_and_ignores_repeated_transitions() -> None:
+    tracker = SessionPhaseTracker()
+
+    with pytest.raises(ValueError):
+        tracker.transition(SessionPhase.SETTLED)  # created -> settled skips startup
+
+    tracker.transition(SessionPhase.STARTED)
+    tracker.transition(SessionPhase.CLOSED)
+    with pytest.raises(ValueError):
+        tracker.transition(SessionPhase.PROMPTING)  # terminal phase
+
+    restarted = SessionPhaseTracker()
+    restarted.transition(SessionPhase.STARTED)
+    assert restarted.transition(SessionPhase.STARTED) is SessionPhase.STARTED  # no-op
+
+
+def test_agent_capabilities_declare_the_steer_degradation_explicitly() -> None:
+    assert ONE_SHOT_AGENT_CAPABILITIES.live_steer is False
+    assert ONE_SHOT_AGENT_CAPABILITIES.typed_event_channel == "shared_event_file"
+    assert RPC_AGENT_CAPABILITIES.live_steer is True
+    assert RPC_AGENT_CAPABILITIES.typed_event_channel == "agent_event_file"
+    assert "submission_inbox" in RPC_AGENT_CAPABILITIES.submission_channels
+
+
+def test_agent_run_context_is_frozen_and_derived_by_replace(tmp_path: Path) -> None:
+    context = AgentRunContext(
+        task=object(),
+        task_dir=tmp_path,
+        run_dir=tmp_path,
+        seed=7,
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        context.seed = 8  # type: ignore[misc]
+
+    derived = dataclasses_replace(context, gateway_url="http://gateway", gateway_token="t")
+    assert derived.gateway_enabled is True
+    assert context.gateway_enabled is False  # the original is untouched
+    assert derived.seed == 7
+
+
+def test_oneshot_session_exposes_capabilities_and_phase_lifecycle(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = await OneShotAgentSession.start(
+            FakeStreamingAdapter(), context=_run_context(tmp_path)
+        )
+        assert session.capabilities == ONE_SHOT_AGENT_CAPABILITIES
+        assert session.phase.phase is SessionPhase.STARTED
+        await session.close("objective-complete")
+        assert session.phase.phase is SessionPhase.CLOSED
+
+    asyncio.run(scenario())

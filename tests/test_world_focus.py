@@ -200,3 +200,72 @@ def test_focus_reference_comes_from_request_and_claims_stay_unverified() -> None
     assert focus.reference == "Extract the real flag"
     item = next(item for item in focus.established if item.id == "obs")
     assert item.epistemic_status == "claim"
+
+
+def test_estimate_tokens_is_deterministic_and_offline() -> None:
+    from harness.world import CHARS_PER_TOKEN, estimate_tokens
+
+    assert estimate_tokens("") == 0
+    assert estimate_tokens("a" * CHARS_PER_TOKEN) == 1
+    assert estimate_tokens("a" * (CHARS_PER_TOKEN + 1)) == 2
+    assert estimate_tokens("hello world, harness") == 5
+
+
+def test_token_budget_bounds_the_rendered_context() -> None:
+    snapshot = WorldSnapshot(
+        goals={"goal-1": Goal(id="goal-1", description="Find target", status="active")},
+        observations={
+            f"obs-{index}": _verified(f"obs-{index}", "network.port", port=index)
+            for index in range(60)
+        },
+    )
+    token_budget = 600
+    builder = WorldContextBuilder(token_budget=token_budget, max_observations=60)
+    focus = builder.build_focus(snapshot, reference="Find target")
+    rendered = builder.render(snapshot, query="Find target", focus=focus)
+
+    from harness.world import estimate_tokens
+
+    # The whole agent-facing projection (focus + body) stays inside the budget
+    # up to the join between the two blocks.
+    assert estimate_tokens(rendered) <= token_budget + 1
+    assert "context truncated to character budget" in rendered
+
+
+def test_token_budget_preserves_the_focus_share_first() -> None:
+    snapshot = WorldSnapshot(
+        goals={"goal-1": Goal(id="goal-1", description="Find target", status="active")},
+        observations={
+            f"obs-{index}": _verified(f"obs-{index}", "network.port", port=index)
+            for index in range(60)
+        },
+    )
+    builder = WorldContextBuilder(token_budget=600, max_observations=60)
+    focus = builder.build_focus(snapshot, reference="Find target")
+    rendered = builder.render(snapshot, query="Find target", focus=focus)
+
+    marker = rendered.index("# Red Harness World Context")
+    focus_text = rendered[:marker]
+    assert focus_text.startswith("## Focus")
+    # A quarter of the token budget is reserved for the focus block.
+    assert len(focus_text) <= 600 * 4 // 4
+
+
+def test_token_budget_none_keeps_legacy_character_budgets() -> None:
+    snapshot = WorldSnapshot(
+        goals={"goal-1": Goal(id="goal-1", description="Find target", status="active")},
+        observations={"port": _verified("port", "network.port", port=8080)},
+    )
+    legacy = WorldContextBuilder()
+    budgeted = WorldContextBuilder(token_budget=None)
+
+    assert legacy.max_chars == budgeted.max_chars
+    assert legacy.focus_max_chars == budgeted.focus_max_chars
+    assert legacy.render(snapshot) == budgeted.render(snapshot)
+
+
+def test_token_budget_must_be_positive() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        WorldContextBuilder(token_budget=0)

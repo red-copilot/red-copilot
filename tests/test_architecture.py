@@ -38,6 +38,7 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.aci",
         "harness.action_verifier",
         "harness.agent",
+        "harness.agent_events",
         "harness.agent_workspace",
         "harness.benchmark.base",
         "harness.benchmark.protocol",

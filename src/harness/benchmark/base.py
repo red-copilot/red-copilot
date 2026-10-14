@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
 from ..models import ObjectiveSpec
+
+# Externally evaluated 1-hour benchmarks (such as TSecBench) have no local
+# action-level verifier, so they use a wider exploration horizon before stopping.
+BENCHMARK_MAX_UNCONFIRMED_PROGRESS = 160
+BENCHMARK_MAX_REPLANS = 16
 
 
 class BenchmarkCase(BaseModel):
@@ -49,6 +55,22 @@ class EvaluationResult(BaseModel):
     message: str | None = None
     milestones: dict[str, bool] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass
+class AdapterSessionState:
+    """Per-session bookkeeping shared by benchmark adapters.
+
+    Adapters keep the provisioned case, every submission result seen so far
+    (``evaluate`` aggregates them) and a closed flag so teardown stays
+    idempotent. Adapter-specific state (gateway session ids, hint flags) lives
+    in ``extras``.
+    """
+
+    case: BenchmarkCase
+    submissions: list[SubmissionResult] = field(default_factory=list)
+    closed: bool = False
+    extras: dict[str, Any] = field(default_factory=dict)
 
 
 class BenchmarkAdapter(Protocol):

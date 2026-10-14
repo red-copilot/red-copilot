@@ -25,3 +25,9 @@ Only propose after WLD-02 ablations establish retrieval bottlenecks; compare aga
 Accept: measurable success gain relative to costs, reproducible offline model availability and rollback path.
 
 **Non-goals:** full causal simulator, mandatory graph planner, vector database without observed value.
+
+### WLD-05 [~] P2 — Token-budget-aware context assembly
+Deliver: bound `world.context.txt` (focus plus state projection) by an offline token estimate instead of character counts alone.
+Accept: rendered context stays within the configured token budget with the focus share preserved; `None` keeps legacy character budgets byte-identical.
+
+`WorldContextBuilder` gains `token_budget` (`src/harness/world/context.py`): a budget tightens the character budgets (4 chars/token offline heuristic, no vocabulary dependency; billing stays on provider telemetry), reserving up to a quarter for the focus block and the remainder for the state projection. `estimate_tokens` is exported for reuse, `bootstrap_solver`/`Orchestrator.run` accept `context_token_budget`, and `harness run --context-token-budget` exposes it. Validation on 2026-10-14: `tests/test_world_focus.py` passed (13) including budget-bound, focus-share and legacy-identity cases; full suite and Ruff passed. Live-run ablation (does a token budget improve round briefs on real tasks?) remains before acceptance.

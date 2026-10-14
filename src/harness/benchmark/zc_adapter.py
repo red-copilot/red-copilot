@@ -9,6 +9,7 @@ import httpx
 
 from ..models import ObjectiveSpec
 from .base import (
+    AdapterSessionState,
     BenchmarkAdapter,
     BenchmarkCase,
     BenchmarkSession,
@@ -192,22 +193,6 @@ class ZCClient:
             message=data.get("message", "Vulnerability submitted"),
         )
 
-    async def update_vuln(self, vuln_code: str, payload: dict[str, Any]) -> bool:
-        """Supplement or update an existing vulnerability report."""
-        if self._mock_mode:
-            if vuln_code in self._mock_submissions:
-                self._mock_submissions[vuln_code]["payload"].update(payload)
-                return True
-            return False
-
-        client = self._get_client()
-        response = await client.post(
-            "/whitehat/vuln/update_vuln",
-            json={"vuln_code": vuln_code, **payload},
-        )
-        response.raise_for_status()
-        return bool(response.json().get("success", True))
-
     async def gateway_sessions(self, session_id: str) -> dict[str, Any]:
         """Fetch audit log metrics for the AI Gateway session."""
         if self._mock_mode:
@@ -268,29 +253,27 @@ class ZCBenchmarkAdapter(BenchmarkAdapter):
         self.client = client
         self.project_code = project_code
         self.upstream_llm_url = upstream_llm_url
-        self._raw_cases: dict[str, BenchmarkCase] = {}
-        self._sessions: dict[str, dict[str, Any]] = {}
+        self._sessions: dict[str, AdapterSessionState] = {}
 
     async def discover(self) -> list[BenchmarkCase]:
         """Discover available ZC projects / challenges."""
         projects = await self.client.search_projects()
         cases: list[BenchmarkCase] = []
-        self._raw_cases.clear()
         for p in projects:
-            case = BenchmarkCase(
-                id=p.code,
-                benchmark="zc",
-                domain="web",
-                difficulty="medium",
-                metadata={
-                    "name": p.name,
-                    "targets": p.targets,
-                    "vuln_types": p.vuln_types,
-                    "status": p.status,
-                },
+            cases.append(
+                BenchmarkCase(
+                    id=p.code,
+                    benchmark="zc",
+                    domain="web",
+                    difficulty="medium",
+                    metadata={
+                        "name": p.name,
+                        "targets": p.targets,
+                        "vuln_types": p.vuln_types,
+                        "status": p.status,
+                    },
+                )
             )
-            self._raw_cases[p.code] = case
-            cases.append(case)
         return cases
 
     async def provision(self, case: BenchmarkCase) -> BenchmarkSession:
@@ -325,12 +308,9 @@ class ZCBenchmarkAdapter(BenchmarkAdapter):
                 "gateway_url": route.gateway_url,
             },
         )
-        self._sessions[session.id] = {
-            "case": case,
-            "submissions": [],
-            "closed": False,
-            "session_id": route.session_id,
-        }
+        self._sessions[session.id] = AdapterSessionState(
+            case=case, extras={"session_id": route.session_id}
+        )
         return session
 
     async def submit(
@@ -363,7 +343,7 @@ class ZCBenchmarkAdapter(BenchmarkAdapter):
                     "message": res.message,
                 },
             )
-            state["submissions"].append(result)
+            state.submissions.append(result)
             return result
 
         if submission.type == "flag":
@@ -374,7 +354,7 @@ class ZCBenchmarkAdapter(BenchmarkAdapter):
                 completed=accepted,
                 metadata={"flag": submission.value, "correct": accepted},
             )
-            state["submissions"].append(result)
+            state.submissions.append(result)
             return result
 
         return SubmissionResult(
@@ -388,11 +368,11 @@ class ZCBenchmarkAdapter(BenchmarkAdapter):
         if state is None:
             return EvaluationResult(success=False, score=0.0, message="Session not found")
 
-        submissions: list[SubmissionResult] = state["submissions"]
+        submissions: list[SubmissionResult] = state.submissions
         accepted_subs = [s for s in submissions if s.accepted]
         total_score = sum(s.score_delta for s in accepted_subs)
 
-        gateway_data = await self.client.gateway_sessions(state["session_id"])
+        gateway_data = await self.client.gateway_sessions(state.extras["session_id"])
         autonomy_score = gateway_data.get("autonomy_score", 0.0)
         final_score = total_score * (1.0 + autonomy_score)
 
@@ -416,8 +396,8 @@ class ZCBenchmarkAdapter(BenchmarkAdapter):
     async def teardown(self, session: BenchmarkSession) -> None:
         """Tear down and release benchmark resources."""
         state = self._sessions.get(session.id)
-        if state is None or state["closed"]:
+        if state is None or state.closed:
             return
-        state["closed"] = True
+        state.closed = True
         await self.client.close()
 

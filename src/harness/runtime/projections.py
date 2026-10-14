@@ -7,7 +7,13 @@ from pathlib import Path
 from ..models import AgentSpec
 from ..progress import ProgressLedger
 from ..solver_loop import SolverLoop
-from ..world import Goal, WorldContextBuilder, WorldRepository
+from ..world import (
+    Goal,
+    WorldContextBuilder,
+    WorldRepository,
+    agent_actor,
+    is_bookkeeping_record,
+)
 
 # Bounds so a summary of a long run stays a readable artifact.
 MAX_SUMMARY_ITEMS = 40
@@ -45,7 +51,7 @@ def world_result(
     return {
         "revision": world.snapshot.revision,
         "agent_authored_records": sum(
-            1 for event in world.events() if event.actor == f"agent:{agent_id}"
+            1 for event in world.events() if event.actor == agent_actor(agent_id)
         ),
         "aci": {
             "accepted_events": solver_loop.stats.aci_accepted,
@@ -123,6 +129,7 @@ def run_summary(
             ("artifact", snapshot.artifacts),
         )
         for record in store.values()
+        if not is_bookkeeping_record(record)
     ][:MAX_SUMMARY_ITEMS]
     intents = [
         {
@@ -130,7 +137,7 @@ def run_summary(
             "type": record.type,
             "status": record.status,
             "target": record.target,
-            "skill_id": (record.attributes or {}).get("skill_id"),
+            "skill_id": record.skill_id,
         }
         for record in snapshot.actions.values()
     ][:MAX_SUMMARY_ITEMS]

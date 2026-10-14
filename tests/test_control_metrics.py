@@ -25,7 +25,11 @@ MAX_MODULES = 64
 # Raised to 16,000 for deterministic fact extraction from tool output
 # (harness/extract.py plus its adapter and ACI wiring), which is what lets the
 # fact/intent graph grow from what a run actually observed.
-MAX_SRC_LINES = 16_000
+# Raised to 16,400 for the agent-session contract consolidation: the explicit
+# session phase machine, AgentCapabilities/AgentRunContext (one typed parameter
+# object replacing 12+ duplicated adapter kwargs), single-source typed-event
+# schemas (harness/agent_events.py), and token-budget-aware context assembly.
+MAX_SRC_LINES = 16_400
 
 
 def _module_names() -> set[str]:

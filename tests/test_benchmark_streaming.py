@@ -474,8 +474,8 @@ class FakeAgentAdapter:
     def __init__(self) -> None:
         self.session: FakeSession | None = None
 
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = FakeSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = FakeSession(context.run_dir)
         return self.session
 
 
@@ -487,8 +487,8 @@ class CrashingFakeSession(FakeSession):
 
 
 class CrashingFakeAgentAdapter(FakeAgentAdapter):
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = CrashingFakeSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = CrashingFakeSession(context.run_dir)
         return self.session
 
 
@@ -509,8 +509,8 @@ class TimedOutFakeSession(FakeSession):
 
 
 class TimedOutFakeAgentAdapter(FakeAgentAdapter):
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = TimedOutFakeSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = TimedOutFakeSession(context.run_dir)
         return self.session
 
 
@@ -531,8 +531,8 @@ class BudgetExceededFakeSession(FakeSession):
 
 
 class BudgetExceededFakeAgentAdapter(FakeAgentAdapter):
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = BudgetExceededFakeSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = BudgetExceededFakeSession(context.run_dir)
         return self.session
 
 
@@ -560,8 +560,8 @@ class SolverDetectedBudgetSession(FakeSession):
 
 
 class SolverDetectedBudgetAgentAdapter(FakeAgentAdapter):
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = SolverDetectedBudgetSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = SolverDetectedBudgetSession(context.run_dir)
         return self.session
 
 
@@ -582,8 +582,8 @@ class WaitingFakeAgentAdapter(FakeAgentAdapter):
         super().__init__()
         self.started = started
 
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = WaitingFakeSession(run_dir, self.started)
+    async def start_session(self, context, **_kwargs):
+        self.session = WaitingFakeSession(context.run_dir, self.started)
         return self.session
 
 
@@ -874,8 +874,8 @@ class MaliciousClaimSession(FakeSession):
 
 
 class MaliciousClaimAgentAdapter(FakeAgentAdapter):
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = MaliciousClaimSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = MaliciousClaimSession(context.run_dir)
         return self.session
 
 
@@ -931,8 +931,8 @@ class CrashAfterToolDispatchSession(FakeSession):
 
 
 class CrashAfterToolDispatchAgentAdapter(FakeAgentAdapter):
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = CrashAfterToolDispatchSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = CrashAfterToolDispatchSession(context.run_dir)
         return self.session
 
 
@@ -1038,8 +1038,8 @@ def test_checkpoint_failure_after_feedback_is_rejected_by_event_cursor(monkeypat
             )
 
     class FeedbackAgent(FakeAgentAdapter):
-        async def start_session(self, *, run_dir: Path, **_kwargs):
-            self.session = FeedbackSession(run_dir)
+        async def start_session(self, context, **_kwargs):
+            self.session = FeedbackSession(context.run_dir)
             return self.session
 
     fake_agent = FeedbackAgent()
@@ -1101,8 +1101,8 @@ def test_checkpoint_failure_after_tool_effect_keeps_prior_dispatch_pending(
             )
 
     class EffectAgent(FakeAgentAdapter):
-        async def start_session(self, *, run_dir: Path, **_kwargs):
-            self.session = EffectSession(run_dir)
+        async def start_session(self, context, **_kwargs):
+            self.session = EffectSession(context.run_dir)
             return self.session
 
     fake_agent = EffectAgent()
@@ -1230,8 +1230,8 @@ class ReactiveSession(FakeSession):
 
 
 class ReactiveAgentAdapter(FakeAgentAdapter):
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = ReactiveSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = ReactiveSession(context.run_dir)
         return self.session
 
 

@@ -29,10 +29,6 @@ DEFAULT_MAX_REPLANS = 8
 # hard no-progress stop. This is the safety net for a loop with no action-level
 # verifier (for example a benchmark that only scores submitted flags).
 DEFAULT_MAX_UNCONFIRMED_PROGRESS = 40
-# Externally evaluated 1-hour benchmarks (such as TSecBench) have no local
-# action-level verifier, so they use a wider exploration horizon before stopping.
-BENCHMARK_MAX_UNCONFIRMED_PROGRESS = 160
-BENCHMARK_MAX_REPLANS = 16
 NO_PROGRESS_REPLAN_THRESHOLD = 2
 LOW_BUDGET_FRACTION = 0.05
 

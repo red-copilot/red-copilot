@@ -2,10 +2,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from harness.progress import ProgressLedger
-from harness.solver_policy import (
+from harness.benchmark.base import (
     BENCHMARK_MAX_REPLANS,
     BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
+)
+from harness.progress import ProgressLedger
+from harness.solver_policy import (
     SolverAction,
     decide_solver_action,
 )

@@ -4,7 +4,10 @@ Harness is one deployable Python application, not a collection of microservices.
 Modules are separated by responsibilities and explicit composition points.
 The single closed feedback loop that these modules form is described in
 [control-theory.md](control-theory.md); the Agent-facing cognition layer is
-described in [agent-engineering.md](agent-engineering.md).
+described in [agent-engineering.md](agent-engineering.md). The agent-side
+architecture as a whole — adapter/session contracts, solver loop, world
+contracts, trust tiers, recovery — is consolidated in
+[agent-architecture.md](agent-architecture.md) (Chinese).
 
 - `runtime/`: application-level composition, solver initialization, run state.
 - `world/`: domain state, event storage, snapshots, retrieval. No benchmark or HTTP dependencies.

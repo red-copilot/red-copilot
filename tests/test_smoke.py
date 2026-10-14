@@ -274,10 +274,10 @@ class _ResumeAdapter:
         self.resume_session_id = None
         self.session_task = None
 
-    async def start_session(self, *, run_dir: Path, task, resume_session_id=None, **_kwargs):
-        self.resume_session_id = resume_session_id
-        self.session_task = task
-        return _ResumeSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.resume_session_id = context.resume_session_id
+        self.session_task = context.task
+        return _ResumeSession(context.run_dir)
 
 
 def _prepare_incomplete_pi_run(
@@ -383,10 +383,10 @@ def test_failed_resume_preserves_checkpoint_and_environment_state(monkeypatch, t
             self.closed = True
 
     class _FailingAdapter(_ResumeAdapter):
-        async def start_session(self, *, run_dir: Path, task, resume_session_id=None, **_kwargs):
-            self.resume_session_id = resume_session_id
-            self.session_task = task
-            self.session = _FailingSession(run_dir)
+        async def start_session(self, context, **_kwargs):
+            self.resume_session_id = context.resume_session_id
+            self.session_task = context.task
+            self.session = _FailingSession(context.run_dir)
             return self.session
 
     task_path = Path("benchmarks/examples/hello/task.yaml")
@@ -501,8 +501,8 @@ class _LiveWorldAdapter:
     def __init__(self) -> None:
         self.session: _LiveWorldSession | None = None
 
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = _LiveWorldSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = _LiveWorldSession(context.run_dir)
         return self.session
 
 
@@ -587,8 +587,8 @@ class _NoProgressAdapter:
     def __init__(self) -> None:
         self.session = None
 
-    async def start_session(self, *, run_dir: Path, **_kwargs):
-        self.session = _NoProgressSession(run_dir)
+    async def start_session(self, context, **_kwargs):
+        self.session = _NoProgressSession(context.run_dir)
         return self.session
 
 

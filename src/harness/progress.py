@@ -61,8 +61,8 @@ class ProgressLedger(BaseModel):
     unconfirmed_progress: int = 0
     replan_count: int = 0
     failed_skill_counts: dict[str, int] = Field(default_factory=dict)
-    # tool:fingerprint -> attempts that produced no new semantic fact, so a run
-    # that keeps re-trying the same dead end can be told about it.
+    # Tool or argument-family -> attempts that produced no new semantic fact,
+    # so a run that keeps re-trying the same dead end can be told about it.
     no_gain_tools: dict[str, int] = Field(default_factory=dict)
     reconciled_actions: dict[str, str] = Field(default_factory=dict)
     # Correlates legacy events that predate tool_call_id, so replay uses the
@@ -103,9 +103,6 @@ class ProgressLedger(BaseModel):
                 "status": "running",
                 "skill_id": (self.action_intent or {}).get("skill_id"),
             }
-            fingerprint = event.data.get("args_fingerprint")
-            if isinstance(fingerprint, str) and fingerprint:
-                action["args_fingerprint"] = fingerprint
             family = event.data.get("args_family")
             if isinstance(family, str) and family:
                 action["args_family"] = family
@@ -127,9 +124,6 @@ class ProgressLedger(BaseModel):
                 "skill_id": active_action.get("skill_id")
                 or (self.action_intent or {}).get("skill_id"),
             }
-            fingerprint = active_action.get("args_fingerprint")
-            if isinstance(fingerprint, str) and fingerprint:
-                action["args_fingerprint"] = fingerprint
             family = active_action.get("args_family")
             if isinstance(family, str) and family:
                 action["args_family"] = family

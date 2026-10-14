@@ -11,12 +11,12 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from ..agent import AgentResult, build_agent_adapter
+from ..agent import AgentResult, AgentRunContext, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
-from ..session import AgentObservation
-from ..solver_policy import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
+from ..session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
+from .base import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
-from ..budget import enforced_budget_limits
+from ..budget import apply_budget_limits
 from ..runtime import bootstrap_solver
 from ..agent_workspace import create_agent_workspace, sync_agent_workspace
 from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
@@ -209,13 +209,7 @@ class BenchmarkRunner:
                 )
                 for target in session.targets
             ]
-            budget_limits, ignored_budgets = enforced_budget_limits(budgets)
-            if ignored_budgets:
-                trace.emit(
-                    "budget.ignored",
-                    actor="harness",
-                    data={"ignored": ignored_budgets, "enforced": ["wall_time"]},
-                )
+            budget_limits = apply_budget_limits(budgets, trace)
             runtime = bootstrap_solver(
                 run_dir=run_dir,
                 trace=trace,
@@ -433,24 +427,36 @@ class BenchmarkRunner:
                 allow_host_agent=allow_host_agent,
                 trace=trace,
             )
-            run_kwargs = {
-                "task": task,
-                "task_dir": agent_workspace,
-                # Externally provisioned benchmarks have no verifier-bearing task
-                # tree to sanitize; the agent workspace is the task view. Passing
-                # it directly avoids the local-run guard that rejects a task
-                # directory nested under the authoritative run root.
-                "agent_task_dir": agent_workspace,
-                "run_dir": agent_workspace,
-                "environment_project": None,
-                "environment_network": None,
-                "seed": seed,
-            }
+            # Unknown adapters (test doubles, future types) degrade to the
+            # least-capable contract rather than failing the run.
+            capabilities = getattr(
+                adapter_instance, "capabilities", ONE_SHOT_AGENT_CAPABILITIES
+            )
+            trace.emit(
+                "agent.capabilities",
+                actor="harness",
+                data={
+                    "live_steer": capabilities.live_steer,
+                    "typed_event_channel": capabilities.typed_event_channel,
+                    "submission_channels": list(capabilities.submission_channels),
+                },
+            )
+            # Externally provisioned benchmarks have no verifier-bearing task
+            # tree to sanitize; the agent workspace is the task view. Passing
+            # it directly avoids the local-run guard that rejects a task
+            # directory nested under the authoritative run root.
+            run_context = AgentRunContext(
+                task=task,
+                task_dir=agent_workspace,
+                agent_task_dir=agent_workspace,
+                run_dir=agent_workspace,
+                seed=seed,
+            )
 
             start_session = getattr(adapter_instance, "start_session", None)
             completed_online = False
             if callable(start_session):
-                agent_session = await start_session(**run_kwargs)
+                agent_session = await start_session(run_context)
                 try:
                     await save_session_checkpoint(
                         run_dir=run_dir,
@@ -526,7 +532,7 @@ class BenchmarkRunner:
                                 )
                     raise
             else:
-                agent_result = adapter_instance.run(**run_kwargs)
+                agent_result = adapter_instance.run(run_context)
 
             solver_loop.finish_ingest()
 

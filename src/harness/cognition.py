@@ -12,20 +12,23 @@ enabled intent, which preserves the legacy planner behavior for existing tasks.
 """
 from __future__ import annotations
 
-import fnmatch
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
 
-from .planner import HeuristicSkillPlanner, PlanCandidate, Planner, _selector_matches
+from .planner import (
+    HeuristicSkillPlanner,
+    PlanCandidate,
+    Planner,
+    _selector_matches,
+    selector_matches_focus_item,
+)
 from .progress import ProgressLedger
 from .skills import SkillSpec, StateSelector
-from .world.models import WorldSnapshot
+from .world.models import TRUST_RANK, WorldSnapshot, is_bookkeeping_record
 
 # How many prerequisite hops the backward chain may follow from a goal target.
 MAX_FRONTIER_DEPTH = 3
-_TRUST_RANK = {"unclassified": 1, "claim": 1, "evidence": 2, "verified": 3}
 _ACTIVE_GOAL_STATUSES = frozenset({"pending", "active"})
 
 
@@ -35,15 +38,11 @@ def _selector_covers(produced: StateSelector, target: StateSelector) -> bool:
     ``target`` acts as the pattern (matching ``_selector_matches`` semantics);
     the produced state must meet or exceed the target's minimum trust.
     """
-    if produced.kind != target.kind:
+    if not selector_matches_focus_item(target, produced):
         return False
-    if not fnmatch.fnmatchcase(produced.type, target.type):
-        return False
-    if target.scope is not None and (
-        produced.scope is None or not fnmatch.fnmatchcase(produced.scope, target.scope)
-    ):
-        return False
-    return _TRUST_RANK.get(produced.minimum_trust, 0) >= _TRUST_RANK.get(target.minimum_trust, 0)
+    return TRUST_RANK.get(produced.minimum_trust, 0) >= TRUST_RANK.get(
+        target.minimum_trust, 0
+    )
 
 
 def _selector_signature(selector: StateSelector) -> tuple[str, str, str | None, str]:
@@ -71,7 +70,6 @@ class FactNode:
     type: str
     scope: str | None = None
     trust: str = "claim"
-    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -80,13 +78,9 @@ class IntentNode:
 
     id: str
     description: str = ""
-    domain: str = "general"
     requires: list[StateSelector] = field(default_factory=list)
     produces: list[StateSelector] = field(default_factory=list)
     status: str = "pending"  # pending | enabled | done
-    cost: float = 0.5
-    risk: float = 0.5
-    noise: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -96,7 +90,6 @@ class FrontierIntent:
     intent: IntentNode
     depth: int = 0
     goal_hit: bool = False
-    goal_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -136,14 +129,12 @@ class IntentFactDAG:
                 scope = getattr(item, "scope", None)
                 provenance = getattr(item, "provenance", None)
                 trust = getattr(provenance, "epistemic_status", "claim")
-                attributes = getattr(item, "attributes", {}) or getattr(item, "content", {})
                 self.facts[item.id] = FactNode(
                     id=item.id,
                     kind=kind,
                     type=type_name,
                     scope=scope,
                     trust=trust,
-                    data=dict(attributes) if isinstance(attributes, dict) else {},
                 )
 
     def _ingest_intents(self, skills: list[SkillSpec], snapshot: WorldSnapshot) -> None:
@@ -161,13 +152,9 @@ class IntentFactDAG:
             self.intents[skill.id] = IntentNode(
                 id=skill.id,
                 description=skill.description,
-                domain=skill.domain,
                 requires=list(skill.requires),
                 produces=list(skill.produces),
                 status=status,
-                cost=skill.cost,
-                risk=skill.risk,
-                noise=skill.noise,
             )
 
     def enabled_intents(self) -> list[IntentNode]:
@@ -178,28 +165,33 @@ class IntentFactDAG:
             return []
         return _unmet_goal_targets(self.snapshot)
 
-    def frontier(self) -> list[FrontierIntent]:
+    def frontier(
+        self, *, targets: list[tuple[str, StateSelector]] | None = None
+    ) -> list[FrontierIntent]:
         """Return the enabled intents that advance an unmet goal target.
 
         Seeds are goal target states; an intent whose ``produces`` covers a seed
         is a direct goal hit. When such an intent is still pending, its unmet
         ``requires`` become new seeds one hop deeper, bounded by
         ``MAX_FRONTIER_DEPTH``. The result is deterministic and only contains
-        intents whose preconditions are satisfied (``enabled``).
+        intents whose preconditions are satisfied (``enabled``). Callers that
+        already computed ``goal_targets()`` pass them as ``targets`` so the
+        unmet-state scan runs once.
         """
         enabled = self.enabled_intents()
         snapshot = self.snapshot
-        targets = _unmet_goal_targets(snapshot) if snapshot is not None else []
+        if targets is None:
+            targets = _unmet_goal_targets(snapshot) if snapshot is not None else []
         if snapshot is None or not targets:
             return [FrontierIntent(intent=intent) for intent in _sorted_intents(enabled)]
 
         frontier: dict[str, FrontierIntent] = {}
         expanded: set[tuple[str, str, str | None, str, int]] = set()
-        pending: deque[tuple[StateSelector, int, tuple[str, ...]]] = deque(
-            (selector, 0, (goal_id,)) for goal_id, selector in targets
+        pending: deque[tuple[StateSelector, int]] = deque(
+            (selector, 0) for _, selector in targets
         )
         while pending:
-            selector, depth, goal_ids = pending.popleft()
+            selector, depth = pending.popleft()
             signature = (*_selector_signature(selector), depth)
             if signature in expanded:
                 continue
@@ -210,24 +202,18 @@ class IntentFactDAG:
                 ):
                     continue
                 if intent.status == "enabled":
-                    _record_frontier(frontier, intent, depth=depth, goal_ids=goal_ids)
+                    _record_frontier(frontier, intent, depth=depth)
                 if depth + 1 > MAX_FRONTIER_DEPTH:
                     continue
                 for requirement in intent.requires:
                     if not _selector_matches(snapshot, requirement):
-                        pending.append((requirement, depth + 1, goal_ids))
+                        pending.append((requirement, depth + 1))
 
         if not frontier:
             # No skill covers the declared target: fall back to the legacy
             # all-enabled set so the loop stays live instead of stalling.
             return [FrontierIntent(intent=intent) for intent in _sorted_intents(enabled)]
         return _sorted_frontier(frontier.values())
-
-    def fact_types(self) -> set[str]:
-        return {fact.type for fact in self.facts.values()}
-
-    def as_context(self, max_chars: int = 4000) -> str:
-        return self.render_frontier(max_chars=max_chars)
 
     def render_frontier(self, *, max_chars: int = 2000) -> str:
         """Render a concise, bounded projection of the goal-driven frontier."""
@@ -245,7 +231,7 @@ class IntentFactDAG:
                 lines.append(f"- {goal_id}: {selector.kind}:{selector.type}{scope}{trust}")
             lines.append("")
 
-        frontier = self.frontier()
+        frontier = self.frontier(targets=targets)
         lines.append(f"### Actionable frontier ({len(frontier)})")
         if frontier:
             for item in frontier:
@@ -271,25 +257,16 @@ def _record_frontier(
     intent: IntentNode,
     *,
     depth: int,
-    goal_ids: tuple[str, ...],
 ) -> None:
     existing = frontier.get(intent.id)
-    merged_ids = tuple(sorted(set((existing.goal_ids if existing else ()) + goal_ids)))
-    goal_hit = depth == 0 or (existing is not None and existing.goal_hit)
-    if existing is None or depth < existing.depth or (depth == existing.depth and goal_hit):
-        frontier[intent.id] = FrontierIntent(
-            intent=intent,
-            depth=min(depth, existing.depth) if existing is not None else depth,
-            goal_hit=goal_hit,
-            goal_ids=merged_ids,
-        )
-    elif merged_ids != existing.goal_ids:
-        frontier[intent.id] = FrontierIntent(
-            intent=existing.intent,
-            depth=existing.depth,
-            goal_hit=existing.goal_hit,
-            goal_ids=merged_ids,
-        )
+    if existing is None:
+        frontier[intent.id] = FrontierIntent(intent=intent, depth=depth, goal_hit=depth == 0)
+        return
+    frontier[intent.id] = replace(
+        existing,
+        depth=min(existing.depth, depth),
+        goal_hit=existing.goal_hit or depth == 0,
+    )
 
 
 def _sorted_frontier(items: Iterable[FrontierIntent]) -> list[FrontierIntent]:
@@ -326,13 +303,13 @@ def ruled_out_intents(
 
     for action in snapshot.actions.values():
         if action.status == "failed":
-            record((action.attributes or {}).get("skill_id"), f"action {action.id} failed")
+            record(action.skill_id, f"action {action.id} failed")
     for failure in snapshot.failures.values():
         attributes = failure.attributes or {}
         skill_id = attributes.get("skill_id")
         if not isinstance(skill_id, str) and failure.action_id:
             linked = snapshot.actions.get(f"action:{failure.action_id}")
-            skill_id = (linked.attributes or {}).get("skill_id") if linked else None
+            skill_id = linked.skill_id if linked is not None else None
         record(skill_id, f"failure: {failure.message}")
     if progress is not None:
         for skill_id, count in progress.failed_skill_counts.items():
@@ -377,7 +354,7 @@ def round_brief(
         (
             fact
             for fact in dag.facts.values()
-            if fact.trust in {"evidence", "verified"} and fact.type != "tool.execution"
+            if fact.trust in {"evidence", "verified"} and not is_bookkeeping_record(fact)
         ),
         key=lambda fact: fact.id,
     )
@@ -399,7 +376,7 @@ def round_brief(
         (
             fact
             for fact in dag.facts.values()
-            if fact.trust == "claim" and fact.type != "tool.execution"
+            if fact.trust == "claim" and not is_bookkeeping_record(fact)
         ),
         key=lambda fact: fact.id,
     )

@@ -76,6 +76,7 @@ def bootstrap_solver(
     max_no_progress: int = DEFAULT_MAX_NO_PROGRESS,
     max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
     max_replans: int = DEFAULT_MAX_REPLANS,
+    context_token_budget: int | None = None,
 ) -> SolverRuntime:
     """Initialize a solver run without coupling it to a benchmark or agent.
 
@@ -104,16 +105,20 @@ def bootstrap_solver(
             )
 
     world_context_enabled, planner_enabled = solver_profile_settings(solver_profile)
-    context_builder = WorldContextBuilder(focus_enabled=world_context_enabled)
+    context_builder = WorldContextBuilder(
+        focus_enabled=world_context_enabled,
+        token_budget=context_token_budget,
+    )
     skills = load_skills(skills_root)
+    snapshot = world.snapshot
     if world_context_enabled:
-        focus = context_builder.build_focus(world.snapshot, reference=context_query)
+        focus = context_builder.build_focus(snapshot, reference=context_query)
         initial_context = context_builder.render(
-            world.snapshot,
+            snapshot,
             query=context_query,
             focus=focus,
         )
-        initial_context += "\n" + frontier_context(world.snapshot, skills)
+        initial_context += "\n" + frontier_context(snapshot, skills)
     else:
         initial_context = ""
     (run_dir / "world.context.txt").write_text(initial_context, encoding="utf-8")
@@ -143,7 +148,7 @@ def bootstrap_solver(
         trace=trace,
         actor=actor,
         context_query=context_query,
-        planned_world_revision=world.snapshot.revision,
+        planned_world_revision=snapshot.revision,
         context_builder=context_builder,
         verifier_registry=verifier_registry,
         world_inbox_path=(agent_workspace / "world.inbox.jsonl")

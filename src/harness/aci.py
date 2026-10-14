@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import uuid
-
-from pydantic import BaseModel, Field
-
+from .agent_events import (
+    ActionIntentPayload,
+    validate_typed_event,
+)
 from .extract import extract_facts
 from .progress import ProgressLedger
 from .session import AgentEvent
@@ -20,23 +20,22 @@ from .world import (
 
 
 def _id(prefix: str) -> str:
+    import uuid
+
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
-class ActionIntent(BaseModel):
-    schema_version: str = "harness/action-intent/v1"
-    action_id: str = Field(default_factory=lambda: _id("action"))
-    subgoal_id: str | None = None
-    skill_id: str | None = None
-    tool: str | None = None
-    description: str = ""
-    expected_observations: list[str] = Field(default_factory=list)
-    success_conditions: list[str] = Field(default_factory=list)
-    replan_conditions: list[str] = Field(default_factory=list)
+# Backward-compatible import path: ActionIntent predates the schema module.
+ActionIntent = ActionIntentPayload
 
 
 class TypedACI:
-    """Translate small typed Agent events into authoritative solver/world state."""
+    """Translate small typed Agent events into authoritative solver/world state.
+
+    Agent-authored payloads are validated against the single-source schemas in
+    ``agent_events``; malformed input raises before any state is touched, and
+    the solver loop turns that rejection into ``aci.feedback``.
+    """
 
     def apply(
         self,
@@ -47,22 +46,23 @@ class TypedACI:
         actor: str,
     ) -> int:
         if event.type == "action.intent":
-            progress.record_intent(ActionIntent.model_validate(event.data))
+            progress.record_intent(
+                ActionIntentPayload.model_validate(event.data)
+            )
             return 0
 
         if event.type == "world.observe":
-            data = event.data
-            summary = data.get("summary")
-            if isinstance(summary, str) and summary:
-                progress.actual_observation = summary
+            payload = validate_typed_event(event.type, event.data)
+            if payload.summary:
+                progress.actual_observation = payload.summary
             world.upsert(
                 "observation",
                 Observation(
-                    id=str(data.get("id") or _id("obs")),
-                    type=str(data["type"]),
-                    content=dict(data.get("content") or {}),
-                    confidence=data.get("confidence"),
-                    source=data.get("source"),
+                    id=payload.id or _id("obs"),
+                    type=payload.type,
+                    content=payload.content,
+                    confidence=payload.confidence,
+                    source=payload.source,
                 ),
                 actor=actor,
                 source_event_id=event.event_id,
@@ -70,15 +70,15 @@ class TypedACI:
             return 1
 
         if event.type == "world.hypothesis":
-            data = event.data
+            payload = validate_typed_event(event.type, event.data)
             world.upsert(
                 "hypothesis",
                 Hypothesis(
-                    id=str(data.get("id") or _id("hyp")),
-                    statement=str(data["statement"]),
-                    confidence=float(data.get("confidence", 0.5)),
-                    status=str(data.get("status", "open")),
-                    attributes=dict(data.get("attributes") or {}),
+                    id=payload.id or _id("hyp"),
+                    statement=payload.statement,
+                    confidence=payload.confidence,
+                    status=payload.status,
+                    attributes=payload.attributes,
                 ),
                 actor=actor,
                 source_event_id=event.event_id,
@@ -86,15 +86,15 @@ class TypedACI:
             return 1
 
         if event.type == "world.capability":
-            data = event.data
+            payload = validate_typed_event(event.type, event.data)
             world.upsert(
                 "capability",
                 Capability(
-                    id=str(data.get("id") or _id("cap")),
-                    type=str(data["type"]),
-                    subject=data.get("subject"),
-                    scope=data.get("scope"),
-                    attributes=dict(data.get("attributes") or {}),
+                    id=payload.id or _id("cap"),
+                    type=payload.type,
+                    subject=payload.subject,
+                    scope=payload.scope,
+                    attributes=payload.attributes,
                 ),
                 actor=actor,
                 source_event_id=event.event_id,
@@ -102,14 +102,14 @@ class TypedACI:
             return 1
 
         if event.type == "world.artifact":
-            data = event.data
+            payload = validate_typed_event(event.type, event.data)
             world.upsert(
                 "artifact",
                 Artifact(
-                    id=str(data.get("id") or _id("artifact")),
-                    type=str(data["type"]),
-                    uri=data.get("uri"),
-                    attributes=dict(data.get("attributes") or {}),
+                    id=payload.id or _id("artifact"),
+                    type=payload.type,
+                    uri=payload.uri,
+                    attributes=payload.attributes,
                 ),
                 actor=actor,
                 source_event_id=event.event_id,
@@ -117,16 +117,16 @@ class TypedACI:
             return 1
 
         if event.type == "world.failure":
-            data = event.data
+            payload = validate_typed_event(event.type, event.data)
             world.upsert(
                 "failure",
                 Failure(
-                    id=str(data.get("id") or _id("failure")),
-                    type=str(data["type"]),
-                    message=str(data["message"]),
-                    action_id=data.get("action_id"),
-                    recoverable=data.get("recoverable"),
-                    attributes=dict(data.get("attributes") or {}),
+                    id=payload.id or _id("failure"),
+                    type=payload.type,
+                    message=payload.message,
+                    action_id=payload.action_id,
+                    recoverable=payload.recoverable,
+                    attributes=payload.attributes,
                 ),
                 actor=actor,
                 source_event_id=event.event_id,

@@ -120,7 +120,6 @@ def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path
 
     session._consume_gateway_events()
     session._consume_gateway_events()
-    session._check_budget()
     checkpoint = AgentCheckpoint(
         id="gateway-cursor",
         event_offset=0,

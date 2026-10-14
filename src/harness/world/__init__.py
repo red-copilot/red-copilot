@@ -1,4 +1,4 @@
-from .context import WorldContextBuilder
+from .context import CHARS_PER_TOKEN, WorldContextBuilder, estimate_tokens
 from .focus import (
     DEFAULT_FOCUS_CLAIM_THRESHOLD,
     FocusBuilder,
@@ -8,6 +8,7 @@ from .focus import (
 )
 from .live import WorldInboxCursor
 from .models import (
+    TRUST_RANK,
     ActionRecord,
     Artifact,
     Capability,
@@ -23,6 +24,9 @@ from .models import (
     WorldEvent,
     WorldRecord,
     WorldSnapshot,
+    agent_actor,
+    is_agent_actor,
+    is_bookkeeping_record,
 )
 from .protocol import IngestReport, WorldSubmission, write_submission
 from .reducer import WorldReducer
@@ -31,7 +35,9 @@ from .retrieval import WorldRetriever
 from .sqlite import SQLiteWorldRepository
 
 __all__ = [
+    "CHARS_PER_TOKEN",
     "DEFAULT_FOCUS_CLAIM_THRESHOLD",
+    "TRUST_RANK",
     "ActionRecord",
     "Artifact",
     "Capability",
@@ -60,5 +66,9 @@ __all__ = [
     "WorldRetriever",
     "WorldSnapshot",
     "WorldSubmission",
+    "agent_actor",
+    "estimate_tokens",
+    "is_agent_actor",
+    "is_bookkeeping_record",
     "write_submission",
 ]

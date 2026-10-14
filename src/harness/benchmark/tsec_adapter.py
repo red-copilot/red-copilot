@@ -10,8 +10,10 @@ from pathlib import Path
 from ..agent import AgentResult
 from ..models import AgentSpec, BudgetSpec, ObjectiveSpec
 from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
-from ..solver_policy import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from .base import (
+    BENCHMARK_MAX_REPLANS,
+    BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
+    AdapterSessionState,
     BenchmarkAdapter,
     BenchmarkCase,
     BenchmarkSession,
@@ -42,7 +44,7 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
         self.start_retries = start_retries
         self.retry_delay = retry_delay
         self._raw_cases: dict[str, typing.Any] = {}
-        self._sessions: dict[str, dict[str, typing.Any]] = {}
+        self._sessions: dict[str, AdapterSessionState] = {}
 
     async def discover(self) -> list[BenchmarkCase]:
         challenges = await self.client.list_challenges()
@@ -150,11 +152,9 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                 "remaining_at_start": remaining,
             },
         )
-        self._sessions[session.id] = {
-            "challenge": challenge,
-            "submissions": [],
-            "closed": False,
-        }
+        self._sessions[session.id] = AdapterSessionState(
+            case=case, extras={"challenge": challenge}
+        )
         return session
 
     async def submit(
@@ -193,12 +193,12 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                 "matched_flag_index": submitted.matched_flag_index,
             },
         )
-        self._sessions[session.id]["submissions"].append(result)
+        self._sessions[session.id].submissions.append(result)
         return result
 
     async def evaluate(self, session: BenchmarkSession) -> EvaluationResult:
         state = self._sessions[session.id]
-        submissions: list[SubmissionResult] = state["submissions"]
+        submissions: list[SubmissionResult] = state.submissions
         initial = int(session.metadata["initial_correct"])
         total = int(session.metadata["total_flags"])
         final_correct = max(
@@ -231,10 +231,10 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
 
     async def teardown(self, session: BenchmarkSession) -> None:
         state = self._sessions.get(session.id)
-        if state is None or state["closed"]:
+        if state is None or state.closed:
             return
         result = await self.client.close_challenge(session.case_id)
-        state["closed"] = bool(result.closed)
+        state.closed = bool(result.closed)
 
 
 _FLAG_RE = re.compile(r"HARNESS_FLAG=([^\s]+)")

@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 from pydantic import ValidationError
 
+from .benchmark.base import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from .benchmark.tsec_adapter import run_tsec_challenges
 from .benchmark.tsec_client import load_tsec_config
 from .gateway_runtime import GatewayConfig
@@ -17,7 +18,6 @@ from .orchestrator import Orchestrator
 from .preflight import run_preflight
 from .runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from .skills import load_skill
-from .solver_policy import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 
 app = typer.Typer(
     name="harness",
@@ -169,6 +169,10 @@ def run(
     solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
         DEFAULT_SOLVER_PROFILE
     ),
+    context_token_budget: Annotated[
+        int | None,
+        typer.Option("--context-token-budget", min=1, help="Bound world.context.txt assembly by an offline token estimate."),
+    ] = None,
 ) -> None:
     """Run one task with one agent."""
     if resume_run is not None and (resume_world is not None or repeat != 1):
@@ -199,6 +203,7 @@ def run(
             resume_world_events=resume_world,
             resume_run_dir=resume_run,
             solver_profile=solver_profile,
+            context_token_budget=context_token_budget,
         )
         for index in range(repeat)
     ]

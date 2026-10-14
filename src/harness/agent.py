@@ -207,6 +207,36 @@ class AgentResult:
     metrics: UsageMetrics
 
 
+@dataclass(frozen=True)
+class AgentRunContext:
+    """The single typed parameter object for every adapter run/session path.
+
+    Adapters used to take 12+ loose keywords duplicated across four classes;
+    one frozen context keeps the call sites and the session constructors from
+    drifting apart. ``dataclasses.replace`` builds derived contexts (for
+    example filling the one-shot cancel path) without mutation.
+    """
+
+    task: TaskSpec
+    task_dir: Path
+    run_dir: Path
+    environment_project: str | None = None
+    environment_network: str | None = None
+    seed: int = 0
+    agent_task_dir: Path | None = None
+    gateway_url: str | None = None
+    gateway_token: str | None = None
+    gateway_network: str | None = None
+    gateway_usage_path: Path | str | None = None
+    resume_gateway_event_offset: int = 0
+    resume_session_id: str | None = None
+    cancel_path: Path | None = None
+
+    @property
+    def gateway_enabled(self) -> bool:
+        return bool(self.gateway_url and self.gateway_token)
+
+
 def _terminate_process(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
         return
@@ -308,102 +338,71 @@ class CLIAdapter:
         self.spec = spec
         self.trace = trace
 
-    def run(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        environment_project: str | None,
-        environment_network: str | None,
-        seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-        gateway_network: str | None = None,
-        agent_task_dir: Path | None = None,
-        cancel_path: Path | None = None,
-    ) -> AgentResult:
-        del agent_task_dir  # Host Agents remain an explicit, unsandboxed development path.
+    @property
+    def capabilities(self):
+        from .session import ONE_SHOT_AGENT_CAPABILITIES
+
+        return ONE_SHOT_AGENT_CAPABILITIES
+
+    def run(self, context: AgentRunContext) -> AgentResult:
+        # Host Agents remain an explicit, unsandboxed development path and
+        # ignore agent_task_dir; they see the task tree directly.
         from .network_policy import enforced_network
 
         enforced_network(
             self.spec,
-            environment_network=environment_network,
-            gateway_network=gateway_network,
-            gateway_enabled=bool(gateway_url and gateway_token),
+            environment_network=context.environment_network,
+            gateway_network=context.gateway_network,
+            gateway_enabled=context.gateway_enabled,
         )
-        del environment_network, gateway_network
         env = os.environ.copy()
         env.update(self.spec.env)
         env.update(
             task_environment(
-                task,
-                task_dir=task_dir,
-                run_dir=run_dir,
-                environment_project=environment_project,
-                seed=seed,
+                context.task,
+                task_dir=context.task_dir,
+                run_dir=context.run_dir,
+                environment_project=context.environment_project,
+                seed=context.seed,
                 network_profile=self.spec.network_profile,
             )
         )
-        if gateway_url and gateway_token:
-            env.update(gateway_environment(gateway_url, gateway_token))
+        if context.gateway_enabled:
+            env.update(gateway_environment(context.gateway_url, context.gateway_token))
 
-        cwd = Path(self.spec.cwd).resolve() if self.spec.cwd else task_dir
+        cwd = Path(self.spec.cwd).resolve() if self.spec.cwd else context.task_dir
         self.trace.emit(
             "agent.started",
             actor="agent",
             data={
                 "agent_id": self.spec.id,
                 "type": self.spec.type,
-                "gateway_injected": gateway_url is not None,
+                "gateway_injected": context.gateway_url is not None,
             },
         )
         result = _run_monitored(
             self.spec.command,
             cwd=cwd,
             env=env,
-            run_dir=run_dir,
-            task=task,
+            run_dir=context.run_dir,
+            task=context.task,
             trace=self.trace,
-            cancel_path=cancel_path,
+            cancel_path=context.cancel_path,
             guard_parent_death=True,
         )
         self._finish_trace(result)
         return result
 
-    async def start_session(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        environment_project: str | None,
-        environment_network: str | None,
-        seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-        gateway_network: str | None = None,
-        agent_task_dir: Path | None = None,
-    ):
-        del agent_task_dir
+    async def start_session(self, context: AgentRunContext):
+        from dataclasses import replace
+
         from .session import OneShotAgentSession
 
-        return await OneShotAgentSession.start(
-            self,
-            run_dir=run_dir,
-            run_kwargs={
-                "task": task,
-                "task_dir": task_dir,
-                "run_dir": run_dir,
-                "environment_project": environment_project,
-                "environment_network": environment_network,
-                "seed": seed,
-                "gateway_url": gateway_url,
-                "gateway_token": gateway_token,
-                "gateway_network": gateway_network,
-                "cancel_path": run_dir / "agent.control.jsonl",
-            },
+        context = replace(
+            context,
+            cancel_path=context.cancel_path or context.run_dir / "agent.control.jsonl",
         )
+        return await OneShotAgentSession.start(self, context=context)
 
     def _finish_trace(self, result: AgentResult) -> None:
         self.trace.emit(
@@ -426,6 +425,12 @@ class DockerAdapter:
             raise AgentError("docker executable was not found")
         self.spec = spec
         self.trace = trace
+
+    @property
+    def capabilities(self):
+        from .session import ONE_SHOT_AGENT_CAPABILITIES
+
+        return ONE_SHOT_AGENT_CAPABILITIES
 
     @staticmethod
     def _docker(
@@ -477,24 +482,17 @@ class DockerAdapter:
             image_command=[str(self.spec.image), *self.spec.command],
         )
 
-    def run(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        environment_project: str | None,
-        environment_network: str | None,
-        seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-        gateway_network: str | None = None,
-        agent_task_dir: Path | None = None,
-        cancel_path: Path | None = None,
-    ) -> AgentResult:
+    def run(self, context: AgentRunContext) -> AgentResult:
         from .network_policy import enforced_network
 
-        gateway_enabled = bool(gateway_url and gateway_token)
+        task = context.task
+        task_dir = context.task_dir
+        run_dir = context.run_dir
+        gateway_url = context.gateway_url
+        gateway_token = context.gateway_token
+        gateway_network = context.gateway_network
+        environment_network = context.environment_network
+        gateway_enabled = context.gateway_enabled
         enforced = enforced_network(
             self.spec,
             environment_network=environment_network,
@@ -531,12 +529,12 @@ class DockerAdapter:
             run_dir=run_dir,
             container_name=container_name,
             network=primary_network,
-            environment_project=environment_project,
-            seed=seed,
+            environment_project=context.environment_project,
+            seed=context.seed,
             gateway_url=gateway_url,
             gateway_token=gateway_token,
             host_gateway=host_gateway,
-            agent_task_dir=agent_task_dir,
+            agent_task_dir=context.agent_task_dir,
         )
 
         self.trace.emit(
@@ -581,7 +579,7 @@ class DockerAdapter:
                 run_dir=run_dir,
                 task=task,
                 trace=self.trace,
-                cancel_path=cancel_path,
+                cancel_path=context.cancel_path,
             )
         finally:
             subprocess.run(
@@ -603,39 +601,16 @@ class DockerAdapter:
         )
         return result
 
-    async def start_session(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        environment_project: str | None,
-        environment_network: str | None,
-        seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-        gateway_network: str | None = None,
-        agent_task_dir: Path | None = None,
-    ):
+    async def start_session(self, context: AgentRunContext):
+        from dataclasses import replace
+
         from .session import OneShotAgentSession
 
-        return await OneShotAgentSession.start(
-            self,
-            run_dir=run_dir,
-            run_kwargs={
-                "task": task,
-                "task_dir": task_dir,
-                "agent_task_dir": agent_task_dir,
-                "run_dir": run_dir,
-                "environment_project": environment_project,
-                "environment_network": environment_network,
-                "seed": seed,
-                "gateway_url": gateway_url,
-                "gateway_token": gateway_token,
-                "gateway_network": gateway_network,
-                "cancel_path": run_dir / "agent.control.jsonl",
-            },
+        context = replace(
+            context,
+            cancel_path=context.cancel_path or context.run_dir / "agent.control.jsonl",
         )
+        return await OneShotAgentSession.start(self, context=context)
 
 
 def build_agent_adapter(

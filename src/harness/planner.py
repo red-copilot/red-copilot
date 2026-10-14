@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from .progress import ProgressLedger
 from .skills import SkillSpec, StateSelector
-from .world import WorldSnapshot
+from .world import TRUST_RANK, WorldSnapshot
 from .world.focus import FocusBuilder, FocusItem, FocusRequest, FocusSet
 
 
@@ -82,8 +82,7 @@ _COLLECTIONS = {
 
 def _selector_rejection(snapshot: WorldSnapshot, selector: StateSelector) -> str | None:
     collection = getattr(snapshot, _COLLECTIONS[selector.kind])
-    trust_rank = {"unclassified": 1, "claim": 1, "evidence": 2, "verified": 3}
-    minimum_rank = trust_rank[selector.minimum_trust]
+    minimum_rank = TRUST_RANK[selector.minimum_trust]
     typed: list = []
     scoped: list = []
     valid: list = []
@@ -102,7 +101,7 @@ def _selector_rejection(snapshot: WorldSnapshot, selector: StateSelector) -> str
         valid.append(item)
         provenance = getattr(item, "provenance", None)
         epistemic_status = getattr(provenance, "epistemic_status", "unclassified")
-        if trust_rank.get(epistemic_status, 0) >= minimum_rank:
+        if TRUST_RANK.get(epistemic_status, 0) >= minimum_rank:
             return None
     if not typed:
         return f"missing:{selector.kind}:{selector.type}"
@@ -146,7 +145,13 @@ def _focus_reference(snapshot: WorldSnapshot, progress: ProgressLedger) -> str:
     return progress.active_goal or ""
 
 
-def _selector_matches_focus_item(selector: StateSelector, item: FocusItem) -> bool:
+def selector_matches_focus_item(selector: StateSelector, item: FocusItem | StateSelector) -> bool:
+    """Structural match of a selector pattern against a kind/type/scope value.
+
+    ``selector`` is the pattern (fnmatch wildcards); ``item`` is the concrete
+    state. A ``None`` pattern scope matches anything; a ``None`` value scope
+    matches nothing. Shared by focus scoring and frontier coverage.
+    """
     if selector.kind != item.kind or not fnmatch.fnmatchcase(item.type, selector.type):
         return False
     if selector.scope is None:
@@ -166,7 +171,7 @@ def _focus_relevance(skill: SkillSpec, focus: FocusSet) -> float:
     matched = sum(
         1
         for selector in skill.produces
-        if any(_selector_matches_focus_item(selector, item) for item in targets)
+        if any(selector_matches_focus_item(selector, item) for item in targets)
     )
     return matched / len(skill.produces)
 

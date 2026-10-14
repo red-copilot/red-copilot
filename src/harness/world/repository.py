@@ -15,6 +15,11 @@ class WorldRepository(Protocol):
     @property
     def snapshot(self) -> WorldSnapshot: ...
 
+    @property
+    def revision(self) -> int:
+        """Current revision; cheaper than a full snapshot reload."""
+        ...
+
     def events(
         self,
         *,

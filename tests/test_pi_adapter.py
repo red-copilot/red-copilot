@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from harness.agent import AgentError
+from harness.agent import AgentError, AgentRunContext
 from harness.budget import UsageMetrics
 from harness.models import AgentSpec, load_task
 from harness.pi_container import (
@@ -93,7 +93,7 @@ def test_pi_rpc_session_rejects_unsafe_or_unexpected_startup_session_id() -> Non
     async def verify(session_id, requested_id=None):
         session = object.__new__(ContainerPiRpcSession)
         session.process = SimpleNamespace(stdout=_Reader(session_id))
-        session.run_kwargs = {"resume_session_id": requested_id}
+        session.context = SimpleNamespace(resume_session_id=requested_id)
         session._startup_records = []
         session._pi_session_id = None
         await session._wait_for_session_identity(timeout=1.0, required=True)
@@ -530,13 +530,14 @@ def test_gateway_mode_accounts_model_usage_from_gateway_only(monkeypatch, tmp_pa
     adapter = _adapter(monkeypatch, tmp_path)
     session = ContainerPiRpcSession(
         adapter,
-        run_kwargs={
-            "run_dir": tmp_path,
-            "task": load_task(Path("benchmarks/examples/hello/task.yaml")),
-            "gateway_url": "http://gateway:8765",
-            "gateway_token": "test-token",
-            "gateway_usage_path": tmp_path / "gateway.events.jsonl",
-        },
+        context=AgentRunContext(
+            run_dir=tmp_path,
+            task=load_task(Path("benchmarks/examples/hello/task.yaml")),
+            task_dir=tmp_path,
+            gateway_url="http://gateway:8765",
+            gateway_token="test-token",
+            gateway_usage_path=tmp_path / "gateway.events.jsonl",
+        ),
     )
 
     pi_events = session._normalize_pi_record(
@@ -730,14 +731,14 @@ def test_pi_rpc_session_sends_prompt_and_steers_before_settled(monkeypatch, tmp_
     async def scenario():
         session = await ContainerPiRpcSession.start(
             adapter,
-            run_kwargs={
-                "task": task,
-                "task_dir": Path("benchmarks/examples/hello").resolve(),
-                "run_dir": run_dir,
-                "environment_project": None,
-                "environment_network": None,
-                "seed": 1,
-            },
+            context=AgentRunContext(
+                task=task,
+                task_dir=Path("benchmarks/examples/hello").resolve(),
+                run_dir=run_dir,
+                environment_project=None,
+                environment_network=None,
+                seed=1,
+            ),
         )
         initial_checkpoint = await session.checkpoint()
         assert initial_checkpoint.session_id == "session-1"
@@ -946,14 +947,14 @@ def test_pi_rpc_session_accounts_usage_without_enforcing_non_time_limits(
     async def scenario():
         session = await ContainerPiRpcSession.start(
             adapter,
-            run_kwargs={
-                "task": task,
-                "task_dir": Path("benchmarks/examples/hello").resolve(),
-                "run_dir": run_dir,
-                "environment_project": None,
-                "environment_network": None,
-                "seed": 1,
-            },
+            context=AgentRunContext(
+                task=task,
+                task_dir=Path("benchmarks/examples/hello").resolve(),
+                run_dir=run_dir,
+                environment_project=None,
+                environment_network=None,
+                seed=1,
+            ),
         )
         events = [event async for event in session.events()]
         result = await session.result()
@@ -1041,15 +1042,15 @@ def test_pi_rpc_uses_verified_target_network_id(monkeypatch, tmp_path: Path) -> 
     async def start_session():
         session = await ContainerPiRpcSession.start(
             adapter,
-            run_kwargs={
-                "task": task,
-                "task_dir": Path("benchmarks/examples/hello").resolve(),
-                "agent_task_dir": agent_task_dir,
-                "run_dir": run_dir,
-                "environment_project": None,
-                "environment_network": "task-internal",
-                "seed": 1,
-            },
+            context=AgentRunContext(
+                task=task,
+                task_dir=Path("benchmarks/examples/hello").resolve(),
+                agent_task_dir=agent_task_dir,
+                run_dir=run_dir,
+                environment_project=None,
+                environment_network="task-internal",
+                seed=1,
+            ),
         )
         session._stderr_handle.close()
 

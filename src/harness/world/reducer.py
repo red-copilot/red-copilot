@@ -13,6 +13,7 @@ from .models import (
     Relation,
     WorldEvent,
     WorldSnapshot,
+    is_agent_actor,
 )
 
 _KIND_MAP = {
@@ -47,7 +48,7 @@ class WorldReducer:
             if event.source_event_id is not None:
                 provenance["source_event_id"] = event.source_event_id
             declared_status = provenance.get("epistemic_status")
-            if event.actor == "agent" or event.actor.startswith("agent:"):
+            if is_agent_actor(event.actor):
                 provenance["epistemic_status"] = "claim"
             elif event.actor.startswith("benchmark:") or event.actor in {"grader", "verifier"}:
                 provenance["epistemic_status"] = "evidence"

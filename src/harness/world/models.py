@@ -50,6 +50,32 @@ class Provenance(BaseModel):
     epistemic_status: Literal["claim", "evidence", "verified", "unclassified"] = "unclassified"
 
 
+# Epistemic trust ordering over ``Provenance.epistemic_status``. One shared
+# lattice: the focus builder, planner selectors and the goal-frontier projection
+# must agree on it or they silently rank the same state differently.
+TRUST_RANK: dict[str, int] = {"unclassified": 1, "claim": 1, "evidence": 2, "verified": 3}
+
+# Observation types the Harness writes for its own bookkeeping (one per tool
+# execution). Projections that surface semantic facts exclude these so per-step
+# noise does not crowd out real findings.
+BOOKKEEPING_OBSERVATION_TYPES = frozenset({"tool.execution"})
+
+
+def is_bookkeeping_record(record: object) -> bool:
+    """True when a record is Harness bookkeeping rather than a semantic fact."""
+    return getattr(record, "type", None) in BOOKKEEPING_OBSERVATION_TYPES
+
+
+def agent_actor(agent_id: str) -> str:
+    """Canonical actor string for an agent's authored records."""
+    return f"agent:{agent_id}"
+
+
+def is_agent_actor(actor: str | None) -> bool:
+    """True when a record/event actor is the agent (bare or with an agent id)."""
+    return actor == "agent" or str(actor or "").startswith("agent:")
+
+
 class WorldRecord(BaseModel):
     provenance: Provenance = Field(default_factory=Provenance)
     observed_at: datetime | None = None
@@ -149,6 +175,12 @@ class ActionRecord(WorldRecord):
     status: Literal["planned", "running", "succeeded", "failed", "unknown"] = "unknown"
     target: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def skill_id(self) -> str | None:
+        """Skill this action executed, when its intent declared one."""
+        value = (self.attributes or {}).get("skill_id")
+        return value if isinstance(value, str) and value else None
 
 
 class Constraint(WorldRecord):

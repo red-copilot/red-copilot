@@ -184,7 +184,7 @@ def test_legacy_benchmark_only_is_explicitly_advisory() -> None:
 
 def test_docker_adapter_uses_enforced_target_network(monkeypatch, tmp_path) -> None:
     import harness.agent as agent_module
-    from harness.agent import AgentResult, DockerAdapter
+    from harness.agent import AgentResult, AgentRunContext, DockerAdapter
     from harness.budget import UsageMetrics
     from harness.models import TaskSpec
     from harness.trace import TraceRecorder
@@ -227,12 +227,14 @@ def test_docker_adapter_uses_enforced_target_network(monkeypatch, tmp_path) -> N
     )
 
     adapter.run(
-        task,
-        task_dir=tmp_path,
-        run_dir=run_dir / "agent-workspace",
-        environment_project="task",
-        environment_network="task_internal",
-        seed=1,
+        AgentRunContext(
+            task=task,
+            task_dir=tmp_path,
+            run_dir=run_dir / "agent-workspace",
+            environment_project="task",
+            environment_network="task_internal",
+            seed=1,
+        )
     )
 
     create = create_commands[0]
@@ -241,7 +243,7 @@ def test_docker_adapter_uses_enforced_target_network(monkeypatch, tmp_path) -> N
 
 def test_docker_adapter_uses_verified_ids_for_model_allowed_networks(monkeypatch, tmp_path) -> None:
     import harness.agent as agent_module
-    from harness.agent import AgentResult, DockerAdapter
+    from harness.agent import AgentResult, AgentRunContext, DockerAdapter
     from harness.budget import UsageMetrics
     from harness.models import TaskSpec
     from harness.trace import TraceRecorder
@@ -281,15 +283,17 @@ def test_docker_adapter_uses_verified_ids_for_model_allowed_networks(monkeypatch
     )
 
     adapter.run(
-        task,
-        task_dir=tmp_path,
-        run_dir=workspace,
-        environment_project="task",
-        environment_network="task_internal",
-        gateway_network="gateway_internal",
-        gateway_url="http://harness-gateway:8765",
-        gateway_token="one-time-token",
-        seed=1,
+        AgentRunContext(
+            task=task,
+            task_dir=tmp_path,
+            run_dir=workspace,
+            environment_project="task",
+            environment_network="task_internal",
+            gateway_network="gateway_internal",
+            gateway_url="http://harness-gateway:8765",
+            gateway_token="one-time-token",
+            seed=1,
+        )
     )
 
     create = commands[0]

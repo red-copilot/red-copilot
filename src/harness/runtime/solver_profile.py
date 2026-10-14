@@ -13,30 +13,26 @@ class SolverProfile(StrEnum):
 
 DEFAULT_SOLVER_PROFILE = SolverProfile.PI_WORLD_GOAL
 
-# Candidate ranker selected per profile. ``None`` means the profile runs without
-# a heuristic planner (the Agent explores on its own).
-_PROFILE_CANDIDATE: dict[SolverProfile, str | None] = {
-    SolverProfile.PI_ONLY: None,
-    SolverProfile.PI_WORLD: None,
-    SolverProfile.PI_WORLD_HEURISTIC: "heuristic",
-    SolverProfile.PI_WORLD_GOAL: "goal-frontier",
+# One table per profile: (world_context_enabled, candidate ranker id). ``None``
+# means the profile runs without a heuristic planner (the Agent explores on its
+# own), which is also what disables planner wiring at the call sites.
+_PROFILE_SETTINGS: dict[SolverProfile, tuple[bool, str | None]] = {
+    SolverProfile.PI_ONLY: (False, None),
+    SolverProfile.PI_WORLD: (True, None),
+    SolverProfile.PI_WORLD_HEURISTIC: (True, "heuristic"),
+    SolverProfile.PI_WORLD_GOAL: (True, "goal-frontier"),
 }
 
 
 def solver_profile_settings(profile: SolverProfile | str) -> tuple[bool, bool]:
     """Return `(world_context_enabled, planner_enabled)` for a run profile."""
-    selected = _coerce_profile(profile)
-    return {
-        SolverProfile.PI_ONLY: (False, False),
-        SolverProfile.PI_WORLD: (True, False),
-        SolverProfile.PI_WORLD_HEURISTIC: (True, True),
-        SolverProfile.PI_WORLD_GOAL: (True, True),
-    }[selected]
+    world_context_enabled, candidate = _PROFILE_SETTINGS[_coerce_profile(profile)]
+    return world_context_enabled, candidate is not None
 
 
 def solver_profile_candidate(profile: SolverProfile | str) -> str | None:
     """Return the candidate ranker id for a profile ("heuristic"/"goal-frontier")."""
-    return _PROFILE_CANDIDATE[_coerce_profile(profile)]
+    return _PROFILE_SETTINGS[_coerce_profile(profile)][1]
 
 
 def _coerce_profile(profile: SolverProfile | str) -> SolverProfile:

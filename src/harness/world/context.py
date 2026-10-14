@@ -7,6 +7,19 @@ from .focus import DEFAULT_FOCUS_CLAIM_THRESHOLD, FocusBuilder, FocusItem, Focus
 from .models import WorldSnapshot
 from .retrieval import WorldRetriever
 
+# Offline token estimate: deterministic ASCII-equivalent heuristic with no
+# vocabulary or model dependency. Four characters per token is conservative
+# for English/tooling text; the estimate only bounds context assembly, never
+# billing (usage accounting stays on provider telemetry).
+CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text: str) -> int:
+    """Deterministic offline token estimate used for context budgeting."""
+    if not text:
+        return 0
+    return (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
+
 
 def _clip(text: str | None, limit: int) -> str:
     if not text:
@@ -36,6 +49,7 @@ class WorldContextBuilder:
         focus_max_chars: int = 2000,
         focus_claim_threshold: float = DEFAULT_FOCUS_CLAIM_THRESHOLD,
         focus_enabled: bool = True,
+        token_budget: int | None = None,
         retriever: WorldRetriever | None = None,
         focus_builder: FocusBuilder | None = None,
     ) -> None:
@@ -46,6 +60,16 @@ class WorldContextBuilder:
         self.focus_max_chars = focus_max_chars
         self.focus_claim_threshold = focus_claim_threshold
         self.focus_enabled = focus_enabled
+        if token_budget is not None:
+            if token_budget < 1:
+                raise ValueError("token_budget must be a positive number of tokens")
+            # A token budget tightens the character budgets instead of
+            # replacing them: the focus block keeps up to a quarter of the
+            # budget, the state projection gets the rest. ``None`` keeps the
+            # legacy character-only budgets byte-identical.
+            total_chars = token_budget * CHARS_PER_TOKEN
+            self.focus_max_chars = min(self.focus_max_chars, total_chars // 4)
+            self.max_chars = min(self.max_chars, total_chars - self.focus_max_chars)
         self.focus_builder = focus_builder or FocusBuilder()
         self.retriever = retriever or WorldRetriever(
             limits={

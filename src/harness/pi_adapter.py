@@ -15,7 +15,10 @@ from .agent import (
     NORMALIZED_EVENT_FILE,
     AgentError,
     AgentResult,
+    AgentRunContext,
     _terminate_process,
+    gateway_environment,
+    task_environment,
 )
 from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor
 from .models import AgentSpec, TaskSpec
@@ -289,36 +292,10 @@ class PiAdapter:
         )
         return normalized
 
-    async def start_session(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        environment_project: str | None,
-        environment_network: str | None,
-        seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-        gateway_network: str | None = None,
-    ):
+    async def start_session(self, context: AgentRunContext):
         from .session import OneShotAgentSession
 
-        return await OneShotAgentSession.start(
-            self,
-            run_dir=run_dir,
-            run_kwargs={
-                "task": task,
-                "task_dir": task_dir,
-                "run_dir": run_dir,
-                "environment_project": environment_project,
-                "environment_network": environment_network,
-                "seed": seed,
-                "gateway_url": gateway_url,
-                "gateway_token": gateway_token,
-                "gateway_network": gateway_network,
-            },
-        )
+        return await OneShotAgentSession.start(self, context=context)
 
     def _poll_output(
         self,
@@ -514,62 +491,39 @@ class PiAdapter:
                 f"{run_dir.resolve()}:/run/harness:rw",
                 "-w",
                 "/run/harness",
-                "-e",
-                f"HARNESS_TASK_ID={task.id}",
-                "-e",
-                "HARNESS_TASK_DIR=/task",
-                "-e",
-                "HARNESS_RUN_DIR=/run/harness",
-                "-e",
-                "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
-                "-e",
-                "HARNESS_WORLD_CONTEXT=/run/harness/world.context.txt",
-                "-e",
-                "HARNESS_SUBMISSION_INBOX=/run/harness/submission.inbox.jsonl",
-                "-e",
-                "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
-                "-e",
-                "HARNESS_SUMMARY_FILE=/run/harness/agent.summary.md",
-                "-e",
-                "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
-                "-e",
-                "HARNESS_EVENT_FILE=/run/harness/"
-                + (AGENT_EVENT_FILE if self.pi.mode == "rpc" else NORMALIZED_EVENT_FILE),
-                "-e",
-                f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
-                "-e",
-                f"HARNESS_SEED={seed}",
-                "-e",
-                "PI_CODING_AGENT_DIR=/run/harness/pi-agent",
-                "-e",
-                "PI_CODING_AGENT_SESSION_DIR=/run/harness/pi-sessions",
-                "-e",
-                "PI_TELEMETRY=0",
-                "-e",
-                "PI_SKIP_VERSION_CHECK=1",
             ]
         )
+        # Same canonical HARNESS_* contract as every other container Agent;
+        # only the Pi-specific extras differ. Later entries win, so the gateway
+        # block stays last and passthrough stays overridable by spec env.
+        environment = task_environment(
+            task,
+            task_dir="/task",
+            run_dir="/run/harness",
+            environment_project=None,
+            seed=seed,
+            network_profile=self.spec.network_profile,
+            event_file_name=AGENT_EVENT_FILE if self.pi.mode == "rpc" else NORMALIZED_EVENT_FILE,
+        )
+        environment.update(
+            {
+                "PI_CODING_AGENT_DIR": "/run/harness/pi-agent",
+                "PI_CODING_AGENT_SESSION_DIR": "/run/harness/pi-sessions",
+                "PI_TELEMETRY": "0",
+                "PI_SKIP_VERSION_CHECK": "1",
+            }
+        )
         if self.pi.offline or self.spec.network_profile != "unrestricted":
-            command.extend(["-e", "PI_OFFLINE=1"])
+            environment["PI_OFFLINE"] = "1"
         for name in self.pi.env_passthrough:
             value = os.environ.get(name)
             if value is not None:
-                command.extend(["-e", f"{name}={value}"])
-        for key, value in sorted(self.spec.env.items()):
-            command.extend(["-e", f"{key}={value}"])
+                environment[name] = value
+        environment.update(dict(sorted(self.spec.env.items())))
         if gateway_url and gateway_token:
-            command.extend(
-                [
-                    "-e",
-                    f"HARNESS_GATEWAY_URL={gateway_url}",
-                    "-e",
-                    f"HARNESS_GATEWAY_TOKEN={gateway_token}",
-                    "-e",
-                    f"OPENAI_BASE_URL={gateway_url}/v1",
-                    "-e",
-                    f"OPENAI_API_KEY={gateway_token}",
-                ]
-            )
+            environment.update(gateway_environment(gateway_url, gateway_token))
+        for key, value in environment.items():
+            command.extend(["-e", f"{key}={value}"])
         command.extend(
             [
                 str(self.spec.image),

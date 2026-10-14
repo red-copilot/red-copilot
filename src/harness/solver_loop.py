@@ -29,7 +29,15 @@ MAX_PROCESSED_EVENT_IDS = 50_000
 # Cap on distinct "attempted without gaining a fact" keys kept in progress.
 MAX_NO_GAIN_KEYS = 50
 from .verification import AuthorizedActionVerdict, VerifierRegistry
-from .world import Observation, Provenance, WorldContextBuilder, WorldRepository
+from .world import (
+    Observation,
+    Provenance,
+    WorldContextBuilder,
+    WorldRepository,
+    WorldSnapshot,
+    is_agent_actor,
+    is_bookkeeping_record,
+)
 from .world.live import WorldInboxCursor
 
 
@@ -213,7 +221,7 @@ class SolverLoop:
         self._sync_agent_views()
         if event.type == "tool.call":
             self._apply_plan_fallback_observation()
-        before_revision = self.world.snapshot.revision
+        before_revision = self.world.revision
         if event.type in {"tool.call", "tool.result"}:
             tool_call_id = event.data.get("tool_call_id")
             if isinstance(tool_call_id, str) and 0 < len(tool_call_id) <= 256:
@@ -287,7 +295,7 @@ class SolverLoop:
                         "event_type": event.type,
                         "mutations": aci_mutations,
                         "revision_before": before_revision,
-                        "revision_after": self.world.snapshot.revision,
+                        "revision_after": self.world.revision,
                     },
                 )
 
@@ -303,7 +311,7 @@ class SolverLoop:
         }
         if (semantic_agent_update and aci_mutations) or live_ingest.accepted:
             self.progress.request_replan("world_state_changed")
-        after_revision = self.world.snapshot.revision
+        after_revision = self.world.revision
         if live_ingest.accepted or live_ingest.rejected:
             self.trace.emit(
                 "world.ingested",
@@ -342,7 +350,7 @@ class SolverLoop:
                 self.progress,
                 run_id=self.trace.run_id,
                 planned_world_revision=self.planned_world_revision,
-                current_world_revision=self.world.snapshot.revision,
+                current_world_revision=after_revision,
                 evidence_world_revision=before_revision,
                 trusted_verdict=trusted_verdict,
             )
@@ -364,7 +372,7 @@ class SolverLoop:
                         self.progress.request_replan("evidence_confirmed")
                         action_id = (self.progress.last_action or {}).get("tool_call_id")
                         if isinstance(action_id, str) and action_id:
-                            revision_before_verification = self.world.snapshot.revision
+                            revision_before_verification = self.world.revision
                             self.world.upsert(
                                 "observation",
                                 Observation(
@@ -391,7 +399,7 @@ class SolverLoop:
                                 "world.state.updated",
                                 data={
                                     "revision_before": revision_before_verification,
-                                    "revision_after": self.world.snapshot.revision,
+                                    "revision_after": self.world.revision,
                                     "cause": "action.verified",
                                 },
                             )
@@ -412,7 +420,9 @@ class SolverLoop:
         await self._maybe_steer_budget(session)
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
-        await self._maybe_start_round(session, event_type=event.type)
+        await self._maybe_start_round(
+            session, event_type=event.type, world_changed=after_revision != before_revision
+        )
         decision = self.decide(event_type=event.type)
         if decision.action is SolverAction.REPLAN:
             plan = await self.maybe_replan(session)
@@ -439,7 +449,7 @@ class SolverLoop:
                 "reason": decision.reason,
                 "event_type": event_type,
                 "event_id": event_id,
-                "world_revision": self.world.snapshot.revision,
+                "world_revision": self.world.revision,
                 "no_progress_count": self.progress.no_progress_count,
                 "replan_count": self.progress.replan_count,
                 "remaining_budget_fraction": self.progress.remaining_budget_fraction,
@@ -467,8 +477,9 @@ class SolverLoop:
         if not force and not reasons:
             return None
 
+        snapshot = self.world.snapshot
         plan = self.planner.propose(
-            self.world.snapshot,
+            snapshot,
             self.skills,
             progress=self.progress,
             horizon=self.plan_horizon,
@@ -490,7 +501,7 @@ class SolverLoop:
             plan.model_dump_json(indent=2) + "\n",
             encoding="utf-8",
         )
-        self.planned_world_revision = self.world.snapshot.revision
+        self.planned_world_revision = snapshot.revision
         self.progress.replan_count += 1
         payload = plan.model_dump(mode="json")
         self.trace.emit(
@@ -599,7 +610,7 @@ class SolverLoop:
             )
         )
 
-    def _round_state(self) -> tuple[frozenset[str], frozenset[str]]:
+    def _round_state(self, snapshot: WorldSnapshot) -> tuple[frozenset[str], frozenset[str]]:
         """Established fact ids and ruled-out intent ids currently in the graph.
 
         Harness bookkeeping is excluded: every tool result also writes a
@@ -608,15 +619,14 @@ class SolverLoop:
         change too - they are new knowledge the run recorded, even though the
         verdict remains open until independent evidence confirms them.
         """
-        snapshot = self.world.snapshot
         established = frozenset(
             record.id
             for store in (snapshot.observations, snapshot.capabilities, snapshot.artifacts)
             for record in store.values()
-            if getattr(record, "type", "") != "tool.execution"
+            if not is_bookkeeping_record(record)
             and (
                 record.provenance.epistemic_status in {"evidence", "verified"}
-                or str(record.provenance.actor or "").startswith("agent")
+                or is_agent_actor(record.provenance.actor)
             )
         )
         return established, frozenset(ruled_out_intents(snapshot, self.progress))
@@ -672,17 +682,28 @@ class SolverLoop:
             )
         )
 
-    async def _maybe_start_round(self, session: AgentSession, *, event_type: str) -> None:
+    async def _maybe_start_round(
+        self,
+        session: AgentSession,
+        *,
+        event_type: str,
+        world_changed: bool,
+    ) -> None:
         """Open a new round once the fact/intent graph actually changed.
 
         A round is a fresh ``prompt`` on the same session carrying a compiled
         brief: what the previous round established, what it ruled out, and the
         open frontier. It fires on new evidence, on a newly ruled-out path, or
         after ``ROUND_STALL_STEPS`` tool results with no new fact at all.
+        The graph can only change when the world revision moved or a tool
+        result updated the failure ledger, so other events skip the projection.
         """
         if self._finalize_steered or self.progress.objective_completed:
             return
-        established, ruled = self._round_state()
+        if event_type != "tool.result" and not world_changed:
+            return
+        snapshot = self.world.snapshot
+        established, ruled = self._round_state(snapshot)
         if self._round_fingerprint is None:
             # First observation of the graph is the baseline; it does not by
             # itself count as "the graph changed".
@@ -706,7 +727,7 @@ class SolverLoop:
         self._round_fingerprint = (established, ruled)
         self._round_count += 1
         brief = round_brief(
-            self.world.snapshot,
+            snapshot,
             self.skills,
             self.progress,
             round_number=self._round_count,
@@ -769,17 +790,20 @@ class SolverLoop:
 
     def _write_context(self) -> None:
         if self.world_context_enabled:
+            # One snapshot for focus, render and frontier keeps the written
+            # context revision-consistent instead of three reloads apart.
+            snapshot = self.world.snapshot
             focus = self.context_builder.build_focus(
-                self.world.snapshot,
+                snapshot,
                 reference=self.context_query,
                 subgoal=self.progress.current_subgoal,
             )
             rendered = self.context_builder.render(
-                self.world.snapshot,
+                snapshot,
                 query=self.context_query,
                 focus=focus,
             )
-            rendered += "\n" + frontier_context(self.world.snapshot, self.skills)
+            rendered += "\n" + frontier_context(snapshot, self.skills)
         else:
             rendered = ""
         (self.run_dir / "world.context.txt").write_text(rendered, encoding="utf-8")

@@ -341,6 +341,9 @@ Task != Environment != Agent != Model != Tool != Verifier
 
 The closed-loop control spine, the module that owns each stage, and the pruning
 rationale are documented in [`docs/control-theory.md`](docs/control-theory.md).
+The agent-side architecture as a whole (adapter/session contracts, solver loop,
+rounds, trust tiers, recovery) is consolidated in
+[`docs/agent-architecture.md`](docs/agent-architecture.md).
 
 ## Roadmap
 

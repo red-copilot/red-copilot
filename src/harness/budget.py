@@ -37,6 +37,22 @@ def enforced_budget_limits(spec: BudgetSpec) -> tuple[dict[str, float], list[str
     return {"wall_time": float(spec.wall_time)}, ignored
 
 
+def apply_budget_limits(spec: BudgetSpec, trace: TraceRecorder) -> dict[str, float]:
+    """Project a ``BudgetSpec`` onto enforced limits, surfacing ignored ones.
+
+    One place decides what a declared budget becomes at runtime, so entry
+    points cannot drift apart on which dimensions are dropped.
+    """
+    limits, ignored = enforced_budget_limits(spec)
+    if ignored:
+        trace.emit(
+            "budget.ignored",
+            actor="harness",
+            data={"ignored": ignored, "enforced": ["wall_time"]},
+        )
+    return limits
+
+
 @dataclass
 class UsageMetrics:
     input_tokens: int = 0

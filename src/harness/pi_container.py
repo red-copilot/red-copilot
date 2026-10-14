@@ -18,6 +18,7 @@ from .agent import (
     NORMALIZED_EVENT_FILE,
     AgentError,
     AgentResult,
+    AgentRunContext,
     ContainerLimits,
     _terminate_process,
     build_container_command,
@@ -28,10 +29,14 @@ from .models import AgentSpec, TaskSpec
 from .pi_adapter import PiAdapter
 from .secureio import open_regular_file, read_regular_text
 from .session import (
+    RPC_AGENT_CAPABILITIES,
+    AgentCapabilities,
     AgentCheckpoint,
     AgentEvent,
     AgentObservation,
     OneShotAgentSession,
+    SessionPhase,
+    SessionPhaseTracker,
     append_control,
     append_feedback,
     control_record,
@@ -65,14 +70,9 @@ def _container_name(run_dir: Path) -> str:
 class ContainerPiSession(OneShotAgentSession):
     """Session wrapper that can actively terminate the running Pi container."""
 
-    def __init__(self, adapter, *, run_kwargs, run_dir, poll_interval=0.05) -> None:
-        super().__init__(
-            adapter,
-            run_kwargs=run_kwargs,
-            run_dir=run_dir,
-            poll_interval=poll_interval,
-        )
-        self.container_name = _container_name(run_dir)
+    def __init__(self, adapter, *, context: AgentRunContext, poll_interval=0.05) -> None:
+        super().__init__(adapter, context=context, poll_interval=poll_interval)
+        self.container_name = _container_name(self.run_dir)
 
     async def close(self, reason: str) -> None:
         await super().close(reason)
@@ -102,10 +102,10 @@ class ContainerPiRpcSession:
         }
     )
 
-    def __init__(self, adapter: ContainerPiAdapter, *, run_kwargs: dict[str, Any]) -> None:
+    def __init__(self, adapter: ContainerPiAdapter, *, context: AgentRunContext) -> None:
         self.adapter = adapter
-        self.run_kwargs = run_kwargs
-        self.run_dir = Path(run_kwargs["run_dir"])
+        self.context = context
+        self.run_dir = Path(context.run_dir)
         self.container_name = _container_name(self.run_dir)
         self.event_path = self.run_dir / "events.jsonl"
         # Agent-authored typed solver events. RPC sessions read Pi's stdout, so
@@ -116,9 +116,10 @@ class ContainerPiRpcSession:
         self.control_path = self.run_dir / "agent.control.jsonl"
         self.raw_path = self.run_dir / "agent.stdout.log"
         self.stderr_path = self.run_dir / "agent.stderr.log"
-        gateway_usage_path = run_kwargs.get("gateway_usage_path")
-        self.gateway_usage_path = Path(gateway_usage_path) if gateway_usage_path else None
-        self._gateway_event_offset = int(run_kwargs.get("resume_gateway_event_offset", 0))
+        self.gateway_usage_path = (
+            Path(context.gateway_usage_path) if context.gateway_usage_path else None
+        )
+        self._gateway_event_offset = int(context.resume_gateway_event_offset or 0)
         self.process: asyncio.subprocess.Process | None = None
         self._stderr_handle = None
         self._write_lock = asyncio.Lock()
@@ -140,19 +141,22 @@ class ContainerPiRpcSession:
         self._pi_session_id: str | None = None
         self._started = 0.0
         self._metrics = UsageMetrics()
-        self._task = run_kwargs["task"]
-        self._gateway_enabled = bool(
-            run_kwargs.get("gateway_url") and run_kwargs.get("gateway_token")
-        )
+        self._task = context.task
+        self._gateway_enabled = bool(context.gateway_url and context.gateway_token)
+        self.phase = SessionPhaseTracker(trace=adapter.trace)
+
+    @property
+    def capabilities(self) -> AgentCapabilities:
+        return RPC_AGENT_CAPABILITIES
 
     @classmethod
     async def start(
         cls,
         adapter: ContainerPiAdapter,
         *,
-        run_kwargs: dict[str, Any],
+        context: AgentRunContext,
     ) -> ContainerPiRpcSession:
-        session = cls(adapter, run_kwargs=run_kwargs)
+        session = cls(adapter, context=context)
         try:
             await session._start()
         except Exception:
@@ -172,9 +176,10 @@ class ContainerPiRpcSession:
     async def _start(self) -> None:
         from .network_policy import enforced_network
 
-        task = self.run_kwargs["task"]
-        task_dir = Path(self.run_kwargs["task_dir"])
-        agent_task_dir = self.run_kwargs.get("agent_task_dir")
+        context = self.context
+        task = context.task
+        task_dir = Path(context.task_dir)
+        agent_task_dir = context.agent_task_dir
         if agent_task_dir is None:
             agent_task_dir = prepare_agent_task_view(
                 task_dir=task_dir,
@@ -182,12 +187,12 @@ class ContainerPiRpcSession:
                 verifier_entrypoint=task.verification.entrypoint,
             )
         run_dir = self.run_dir
-        if self.run_kwargs.get("resume_session_id"):
+        if context.resume_session_id:
             await self._guard_existing_resume_container(task_dir)
-        environment_network = self.run_kwargs.get("environment_network")
-        gateway_url = self.run_kwargs.get("gateway_url")
-        gateway_token = self.run_kwargs.get("gateway_token")
-        gateway_network = self.run_kwargs.get("gateway_network")
+        environment_network = context.environment_network
+        gateway_url = context.gateway_url
+        gateway_token = context.gateway_token
+        gateway_network = context.gateway_network
         gateway_enabled = bool(gateway_url and gateway_token)
         enforced = enforced_network(
             self.adapter.spec,
@@ -238,12 +243,12 @@ class ContainerPiRpcSession:
             run_dir=run_dir,
             container_name=self.container_name,
             network=primary_network,
-            environment_project=self.run_kwargs.get("environment_project"),
-            seed=self.run_kwargs["seed"],
+            environment_project=context.environment_project,
+            seed=context.seed,
             gateway_url=gateway_url,
             gateway_token=gateway_token,
             host_gateway=host_gateway,
-            agent_session_id=self.run_kwargs.get("resume_session_id"),
+            agent_session_id=context.resume_session_id,
         )
         self.adapter.trace.emit(
             "agent.started",
@@ -296,7 +301,7 @@ class ContainerPiRpcSession:
             limit=64 * 1024 * 1024,
         )
         self._started = time.monotonic()
-        if self.run_kwargs.get("resume_session_id"):
+        if context.resume_session_id:
             await self._wait_for_session_identity(
                 timeout=RPC_RESUME_HANDSHAKE_TIMEOUT, required=True
             )
@@ -307,6 +312,11 @@ class ContainerPiRpcSession:
             await self._wait_for_session_identity(
                 timeout=RPC_FRESH_HANDSHAKE_TIMEOUT, required=False
             )
+        self.phase.transition(
+            SessionPhase.STARTED,
+            resumed=bool(context.resume_session_id),
+            session_id=self._pi_session_id,
+        )
 
     async def _wait_for_session_identity(self, *, timeout: float, required: bool) -> None:
         if self.process is None or self.process.stdout is None:
@@ -330,7 +340,7 @@ class ContainerPiRpcSession:
                     r"[A-Za-z0-9._-]{1,128}", session_id
                 ):
                     raise AgentError("Pi RPC reported an invalid session ID")
-                requested_id = self.run_kwargs.get("resume_session_id")
+                requested_id = self.context.resume_session_id
                 if requested_id is not None and requested_id != session_id:
                     raise AgentError("Pi RPC did not restore the requested session ID")
                 self._pi_session_id = session_id
@@ -377,7 +387,7 @@ class ContainerPiRpcSession:
         self._events_consumed = True
         task = self._task
         initial_prompt = self.adapter._prompt_text(task)
-        if self.run_kwargs.get("resume_session_id"):
+        if self.context.resume_session_id:
             initial_prompt = (
                 "Continue the existing Pi session for this Harness run. First read the current "
                 "world.context.txt and progress.json in the project workspace. Treat them as "
@@ -390,6 +400,7 @@ class ContainerPiRpcSession:
             )
             self._pending_observations.clear()
         self._prompt_sent = True
+        self.phase.transition(SessionPhase.PROMPTING)
         await self._send_command(
             {
                 "id": f"harness-steering-mode-{uuid.uuid4().hex}",
@@ -429,26 +440,14 @@ class ContainerPiRpcSession:
                     self.process.stdout.readline(), timeout=min(remaining, 0.1)
                 )
             except TimeoutError:
+                # The loop top re-checks the deadline every pass, so a wait
+                # that overshot it is caught there on the next iteration.
                 self._consume_gateway_events()
-                self._check_budget()
                 if self._budget_exceeded:
-                    await self._kill_container()
-                    break
-                if time.monotonic() - self._started >= hard_deadline:
-                    self._timed_out = True
-                    self.adapter.trace.emit(
-                        "budget.exceeded",
-                        data={
-                            "budget": "wall_time",
-                            "limit": task.budgets.wall_time,
-                            "grace_seconds": FINALIZE_GRACE_SECONDS,
-                        },
-                    )
                     await self._kill_container()
                     break
                 continue
             self._consume_gateway_events()
-            self._check_budget()
             if self._budget_exceeded:
                 await self._kill_container()
                 break
@@ -498,8 +497,8 @@ class ContainerPiRpcSession:
                 self.adapter.trace.emit(event.type, actor="agent", data=event.data)
                 if event.type == "pi.agent_settled":
                     self._settled = True
+                    self.phase.transition(SessionPhase.SETTLED)
                 yield event
-            self._check_budget()
             if self._budget_exceeded:
                 await self._kill_container()
                 break
@@ -509,6 +508,9 @@ class ContainerPiRpcSession:
         for event in self._consume_agent_events():
             yield event
         if not self._settled and not self._timed_out and not self._budget_exceeded:
+            self.phase.transition(
+                SessionPhase.CRASHED, returncode=self.process.returncode
+            )
             event = AgentEvent(
                 type="agent.session.crashed",
                 data={"returncode": self.process.returncode},
@@ -537,6 +539,7 @@ class ContainerPiRpcSession:
                     # A settled RPC agent is idle between turns. Prompt starts
                     # the next turn; steer is reserved for an active turn.
                     self._settled = False
+                    self.phase.transition(SessionPhase.PROMPTING, cause="steer_prompt")
             except (BrokenPipeError, ConnectionResetError, RuntimeError) as exc:
                 self.adapter.trace.emit(
                     "agent.rpc.steer_failed",
@@ -561,6 +564,7 @@ class ContainerPiRpcSession:
         if self._closed:
             return
         self._closed = True
+        self.phase.transition(SessionPhase.CLOSED, reason=reason)
         await asyncio.to_thread(append_control, self.control_path, control_record(reason))
         await self._kill_container()
 
@@ -570,6 +574,7 @@ class ContainerPiRpcSession:
         if self.process.returncode is None and not self._closed:
             await self._kill_container()
             self._closed = True
+            self.phase.transition(SessionPhase.CLOSED, reason="result_drain")
         if self.process.stdin is not None and not self.process.stdin.is_closing():
             self.process.stdin.close()
         drain_task = asyncio.create_task(self._drain_stdout())
@@ -746,13 +751,6 @@ class ContainerPiRpcSession:
                 ),
             },
         )
-
-    def _check_budget(self) -> None:
-        # Only the wall-clock deadline bounds a run, and it is soft: the session
-        # keeps running through the finalize grace window. Token/call/cost
-        # ceilings are no longer enforced; untrusted telemetry still fails closed
-        # through `_invalid_gateway_telemetry` and `_account`.
-        return
 
     def _consume_gateway_events(self) -> None:
         if self.gateway_usage_path is None:
@@ -935,64 +933,41 @@ class ContainerPiAdapter(PiAdapter):
             ],
         )
 
+    @property
+    def capabilities(self) -> AgentCapabilities:
+        from .session import ONE_SHOT_AGENT_CAPABILITIES
+
+        if self.pi.mode == "rpc":
+            return RPC_AGENT_CAPABILITIES
+        return ONE_SHOT_AGENT_CAPABILITIES
+
     async def start_session(
         self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        environment_project: str | None,
-        environment_network: str | None,
-        seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-        gateway_network: str | None = None,
-        resume_session_id: str | None = None,
-        agent_task_dir: Path | None = None,
+        context: AgentRunContext,
     ) -> ContainerPiSession | ContainerPiRpcSession:
-        run_kwargs = {
-            "task": task,
-            "task_dir": task_dir,
-            "agent_task_dir": agent_task_dir,
-            "run_dir": run_dir,
-            "environment_project": environment_project,
-            "environment_network": environment_network,
-            "seed": seed,
-            "gateway_url": gateway_url,
-            "gateway_token": gateway_token,
-            "gateway_network": gateway_network,
-            "resume_session_id": resume_session_id,
-        }
         if self.pi.mode == "rpc":
-            return await ContainerPiRpcSession.start(self, run_kwargs=run_kwargs)
-        if resume_session_id is not None:
+            return await ContainerPiRpcSession.start(self, context=context)
+        if context.resume_session_id is not None:
             raise AgentError("Pi JSON mode cannot restore an Agent session")
-        return await ContainerPiSession.start(self, run_dir=run_dir, run_kwargs=run_kwargs)
+        return await ContainerPiSession.start(self, context=context)
 
-    def run(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        environment_project: str | None,
-        environment_network: str | None,
-        seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-        gateway_network: str | None = None,
-        agent_task_dir: Path | None = None,
-        resume_session_id: str | None = None,
-    ) -> AgentResult:
+    def run(self, context: AgentRunContext) -> AgentResult:
         if self.pi.mode == "rpc":
             raise AgentError(
                 "Pi RPC mode requires start_session(); use mode: json for one-shot runs"
             )
-        if resume_session_id is not None:
+        if context.resume_session_id is not None:
             raise AgentError("Pi JSON mode cannot restore an Agent session")
         from .network_policy import enforced_network
 
-        gateway_enabled = bool(gateway_url and gateway_token)
+        task = context.task
+        task_dir = context.task_dir
+        run_dir = context.run_dir
+        environment_network = context.environment_network
+        gateway_url = context.gateway_url
+        gateway_token = context.gateway_token
+        gateway_network = context.gateway_network
+        gateway_enabled = context.gateway_enabled
         enforced = enforced_network(
             self.spec,
             environment_network=environment_network,
@@ -1044,13 +1019,13 @@ class ContainerPiAdapter(PiAdapter):
             run_dir=run_dir,
             container_name=container_name,
             network=primary_network,
-            environment_project=environment_project,
-            seed=seed,
+            environment_project=context.environment_project,
+            seed=context.seed,
             gateway_url=gateway_url,
             gateway_token=gateway_token,
             host_gateway=host_gateway,
             agent_session_id=None,
-            agent_task_dir=agent_task_dir,
+            agent_task_dir=context.agent_task_dir,
         )
 
         self.trace.emit(
