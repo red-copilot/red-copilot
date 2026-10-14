@@ -1,4 +1,11 @@
-# OPS — Control plane, worker and observability
+# OPS — Control plane, worker and observability (removed)
+
+> **Descoped.** The control plane, worker queue, coordination blackboard, OTLP
+> export, leaderboard, benchmark registry and suite/evaluation tooling were
+> removed as open-loop complexity during the control-spine simplification
+> (2026-10-13). The remaining trace and audit observability stays in `trace.py`
+> and `audit.py`. See [`docs/control-theory.md`](../control-theory.md) and the
+> archived status below for the previous plan.
 
 **Scope:** `api/`, `control_plane.py`, `queue.py`, `worker.py`, `otel.py`, `trace.py`, `telemetry.py`, `audit.py`.
 

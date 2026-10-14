@@ -34,6 +34,7 @@
         "themes": {"type": "boolean"},
         "mcp": {"type": "boolean"},
         "offline": {"type": "boolean"},
+        "system_prompt_file": {"type": ["string", "null"], "minLength": 1},
         "env_passthrough": {
           "type": "array",
           "uniqueItems": true,

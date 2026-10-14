@@ -1,0 +1,30 @@
+apiVersion: harness/v1
+id: pi-tsec-opencode
+type: pi
+image: harness/pi-kali:local
+network: host
+network_profile: benchmark-only
+env: {}
+pi:
+  provider: opencode-go
+  model: longcat-2.5-preview-free
+  mode: json
+  thinking: medium
+  tools:
+    - read
+    - bash
+    - edit
+    - write
+  system_prompt_file: prompts/tsec-solver.md
+  env_passthrough:
+    - OPENCODE_API_KEY
+  cap_add:
+    - NET_RAW
+  approve_project: false
+  context_files: false
+  extensions: false
+  skills: false
+  prompt_templates: false
+  themes: false
+  mcp: false
+  offline: true

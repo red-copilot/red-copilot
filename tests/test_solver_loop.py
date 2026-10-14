@@ -75,7 +75,11 @@ def test_solver_loop_applies_aci_updates_world_without_action_id_verdict(tmp_pat
     assert "aci.feedback" in feedback_types
     assert "world.state.updated" in feedback_types
     assert "solver.verification" not in feedback_types
-    assert "obs-admin" in (tmp_path / "world.context.txt").read_text(encoding="utf-8")
+    context = (tmp_path / "world.context.txt").read_text(encoding="utf-8")
+    assert "obs-admin" in context
+    assert context.startswith("## Focus")
+    assert "reference: find admin endpoint" in context
+    assert "- [claim] observation:web.endpoint" in context
 
 
 def test_solver_loop_rejects_invalid_typed_event_without_stopping(tmp_path: Path) -> None:
@@ -407,7 +411,11 @@ def test_solver_loop_stops_after_bounded_no_progress_replans(tmp_path: Path) -> 
                 AgentEvent(
                     type="tool.result",
                     event_id=f"result-{index}",
-                    data={"tool": "probe", "tool_call_id": f"call-{index}"},
+                    data={
+                        "tool": "probe",
+                        "tool_call_id": f"call-{index}",
+                        "is_error": True,
+                    },
                 ),
             )
         return decision
@@ -417,7 +425,7 @@ def test_solver_loop_stops_after_bounded_no_progress_replans(tmp_path: Path) -> 
     assert decision.action is SolverAction.STOP
     assert decision.reason == "no_progress_limit"
     assert progress.no_progress_count == 6
-    assert progress.replan_count == 4
+    assert progress.replan_count == 5
     assert any(item.type == "solver.stop" for item in session.feedback)
     decisions = [
         item

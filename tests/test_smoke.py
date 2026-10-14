@@ -563,7 +563,11 @@ class _NoProgressSession:
             yield AgentEvent(
                 type="tool.result",
                 event_id=f"no-progress-{index}",
-                data={"tool": "probe", "tool_call_id": f"call-{index}"},
+                data={
+                    "tool": "probe",
+                    "tool_call_id": f"call-{index}",
+                    "is_error": True,
+                },
             )
 
     async def observe(self, _observation):

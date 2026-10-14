@@ -13,10 +13,9 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 
 # Directional rules, not a prohibition on deliberate application composition.
 FORBIDDEN = {
-    "world": {"api", "benchmark", "runtime", "orchestrator", "cli", "worker"},
-    "runtime": {"api", "benchmark", "orchestrator", "cli", "worker"},
-    "benchmark": {"api", "cli", "worker"},
-    "api": {"cli"},
+    "world": {"benchmark", "runtime", "orchestrator", "cli", "gateway", "gateway_runtime"},
+    "runtime": {"benchmark", "orchestrator", "cli", "gateway", "gateway_runtime"},
+    "benchmark": {"orchestrator", "cli", "gateway", "gateway_runtime"},
 }
 FORBIDDEN_EXTERNAL = {
     "world": {"fastapi", "starlette", "docker", "tsec_benchmark", "subprocess", "httpx"},
@@ -25,6 +24,76 @@ FORBIDDEN_EXTERNAL = {
     },
     "benchmark": {"fastapi", "starlette", "docker"},
 }
+
+# Frozen import closure of the single closed-loop control spine. Any new module
+# reachable from these roots must be added here deliberately, which forces a
+# reviewer to justify how it improves the feedback loop.
+SPINE_ROOTS = (
+    "harness.runtime.bootstrap",
+    "harness.benchmark.runner",
+    "harness.solver_loop",
+)
+CONTROL_SPINE: frozenset[str] = frozenset(
+    {
+        "harness.aci",
+        "harness.action_verifier",
+        "harness.agent",
+        "harness.agent_workspace",
+        "harness.benchmark.base",
+        "harness.benchmark.protocol",
+        "harness.benchmark.runner",
+        "harness.budget",
+        "harness.models",
+        "harness.network_policy",
+        "harness.pi_adapter",
+        "harness.pi_container",
+        "harness.planner",
+        "harness.progress",
+        "harness.runtime",
+        "harness.runtime.agent_workspace",
+        "harness.runtime.bootstrap",
+        "harness.runtime.checkpoint",
+        "harness.runtime.evidence",
+        "harness.runtime.lifecycle",
+        "harness.runtime.projections",
+        "harness.runtime.results",
+        "harness.runtime.solver_profile",
+        "harness.secureio",
+        "harness.session",
+        "harness.skills",
+        "harness.solver_loop",
+        "harness.solver_policy",
+        "harness.trace",
+        "harness.verification",
+        "harness.world",
+        "harness.world.context",
+        "harness.world.focus",
+        "harness.world.live",
+        "harness.world.models",
+        "harness.world.protocol",
+        "harness.world.reducer",
+        "harness.world.repository",
+        "harness.world.retrieval",
+        "harness.world.sqlite",
+        "harness.world.store",
+    }
+)
+# Subsystems deliberately removed as open-loop complexity. They must not reappear
+# anywhere on the control spine.
+DELETED_SUBSYSTEMS: frozenset[str] = frozenset(
+    {
+        "harness.api",
+        "harness.control_plane",
+        "harness.queue",
+        "harness.worker",
+        "harness.coordination",
+        "harness.otel",
+        "harness.scoring",
+        "harness.suite",
+        "harness.evaluation",
+        "harness.registry",
+    }
+)
 
 
 def _module_parts(path: Path, package_root: Path = PACKAGE_ROOT) -> tuple[str, ...]:
@@ -278,14 +347,14 @@ def test_architecture_guard_rejects_static_and_unresolved_dynamic_imports(
         "dynamic_import = getattr(loader, 'import_module')\n"
         "dynamic_builtin_import = getattr(runtime_builtins, '__import__')\n"
         "def load(module_name):\n"
-        "    loader.import_module('harness.api.runs')\n"
-        "    saved_import('harness.' + 'api')\n"
-        "    dynamic_import('harness.api.dynamic')\n"
-        "    dynamic_builtin_import('harness.worker.extra')\n"
+        "    loader.import_module('harness.benchmark.runner')\n"
+        "    saved_import('harness.' + 'benchmark')\n"
+        "    dynamic_import('harness.benchmark.dynamic')\n"
+        "    dynamic_builtin_import('harness.gateway.extra')\n"
         "    getattr(loader, 'import_module')('harness.runtime')\n"
-        "    __import__('importlib').import_module('harness.worker')\n"
+        "    __import__('importlib').import_module('harness.gateway')\n"
         "    exec('import harness.orchestrator')\n"
-        "    runtime_builtins.exec('import harness.api')\n"
+        "    runtime_builtins.exec('import harness.benchmark')\n"
         "    getattr(runtime_builtins, 'eval')('1')\n"
         "    eval(compile('import harness.cli', '<dynamic>', 'exec'))\n"
         "    load_module('harness.cli')\n"
@@ -295,12 +364,12 @@ def test_architecture_guard_rejects_static_and_unresolved_dynamic_imports(
 
     violations = _dependency_violations(package_root)
 
-    assert "world/unsafe.py -> harness.api.runs" in violations
-    assert "world/unsafe.py -> harness.api" in violations
+    assert "world/unsafe.py -> harness.benchmark.runner" in violations
+    assert "world/unsafe.py -> harness.benchmark" in violations
     assert "world/unsafe.py -> harness.runtime" in violations
-    assert "world/unsafe.py -> harness.worker" in violations
-    assert "world/unsafe.py -> harness.api.dynamic" in violations
-    assert "world/unsafe.py -> harness.worker.extra" in violations
+    assert "world/unsafe.py -> harness.gateway" in violations
+    assert "world/unsafe.py -> harness.benchmark.dynamic" in violations
+    assert "world/unsafe.py -> harness.gateway.extra" in violations
     assert "world/unsafe.py -> <dynamic code execution>" in violations
     assert "world/unsafe.py -> harness.cli" in violations
     assert "world/unsafe.py -> <dynamic import target>" in violations
@@ -323,3 +392,60 @@ def test_architecture_guard_rejects_builtin_module_dynamic_execution(
     violations = _dependency_violations(package_root)
 
     assert "world/unsafe.py -> <dynamic code execution>" in violations
+
+
+def _module_path(module: str, package_root: Path) -> Path | None:
+    parts = module.split(".")[1:]
+    if not parts:
+        return None
+    base = package_root.joinpath(*parts)
+    module_file = base.with_suffix(".py")
+    if module_file.is_file():
+        return module_file
+    init_file = base / "__init__.py"
+    if init_file.is_file():
+        return init_file
+    return None
+
+
+def _import_closure(roots: tuple[str, ...], package_root: Path) -> set[str]:
+    seen: set[str] = set()
+    stack = list(roots)
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        path = _module_path(module, package_root)
+        if path is None:
+            continue
+        seen.add(module)
+        for imported in _imports(path, package_root):
+            if imported == "harness" or imported.startswith("harness."):
+                stack.append(imported)
+    return seen
+
+
+def _is_removed(module: str) -> bool:
+    return any(
+        module == deleted or module.startswith(deleted + ".")
+        for deleted in DELETED_SUBSYSTEMS
+    )
+
+
+def test_control_spine_import_closure_is_frozen() -> None:
+    closure = _import_closure(SPINE_ROOTS, PACKAGE_ROOT)
+    leaked = sorted(module for module in closure if _is_removed(module))
+    assert not leaked, f"removed subsystems reappeared on the control spine: {leaked}"
+    extra = closure - CONTROL_SPINE
+    assert not extra, f"control spine grew beyond the frozen set: {sorted(extra)}"
+
+
+def test_removed_subsystems_are_absent_from_the_package() -> None:
+    for deleted in DELETED_SUBSYSTEMS:
+        assert _module_path(deleted, PACKAGE_ROOT) is None, f"still present: {deleted}"
+
+
+def test_cli_critical_path_excludes_removed_subsystems() -> None:
+    closure = _import_closure(("harness.cli",), PACKAGE_ROOT)
+    leaked = sorted(module for module in closure if _is_removed(module))
+    assert not leaked, f"removed subsystems reachable from the CLI: {leaked}"

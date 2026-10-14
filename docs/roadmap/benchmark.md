@@ -1,5 +1,10 @@
 # BEN — Benchmark, evaluation and offline competition
 
+> **Note (2026-10-13).** `suite.py` and `scoring.py` (with their CLI commands and
+> evaluation tooling) were removed as open-loop complexity during the control-spine
+> simplification. The generic `benchmark/` adapter, the TSec adapter and the frozen
+> fixtures remain. Historical pass@k/suite status below is retained for context.
+
 **Scope:** `benchmark/`, `suite.py`, `scoring.py`, `benchmarks/`, `docs/tsec.md`. A generic adapter and TSec adapter, pass@k suites, and Docker verifiers already exist.
 
 ### BEN-01 [x] P1 — Common benchmark lifecycle

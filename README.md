@@ -1,12 +1,12 @@
 # Red Harness
 
-Red Harness is a reproducible evaluation runtime and control plane for security agents. It keeps benchmark tasks, agents, target environments, model/tool access, budgets, verification, scoring, telemetry, and distributed execution separate so results can be independently reproduced and compared.
+Red Harness is a reproducible evaluation runtime for security agents. It keeps benchmark tasks, agents, target environments, model/tool access, budgets, verification, telemetry, and the control loop separate so results can be independently reproduced and compared.
 
 ## Current capabilities
 
 Version 0.8 provides:
 
-- declarative task, agent, suite, policy, and distributed-job contracts
+- declarative task, agent, and policy contracts
 - first-class [Pi](https://pi.dev/docs/latest) Agent Adapter running inside Kali Rolling Docker
 - Pi tool/model event normalization into Harness traces and budgets
 - Kali Rolling + `kali-linux-core` Pi image with curated security tools\n- isolated per-run Pi configuration and deterministic non-interactive defaults\n- generic Benchmark Adapter contracts (`discover/provision/submit/evaluate/teardown`)
@@ -20,20 +20,11 @@ Version 0.8 provides:
 - token, model-call, tool-call, cost, and wall-time budgets
 - provider credential isolation
 - Docker runtime profiles, including gVisor via `runtime: runsc`
-- parallel suite execution, pass@k, weighted score, and domain aggregation
-- authenticated control-plane API
-- leased distributed worker queue with heartbeat/recovery semantics
-- worker-local provider secrets and workspace path resolution
-- benchmark registry scanning
-- persisted result/trace viewer API
 - event-sourced universal world-state runtime with materialized snapshots
 - domain-neutral skill metadata registry for planner and domain extensions
 - rolling-horizon planner integrated with the interactive SolverLoop
-- leased coordination blackboard for explicit multi-agent work distribution
-- leaderboard aggregation
-- OTLP/HTTP JSON-compatible trace export
 - Firecracker capability detection and machine-profile contract
-- GitHub Actions coverage for Pi 1.0.4, Docker Agent, sidecar Gateway, Docker Verifier, and a real HTTP control-plane/worker flow
+- GitHub Actions coverage for Pi 1.0.4, Docker Agent, sidecar Gateway, and Docker Verifier
 
 > [!WARNING]
 > CLI agents and `verification.type: python` execute trusted host processes. Pi runs inside a restricted Docker container by default. `runtime: runsc` requires gVisor to be installed and registered with Docker. v0.8 defines and validates the Firecracker host/profile contract, but it does not yet launch microVMs; CI does not provide `/dev/kvm`.
@@ -63,40 +54,6 @@ harness run benchmarks/examples/hello/task.yaml \
   --allow-host-agent \
   --seed 42
 ```
-
-Parallel suite:
-
-```bash
-harness suite benchmarks/examples/smoke-suite.yaml \
-  --agent agents/examples/demo.yaml \
-  --allow-host-agent \
-  --workers 2
-```
-
-A suite may declare:
-
-```yaml
-apiVersion: harness/v1
-id: web-suite
-repeat: 5
-base_seed: 1000
-workers: 4
-pass_k: [1, 3, 5]
-
-tasks:
-  - path: web/task-001/task.yaml
-    weight: 1.0
-  - path: web/task-002/task.yaml
-    weight: 2.0
-```
-
-pass@k uses the standard unbiased estimator:
-
-```text
-pass@k = 1 - C(n-c, k) / C(n, k)
-```
-
-Domain aggregation is based on each task's `category`.
 
 ## Pi Agent Adapter
 
@@ -204,146 +161,26 @@ harness audit-run .harness/runs/run_...
 
 The command prints a JSON report with status `consistent`,
 `contradictory`, or `incomplete`; exit codes are 0, 1, and 2 respectively.
-The authenticated control plane also exposes the same report at
-`GET /v1/runs/{run_id}/audit`. A consistent report means the inspected records
-agree; it does not authenticate their sources or independently prove task success.
+Every run writes an append-only `trace.jsonl`; `harness audit-run` checks that the
+result, trace, progress, and World exports agree. A consistent report does not
+authenticate their sources or independently prove task success.
 
-## Distributed control plane
+## Control spine
 
-The reference control plane uses SQLite for durable job state and leases. Workers communicate only through HTTP, so they can run on different machines as long as each worker has the same benchmark/agent checkout or compatible workspace layout.
+Red Harness keeps a single closed feedback loop:
 
-Set an authentication token and start the control plane:
-
-```bash
-export HARNESS_CONTROL_TOKEN="replace-with-a-random-secret"
-
-harness serve \
-  --queue-db .harness/control.db \
-  --runs-root .harness/runs \
-  --benchmarks-root benchmarks \
-  --host 0.0.0.0 \
-  --port 8780
+```
+reference (task / TSec objective) -> error -> controller
+   (solver_policy + planner + Pi) -> actuator (tools) -> plant (target)
+   -> sensor (verifier / benchmark evaluator) -> estimator (world/) -> error
 ```
 
-Submit a job using worker-visible repository-relative paths:
-
-```bash
-harness submit benchmarks/examples/hello/task.yaml \
-  --agent agents/examples/demo.yaml \
-  --control-url http://control-plane:8780 \
-  --runs-root .harness/runs \
-  --seed 100
-```
-
-Start a worker:
-
-```bash
-export HARNESS_CONTROL_TOKEN="replace-with-a-random-secret"
-
-harness worker \
-  --control-url http://control-plane:8780 \
-  --workspace-root /srv/red-harness
-```
-
-Host-process CLI jobs are rejected by workers unless the worker is explicitly started with:
-
-```bash
---allow-host-jobs
-```
-
-### Lease model
-
-A job transitions through:
-
-```text
-queued -> running -> completed
-                  -> failed
-```
-
-When a Worker claims a job it receives a time-limited lease. It heartbeats while Orchestrator is running. If the Worker disappears and the lease expires, another Worker can reclaim the job. Each reclaim increments the job `attempts` counter.
-
-The SQLite backend is the single-control-plane reference implementation. The queue API is intentionally separated from Orchestrator so a PostgreSQL/Redis backend can replace it without changing Worker execution semantics.
-
-Provider API keys are never placed in queue payloads. Jobs store only the environment-variable name, such as `HARNESS_MODEL_API_KEY`; the Worker resolves the actual secret locally.
-
-## Control-plane API
-
-The authenticated API includes:
-
-```text
-POST /v1/jobs
-GET  /v1/jobs
-GET  /v1/jobs/{job_id}
-POST /v1/jobs/claim
-POST /v1/jobs/{job_id}/heartbeat
-POST /v1/jobs/{job_id}/complete
-POST /v1/jobs/{job_id}/fail
-
-GET  /v1/benchmarks
-GET  /v1/skills
-GET  /v1/leaderboard
-GET  /v1/capabilities
-
-GET  /v1/runs/{run_id}
-GET  /v1/runs/{run_id}/trace
-GET  /v1/runs/{run_id}/world
-GET  /v1/runs/{run_id}/world/events
-GET  /v1/runs/{run_id}/plan
-POST /v1/runs/{run_id}/plan/publish
-GET  /v1/work
-POST /v1/work
-POST /v1/work/claim
-POST /v1/work/{work_id}/heartbeat
-POST /v1/work/{work_id}/complete
-POST /v1/work/{work_id}/fail
-POST /v1/work/{work_id}/release
-GET  /v1/runs/{run_id}/otel
-```
-
-`/health` remains unauthenticated for service health checks. Other control-plane routes require the configured bearer token.
-
-## Leaderboard
-
-Completed distributed jobs are aggregated by `agent_id`. The current reference leaderboard reports:
-
-- run count
-- success rate
-- mean score
-- median duration
-- total estimated model cost
-
-Ordering is capability-first: mean score, success rate, then lower cost and lower duration.
-
-The queue stores full result JSON, so richer benchmark-profile or suite-level leaderboards can be layered on top without changing worker execution.
-
-## Benchmark registry
-
-The control plane recursively scans `task.yaml` files beneath `--benchmarks-root` and exposes valid tasks through `/v1/benchmarks`. Invalid task contracts are returned with validation errors instead of crashing the registry.
-
-## Trace viewer and OpenTelemetry
-
-Every run continues to write append-only `trace.jsonl`.
-
-The control plane exposes the normalized events directly:
-
-```text
-GET /v1/runs/{run_id}/trace
-```
-
-It also converts them to an OTLP/HTTP JSON-compatible trace document:
-
-```text
-GET /v1/runs/{run_id}/otel
-```
-
-Local export:
-
-```bash
-harness otel-export .harness/runs/run_... \
-  --output trace.otlp.json
-```
-
-Each Red Harness event becomes a span carrying run/task/actor/event attributes plus serialized event data. This export is intentionally file/HTTP payload generation in v0.7; direct collector delivery can be added without modifying the trace recorder.
+Only the verifier can close the loop: agent claims and tool exit codes are recorded
+as claims, not evidence. Open-loop subsystems (control plane, queue, worker,
+coordination blackboard, OTLP export, scoring, suite, evaluation, benchmark
+registry) were removed to keep the loop minimal. See
+[`docs/control-theory.md`](docs/control-theory.md) for the design and the pruning
+rationale.
 
 ## Gateway modes
 
@@ -481,32 +318,17 @@ For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
 ## Architecture
 
 ```text
-                         Control Plane
-                  ┌────────────┼─────────────┐
-                  │            │             │
-              Job Queue    Registry     Leaderboard
-                  │                          │
-          claim / lease / heartbeat          │
-                  │                          │
-          ┌───────┴────────┐                 │
-          │                │                 │
-       Worker A         Worker B             │
-          │                │                 │
-          └────── Orchestrator ──────────────┘
-                       │
-          ┌────────────┼──────────────┐
-          │            │              │
-      Environment    Gateway       Verifier
-                       │
-               ┌───────┴────────┐
-               │                │
-          Generic Agent      Pi Adapter
-                                │
-                          Pi JSON protocol
-                       │
-                Trace + Result
-                       │
-              Trace API / OTLP
+        reference (task / TSec objective)
+                 │
+                 ▼
+        error  ──────────────►  controller
+          ▲                  solver_policy + planner + Pi
+          │                            │
+          │                            ▼
+       estimator ◄── sensor ◄── plant ◄── actuator
+        world/     verifier    target    Pi tools
+
+        only the sensor (verifier / evaluator) may close the loop
 ```
 
 World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). Reusable technique metadata uses `harness/skill/v1`; skills describe state preconditions and possible outcomes but are not executable code. The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
@@ -517,16 +339,20 @@ Core separation rule:
 Task != Environment != Agent != Model != Tool != Verifier
 ```
 
+The closed-loop control spine, the module that owns each stage, and the pruning
+rationale are documented in [`docs/control-theory.md`](docs/control-theory.md).
+
 ## Roadmap
 
 1. **Done:** task/environment/verifier/result execution contract.
-2. **Done:** Docker Agent, budgets, repeat/seed, suites.
+2. **Done:** Docker Agent, budgets, repeat/seed.
 3. **Done:** Tool Gateway, model proxy, credential isolation, streaming accounting.
 4. **Done:** Docker Verifier sandbox and Docker Agent Gateway support.
-5. **Done:** isolated Gateway sidecar, Docker runtime profiles, parallel workers, pass@k, domain scoring.
-6. **Done:** authenticated control plane, leased distributed workers, benchmark registry, leaderboard, trace-viewer API, OTLP JSON export, Firecracker host/profile contract.
+5. **Done:** isolated Gateway sidecar, Docker runtime profiles.
+6. **Done:** Firecracker host/profile capability contract.
 7. **Done:** first-class Pi JSON adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
-8. PostgreSQL/Redis queue backend, containerized Pi adapter, KVM-enabled Firecracker lifecycle, snapshot pooling, OpenTelemetry collector delivery, browser trace UI, signed benchmark registry, and multi-tenant scheduling.
+8. **Done:** control-spine simplification (open-loop subsystems removed, single feedback loop).
+9. Containerized Pi adapter hardening, KVM-enabled Firecracker lifecycle, and snapshot pooling.
 
 
 ### Benchmark adapters

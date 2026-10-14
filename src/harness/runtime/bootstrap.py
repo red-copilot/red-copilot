@@ -59,12 +59,18 @@ def bootstrap_solver(
     for target in targets:
         world.upsert("entity", target, actor=target_actor or actor)
 
-    context_builder = WorldContextBuilder()
     world_context_enabled, planner_enabled = solver_profile_settings(solver_profile)
-    (run_dir / "world.context.txt").write_text(
-        context_builder.render(world.snapshot, query=context_query) if world_context_enabled else "",
-        encoding="utf-8",
-    )
+    context_builder = WorldContextBuilder(focus_enabled=world_context_enabled)
+    if world_context_enabled:
+        focus = context_builder.build_focus(world.snapshot, reference=context_query)
+        initial_context = context_builder.render(
+            world.snapshot,
+            query=context_query,
+            focus=focus,
+        )
+    else:
+        initial_context = ""
+    (run_dir / "world.context.txt").write_text(initial_context, encoding="utf-8")
     progress = (
         ProgressLedger.model_validate_json(
             read_regular_text(run_dir / "progress.json", max_bytes=8 * 1024 * 1024)

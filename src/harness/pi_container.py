@@ -27,6 +27,18 @@ from .session import AgentCheckpoint, AgentEvent, AgentObservation, OneShotAgent
 from .trace import TraceRecorder
 
 
+def _container_name(run_dir: Path) -> str:
+    """Stable per-run container name.
+
+    Deriving the name from the run directory's own name collides for benchmark
+    runs (whose workspace directory is always ``agent-workspace``), which breaks
+    parallel execution. Hash the resolved path instead so the name is unique per
+    run and stable across resume.
+    """
+    digest = hashlib.sha256(str(run_dir.resolve()).encode("utf-8")).hexdigest()[:24]
+    return f"harness_pi_{digest}"
+
+
 class ContainerPiSession(OneShotAgentSession):
     """Session wrapper that can actively terminate the running Pi container."""
 
@@ -37,7 +49,7 @@ class ContainerPiSession(OneShotAgentSession):
             run_dir=run_dir,
             poll_interval=poll_interval,
         )
-        self.container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
+        self.container_name = _container_name(run_dir)
 
     async def close(self, reason: str) -> None:
         await super().close(reason)
@@ -68,7 +80,7 @@ class ContainerPiRpcSession:
         self.adapter = adapter
         self.run_kwargs = run_kwargs
         self.run_dir = Path(run_kwargs["run_dir"])
-        self.container_name = ("harness_pi_" + self.run_dir.name.lower()).replace("-", "_")[:63]
+        self.container_name = _container_name(self.run_dir)
         self.event_path = self.run_dir / "events.jsonl"
         self.feedback_path = self.run_dir / "agent.feedback.jsonl"
         self.control_path = self.run_dir / "agent.control.jsonl"
@@ -959,11 +971,14 @@ class ContainerPiAdapter(PiAdapter):
         gateway_token: str | None = None,
         gateway_network: str | None = None,
         agent_task_dir: Path | None = None,
+        resume_session_id: str | None = None,
     ) -> AgentResult:
         if self.pi.mode == "rpc":
             raise AgentError(
                 "Pi RPC mode requires start_session(); use mode: json for one-shot runs"
             )
+        if resume_session_id is not None:
+            raise AgentError("Pi JSON mode cannot restore an Agent session")
         from .network_policy import enforced_network
 
         gateway_enabled = bool(gateway_url and gateway_token)
@@ -994,7 +1009,7 @@ class ContainerPiAdapter(PiAdapter):
         (run_dir / "pi-sessions").mkdir(parents=True, exist_ok=True)
         (run_dir / "home").mkdir(parents=True, exist_ok=True)
 
-        container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
+        container_name = _container_name(run_dir)
         sidecar_gateway = gateway_enabled and gateway_network is not None
         host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
         if enforced is not None:

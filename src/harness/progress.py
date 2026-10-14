@@ -53,6 +53,12 @@ class ProgressLedger(BaseModel):
     active_actions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     failure_count: int = 0
     no_progress_count: int = 0
+    # Consecutive tool executions without *confirmed* progress. A successful
+    # execution is neutral (neither confirmed progress nor a stall), so it feeds
+    # this bounded counter instead of the hard no-progress stall counter. This
+    # keeps exploration alive when no action-level verifier is available while
+    # still terminating an endless unproductive loop.
+    unconfirmed_progress: int = 0
     replan_count: int = 0
     failed_skill_counts: dict[str, int] = Field(default_factory=dict)
     reconciled_actions: dict[str, str] = Field(default_factory=dict)
@@ -122,9 +128,12 @@ class ProgressLedger(BaseModel):
                     )
             else:
                 self.execution_succeeded += 1
-            # A process exit is execution evidence only. It does not prove a
-            # target finding, acquired capability, or goal progress.
-            self.no_progress_count += 1
+            # A process exit is execution evidence only. A failed run is a real
+            # stall signal; a successful run is neither confirmed progress nor a
+            # stall, so it only advances the bounded unconfirmed counter.
+            if failed:
+                self.no_progress_count += 1
+            self.unconfirmed_progress += 1
         elif event.type == "progress.updated":
             self._record_progress_update(event.data)
         elif event.type == "goal.completed":
@@ -206,6 +215,7 @@ class ProgressLedger(BaseModel):
         made_progress = data.get("made_progress")
         if made_progress is False:
             self.no_progress_count += 1
+            self.unconfirmed_progress += 1
 
     def record_verification(self, verification: Any) -> None:
         data = (
@@ -219,11 +229,13 @@ class ProgressLedger(BaseModel):
             self.verified_actions += 1
             self.evidence_confirmed += 1
             self.no_progress_count = 0
+            self.unconfirmed_progress = 0
         elif status == "contradicted":
             self.contradicted_actions += 1
             if (self.last_action or {}).get("status") != "failed":
                 self.failure_count += 1
                 self.no_progress_count += 1
+            self.unconfirmed_progress += 1
         elif status == "pending":
             self.pending_actions += 1
 
@@ -235,12 +247,15 @@ class ProgressLedger(BaseModel):
         del completed  # Final evaluation, not submission feedback, owns completion.
         if accepted:
             self.accepted_submissions += 1
+            self.no_progress_count = 0
+            self.unconfirmed_progress = 0
             if "benchmark_negative_feedback" in self.replan_reasons:
                 self.replan_reasons.remove("benchmark_negative_feedback")
         else:
             self.rejected_submissions += 1
             self.failure_count += 1
             self.no_progress_count += 1
+            self.unconfirmed_progress += 1
             if "benchmark_negative_feedback" not in self.replan_reasons:
                 self.replan_reasons.append("benchmark_negative_feedback")
         # Submission feedback may ask the runtime to stop early, but only the
@@ -259,6 +274,7 @@ class ProgressLedger(BaseModel):
         else:
             raise ValueError(f"unknown trusted progress kind: {kind}")
         self.no_progress_count = 0
+        self.unconfirmed_progress = 0
 
     def record_objective_verdict(
         self,
@@ -272,6 +288,7 @@ class ProgressLedger(BaseModel):
         self.objective_completed = verdict.status == "verified"
         if self.objective_completed:
             self.no_progress_count = 0
+            self.unconfirmed_progress = 0
 
     def consume_replan_reasons(self, reasons: list[str]) -> None:
         consumed = set(reasons)

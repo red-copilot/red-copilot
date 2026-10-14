@@ -1,34 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import os
 from pathlib import Path
 from typing import Annotated
 
-import httpx
 import typer
-import uvicorn
 from pydantic import ValidationError
 
-from .audit import audit_run
 from .benchmark.tsec import TSecRunner, load_tsec_config
-from .control_plane import create_control_plane
-from .evaluation import compare_suite_reports
-from .execution import ExecutionCapabilities
-from .gateway import ModelPricing, create_gateway_app
 from .gateway_runtime import GatewayConfig
-from .models import BudgetSpec, load_agent, load_suite, load_task
+from .models import BudgetSpec, load_agent, load_task
 from .orchestrator import Orchestrator
-from .otel import export_otlp_json
-from .policy import load_policy
 from .preflight import run_preflight
-from .queue import GatewayJobSpec, JobPayload
 from .runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from .skills import load_skill
-from .suite import SuiteRunner
-from .worker import Worker
 
 app = typer.Typer(
     name="harness",
@@ -42,6 +29,8 @@ def audit_run_command(
     run_dir: Annotated[Path, typer.Argument(file_okay=False)],
 ) -> None:
     """Audit saved run artifacts without changing them."""
+    from .audit import audit_run
+
     report = audit_run(run_dir)
     typer.echo(report.model_dump_json(indent=2))
     raise typer.Exit(
@@ -81,33 +70,6 @@ def _gateway_config(
         sidecar_image=sidecar_image,
         sidecar_runtime=sidecar_runtime,
     )
-
-
-def _required_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        typer.echo(f"missing required environment variable {name}", err=True)
-        raise typer.Exit(code=2)
-    return value
-
-
-def _control_headers(token_env: str) -> dict[str, str]:
-    return {"authorization": f"Bearer {_required_env(token_env)}"}
-
-
-def _validate_control_plane_listener(
-    host: str, *, ssl_certfile: Path | None, ssl_keyfile: Path | None
-) -> None:
-    if bool(ssl_certfile) != bool(ssl_keyfile):
-        raise typer.BadParameter("--ssl-certfile and --ssl-keyfile must be supplied together")
-    try:
-        loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = host.lower() == "localhost"
-    if not loopback and ssl_certfile is None:
-        raise typer.BadParameter(
-            "non-loopback control-plane listeners require --ssl-certfile and --ssl-keyfile"
-        )
 
 
 @app.command()
@@ -164,19 +126,6 @@ def validate_skill(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"valid skill: {spec.id} ({spec.domain})")
-
-
-@app.command("validate-suite")
-def validate_suite(
-    suite: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
-) -> None:
-    """Validate a suite contract."""
-    try:
-        spec = load_suite(suite)
-    except (ValidationError, ValueError, TypeError) as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=2) from exc
-    typer.echo(f"valid suite: {spec.id} ({len(spec.tasks)} tasks x {spec.repeat})")
 
 
 @app.command()
@@ -266,94 +215,6 @@ def run(
         raise typer.Exit(code=1)
 
 
-@app.command("suite")
-def run_suite(
-    suite: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
-    agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
-    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".harness/runs"),
-    suites_root: Annotated[Path, typer.Option("--suites-root")] = Path(".harness/suites"),
-    workers: Annotated[int | None, typer.Option("--workers", min=1, max=64)] = None,
-    gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
-    gateway_policy: Annotated[
-        Path | None,
-        typer.Option("--gateway-policy", exists=True, dir_okay=False),
-    ] = None,
-    gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
-    gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
-    gateway_runtime: Annotated[str | None, typer.Option("--gateway-runtime")] = None,
-    model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
-    model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
-        "HARNESS_MODEL_API_KEY"
-    ),
-    input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
-    output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
-    allow_host_agent: Annotated[
-        bool,
-        typer.Option(
-            "--allow-host-agent",
-            help="Allow trusted CLI agent command to execute on the host.",
-        ),
-    ] = False,
-    solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
-        DEFAULT_SOLVER_PROFILE
-    ),
-) -> None:
-    """Run all tasks and repeats declared by a suite."""
-    summary = SuiteRunner(runs_root=runs_root, suites_root=suites_root).run(
-        suite=load_suite(suite),
-        suite_path=suite,
-        agent=load_agent(agent),
-        agent_path=agent,
-        allow_host_agent=allow_host_agent,
-        workers=workers,
-        gateway_config=_gateway_config(
-            enabled=gateway_enabled,
-            policy=gateway_policy,
-            model_upstream=model_upstream,
-            model_api_key_env=model_api_key_env,
-            input_price=input_price,
-            output_price=output_price,
-            mode=gateway_mode,
-            sidecar_image=gateway_image,
-            sidecar_runtime=gateway_runtime,
-        ),
-        solver_profile=solver_profile,
-    )
-    typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
-    if any(item["status"] == "error" for item in summary["runs"]):
-        raise typer.Exit(code=1)
-
-
-@app.command("compare-evaluations")
-def compare_evaluations(
-    baseline: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
-    candidate: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
-    max_success_rate_drop: Annotated[
-        float, typer.Option("--max-success-rate-drop", min=0, max=1)
-    ] = 0.0,
-    max_score_drop: Annotated[float, typer.Option("--max-score-drop", min=0, max=100)] = 0.0,
-) -> None:
-    """Compare suite reports on the same frozen manifest and gate regressions."""
-    from .secureio import read_regular_text
-
-    try:
-        before = json.loads(read_regular_text(baseline, max_bytes=64 * 1024 * 1024))
-        after = json.loads(read_regular_text(candidate, max_bytes=64 * 1024 * 1024))
-        if not isinstance(before, dict) or not isinstance(after, dict):
-            raise TypeError("evaluation report must contain a JSON object")
-        comparison = compare_suite_reports(
-            before,
-            after,
-            max_success_rate_drop=max_success_rate_drop,
-            max_score_drop=max_score_drop,
-        )
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    typer.echo(json.dumps(comparison, ensure_ascii=False, indent=2))
-    if not comparison["passed"]:
-        raise typer.Exit(code=1)
-
-
 @app.command("tsec")
 def tsec(
     agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
@@ -409,140 +270,11 @@ def tsec(
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
 
 
-@app.command("serve")
-def serve(
-    queue_db: Annotated[Path, typer.Option("--queue-db")] = Path(".harness/control.db"),
-    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".harness/runs"),
-    benchmarks_root: Annotated[Path, typer.Option("--benchmarks-root")] = Path("benchmarks"),
-    skills_root: Annotated[Path, typer.Option("--skills-root")] = Path("skills"),
-    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8780,
-    token_env: Annotated[str, typer.Option("--token-env")] = "HARNESS_CONTROL_TOKEN",
-    ssl_certfile: Annotated[Path | None, typer.Option("--ssl-certfile", exists=True)] = None,
-    ssl_keyfile: Annotated[Path | None, typer.Option("--ssl-keyfile", exists=True)] = None,
-) -> None:
-    """Serve the authenticated queue, leaderboard, registry, and trace-viewer API."""
-    _validate_control_plane_listener(host, ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
-    token = _required_env(token_env)
-    api = create_control_plane(
-        queue_db=queue_db.resolve(),
-        runs_root=runs_root.resolve(),
-        benchmarks_root=benchmarks_root.resolve(),
-        skills_root=skills_root.resolve(),
-        token=token,
-    )
-    uvicorn.run(
-        api,
-        host=host,
-        port=port,
-        access_log=False,
-        ssl_certfile=str(ssl_certfile) if ssl_certfile else None,
-        ssl_keyfile=str(ssl_keyfile) if ssl_keyfile else None,
-    )
-
-
-@app.command("submit")
-def submit(
-    task: Annotated[str, typer.Argument(help="Worker-visible task path")],
-    agent: Annotated[str, typer.Option("--agent", help="Worker-visible agent path")],
-    control_url: Annotated[str, typer.Option("--control-url")],
-    runs_root: Annotated[str, typer.Option("--runs-root")] = ".harness/runs",
-    seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
-    allow_host_agent: Annotated[bool, typer.Option("--allow-host-agent")] = False,
-    gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
-    gateway_policy: Annotated[str | None, typer.Option("--gateway-policy")] = None,
-    gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
-    gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
-    gateway_runtime: Annotated[str | None, typer.Option("--gateway-runtime")] = None,
-    model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
-    model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
-        "HARNESS_MODEL_API_KEY"
-    ),
-    input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
-    output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
-    token_env: Annotated[str, typer.Option("--token-env")] = "HARNESS_CONTROL_TOKEN",
-) -> None:
-    """Submit one run to a Red Harness control plane."""
-    if gateway_mode not in {"host", "sidecar"}:
-        raise typer.BadParameter("--gateway-mode must be host or sidecar")
-    if gateway_enabled and gateway_mode == "sidecar" and not gateway_image:
-        raise typer.BadParameter("--gateway-image is required for sidecar mode")
-    payload = JobPayload(
-        task_path=task,
-        agent_path=agent,
-        runs_root=runs_root,
-        allow_host_agent=allow_host_agent,
-        seed=seed,
-        gateway=GatewayJobSpec(
-            enabled=gateway_enabled,
-            policy_path=gateway_policy,
-            mode=gateway_mode,
-            sidecar_image=gateway_image,
-            sidecar_runtime=gateway_runtime,
-            model_upstream=model_upstream,
-            model_api_key_env=model_api_key_env,
-            input_price_per_million_usd=input_price,
-            output_price_per_million_usd=output_price,
-        ),
-    )
-    response = httpx.post(
-        control_url.rstrip("/") + "/v1/jobs",
-        headers=_control_headers(token_env),
-        json=payload.model_dump(),
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    typer.echo(json.dumps(response.json(), ensure_ascii=False, indent=2))
-
-
-@app.command("worker")
-def worker(
-    control_url: Annotated[str, typer.Option("--control-url")],
-    workspace_root: Annotated[Path, typer.Option("--workspace-root", file_okay=False)] = Path("."),
-    worker_id: Annotated[str | None, typer.Option("--worker-id")] = None,
-    lease_seconds: Annotated[int, typer.Option("--lease-seconds", min=10, max=3600)] = 60,
-    poll_interval: Annotated[float, typer.Option("--poll-interval", min=0.1)] = 2.0,
-    once: Annotated[bool, typer.Option("--once")] = False,
-    allow_host_jobs: Annotated[bool, typer.Option("--allow-host-jobs")] = False,
-    token_env: Annotated[str, typer.Option("--token-env")] = "HARNESS_CONTROL_TOKEN",
-) -> None:
-    """Claim and execute leased jobs from a control plane."""
-    instance = Worker(
-        control_url=control_url,
-        token=_required_env(token_env),
-        worker_id=worker_id,
-        lease_seconds=lease_seconds,
-        allow_host_jobs=allow_host_jobs,
-        workspace_root=workspace_root,
-    )
-    try:
-        if once:
-            worked = instance.run_once()
-            typer.echo("executed" if worked else "no-job")
-        else:
-            instance.run_forever(poll_interval=poll_interval)
-    finally:
-        instance.close()
-
-
-@app.command("otel-export")
-def otel_export(
-    run_dir: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
-    output: Annotated[Path | None, typer.Option("--output")] = None,
-) -> None:
-    """Export trace.jsonl as OTLP/HTTP JSON-compatible trace data."""
-    trace_path = run_dir / "trace.jsonl"
-    if not trace_path.is_file():
-        typer.echo(f"missing {trace_path}", err=True)
-        raise typer.Exit(code=2)
-    target = output or (run_dir / "otel-traces.json")
-    export_otlp_json(trace_path, target)
-    typer.echo(str(target))
-
-
 @app.command("capabilities")
 def capabilities() -> None:
     """Show locally available execution backends."""
+    from .execution import ExecutionCapabilities
+
     typer.echo(json.dumps(ExecutionCapabilities.detect().as_dict(), indent=2))
 
 
@@ -568,6 +300,11 @@ def gateway(
     output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
 ) -> None:
     """Serve the policy-gated Tool Gateway and OpenAI-compatible model proxy."""
+    import uvicorn
+
+    from .gateway import ModelPricing, create_gateway_app
+    from .policy import load_policy
+
     gateway_token = os.environ.get(gateway_token_env)
     if not gateway_token:
         typer.echo(

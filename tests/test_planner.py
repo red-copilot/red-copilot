@@ -240,6 +240,120 @@ def test_rolling_horizon_plan_uses_progress_and_expected_outputs() -> None:
     assert plan.actions[0].expected_observations
     assert "no_progress_threshold" in plan.actions[0].replan_triggers
     assert "subgoal=enumerate services" in plan.actions[0].rationale
+    assert "focus_relevance=" in plan.actions[0].rationale
+
+
+def _focus_snapshot(observations: dict) -> WorldSnapshot:
+    return WorldSnapshot(
+        goals={
+            "goal-1": Goal(
+                id="goal-1",
+                description="Find the admin panel",
+                status="active",
+                priority=1.0,
+            )
+        },
+        observations=observations,
+    )
+
+
+def _focus_skills() -> list[SkillSpec]:
+    return [
+        SkillSpec(
+            id="confirm-endpoint",
+            description="Confirm the web endpoint",
+            produces=[
+                {"kind": "observation", "type": "web.endpoint"},
+                {"kind": "observation", "type": "meta.note"},
+            ],
+            cost=0.2,
+            risk=0.2,
+            noise=0.2,
+        ),
+        SkillSpec(
+            id="dns-lookup",
+            description="Resolve the hostname",
+            produces=[
+                {"kind": "observation", "type": "dns.record"},
+                {"kind": "observation", "type": "dns.zone"},
+            ],
+            cost=0.2,
+            risk=0.2,
+            noise=0.2,
+        ),
+    ]
+
+
+def _lead(record_id: str, type_name: str, confidence: float, **content) -> Observation:
+    return Observation(
+        id=record_id,
+        type=type_name,
+        content=content,
+        confidence=confidence,
+        provenance=Provenance(epistemic_status="claim"),
+    )
+
+
+def _frontier_before() -> WorldSnapshot:
+    # Two unverified leads. The web endpoint lead outranks the dns zone lead on
+    # goal relevance, so it heads the frontier.
+    return _focus_snapshot(
+        {
+            "lead": _lead("lead", "web.endpoint", 0.3, path="/admin"),
+            "zone": _lead("zone", "dns.zone", 0.3, name="target"),
+        }
+    )
+
+
+def _frontier_after() -> WorldSnapshot:
+    now = datetime.now(UTC)
+    # The web endpoint lead is confirmed (and displaced); the dns zone lead has
+    # expired; a fresh dns record lead now heads the frontier.
+    return _focus_snapshot(
+        {
+            "lead": _lead("lead", "web.endpoint", 0.3, path="/admin"),
+            "zone": Observation(
+                id="zone",
+                type="dns.zone",
+                content={"name": "target"},
+                confidence=0.3,
+                provenance=Provenance(epistemic_status="claim"),
+                expires_at=now - timedelta(seconds=1),
+            ),
+            "confirmed": Observation(
+                id="confirmed",
+                type="web.endpoint",
+                content={"path": "/admin", "status": 200},
+                provenance=Provenance(epistemic_status="verified"),
+                supersedes=["lead"],
+            ),
+            "dns-lead": _lead("dns-lead", "dns.record", 0.3, name="target"),
+        }
+    )
+
+
+def test_focus_relevance_prefers_the_skill_that_resolves_the_frontier() -> None:
+    candidates = HeuristicSkillPlanner().propose(_frontier_before(), _focus_skills())
+
+    by_id = {candidate.skill_id: candidate for candidate in candidates}
+    # Equal novelty, so the frontier signal alone decides the ranking.
+    assert by_id["confirm-endpoint"].novelty == by_id["dns-lookup"].novelty
+    assert by_id["confirm-endpoint"].focus_relevance == 0.5
+    assert by_id["dns-lookup"].focus_relevance == 0.0
+    assert candidates[0].skill_id == "confirm-endpoint"
+
+
+def test_focus_relevance_follows_changes_in_the_world_frontier() -> None:
+    skills = _focus_skills()
+    before = HeuristicSkillPlanner().propose(_frontier_before(), skills)
+    after = HeuristicSkillPlanner().propose(_frontier_after(), skills)
+
+    before_by_id = {candidate.skill_id: candidate for candidate in before}
+    after_by_id = {candidate.skill_id: candidate for candidate in after}
+    assert before_by_id["confirm-endpoint"].focus_relevance > before_by_id["dns-lookup"].focus_relevance
+    assert after_by_id["dns-lookup"].focus_relevance > after_by_id["confirm-endpoint"].focus_relevance
+    assert before[0].skill_id == "confirm-endpoint"
+    assert after[0].skill_id == "dns-lookup"
 
 
 def test_rolling_horizon_clamps_to_three_actions() -> None:

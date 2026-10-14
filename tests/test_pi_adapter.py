@@ -10,7 +10,11 @@ import pytest
 from harness.agent import AgentError
 from harness.budget import UsageMetrics
 from harness.models import AgentSpec, load_task
-from harness.pi_container import ContainerPiAdapter, ContainerPiRpcSession
+from harness.pi_container import (
+    ContainerPiAdapter,
+    ContainerPiRpcSession,
+    _container_name,
+)
 from harness.session import AgentEvent, AgentObservation
 from harness.trace import TraceRecorder
 
@@ -850,7 +854,7 @@ def test_pi_rpc_session_kills_container_when_budget_is_exceeded(
 
     assert [event.type for event in events] == event_types
     assert killed
-    assert set(killed) == {"harness_pi_run_budget_rpc"}
+    assert set(killed) == {_container_name(run_dir)}
     assert result.budget_exceeded == budget_name
     assert getattr(result.metrics, metric_name) == metric_value
 
@@ -989,3 +993,49 @@ def test_legacy_pi_json_runner_uses_verified_target_network_id(monkeypatch, tmp_
 
     create = next(command for command in commands if command[:2] == ["docker", "create"])
     assert create[create.index("--network") + 1] == "c" * 64
+
+
+def _adapter_with_system_prompt(monkeypatch, tmp_path: Path, prompt_file: str) -> ContainerPiAdapter:
+    monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
+    spec = AgentSpec.model_validate(
+        {
+            "apiVersion": "harness/v1",
+            "id": "pi-system-prompt",
+            "type": "pi",
+            "image": "harness-pi-kali:test",
+            "network": "environment",
+            "pi": {
+                "provider": "fake",
+                "model": "fake-model",
+                "system_prompt_file": prompt_file,
+            },
+        }
+    )
+    return ContainerPiAdapter(
+        spec,
+        allow_host=False,
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
+    )
+
+
+def test_pi_system_prompt_file_is_prepended(monkeypatch, tmp_path: Path) -> None:
+    prompt_file = tmp_path / "solver.md"
+    prompt_file.write_text("CONTROL-LOOP-INSTRUCTIONS\n", encoding="utf-8")
+    adapter = _adapter_with_system_prompt(monkeypatch, tmp_path, str(prompt_file))
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+
+    prompt = adapter._prompt_text(task)
+
+    assert prompt.startswith("CONTROL-LOOP-INSTRUCTIONS")
+    assert "$HARNESS_SUBMISSION_INBOX" in prompt
+    assert task.objective.description in prompt
+
+
+def test_pi_missing_system_prompt_file_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    adapter = _adapter_with_system_prompt(
+        monkeypatch, tmp_path, str(tmp_path / "missing.md")
+    )
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+
+    with pytest.raises(AgentError, match="system prompt file was not found"):
+        adapter._prompt_text(task)

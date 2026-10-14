@@ -17,13 +17,12 @@ Baseline: main at `96cf0c056e2de30de8436fd03caefcf6d9b16d2f` (2026-10-08). Revie
 | WLD | [World state & retrieval](world.md) | P1 | VER provenance |
 | PLN | [Planning & skills](planning.md) | P1 | WLD |
 | BEN | [Benchmark, evaluation & offline](benchmark.md) | P1 | VER, EXE |
-| OPS | [Control plane, worker & observability](operations.md) | P2 | RUN |
 | QA | [Quality, architectural boundaries & performance](quality.md) | continuous | all |
 
 ## Dependency-aware delivery stages
 - **S0 — correctness:** VER-01/02, RUN-01/02, EXE-01, QA-01. Objective success must rely on independent evidence; recoverable durable control state.
 - **S1 — bounded autonomy:** RUN-03, WLD-01/02, PLN-01, BEN-01/02. State changes must actually affect next actions; no unsafe retry or network assumptions.
-- **S2 — measurable generality:** BEN-03, PLN-02, EXE-02, OPS-01, QA-02/03. Demonstrate improvements across domains, not one benchmark.
+- **S2 — measurable generality:** BEN-03, PLN-02, EXE-02, QA-02/03. Demonstrate improvements across domains, not one benchmark.
 - **S3 — optional experiments:** learned retrieval, planning, distributed agents or alternate stores only if S2 ablations show a measured gap.
 
 ## Global acceptance gates

@@ -3,13 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 import harness.audit as audit_module
 from harness.audit import audit_run
 from harness.cli import app
-from harness.control_plane import create_control_plane
 from harness.progress import ProgressLedger
 from harness.runtime.evidence import persist_objective_verdict
 from harness.trace import TraceRecorder
@@ -352,26 +350,3 @@ def test_audit_read_only_and_cli_exit_code(tmp_path: Path) -> None:
     )
     contradictory = CliRunner().invoke(app, ["audit-run", str(tmp_path)])
     assert contradictory.exit_code == 1
-
-
-def test_audit_api_auth_and_report(tmp_path: Path) -> None:
-    runs = tmp_path / "runs"
-    _write_run(runs / "run_audit")
-    client = TestClient(
-        create_control_plane(queue_db=tmp_path / "control.db", runs_root=runs, token="secret")
-    )
-    path = "/v1/runs/run_audit/audit"
-    assert client.get(path).status_code == 401
-    response = client.get(path, headers={"Authorization": "Bearer secret"})
-    assert response.status_code == 200
-    assert response.json() == audit_run(runs / "run_audit").model_dump(mode="json")
-    assert (
-        client.get(
-            "/v1/runs/run_missing/audit", headers={"Authorization": "Bearer secret"}
-        ).status_code
-        == 404
-    )
-    assert (
-        client.get("/v1/runs/invalid/audit", headers={"Authorization": "Bearer secret"}).status_code
-        == 400
-    )

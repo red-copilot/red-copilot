@@ -311,8 +311,7 @@ class PiAdapter:
             raise AgentError("Pi RPC mode does not accept @file prompt arguments")
         return args
 
-    @staticmethod
-    def _prompt_text(task: TaskSpec) -> str:
+    def _prompt_text(self, task: TaskSpec) -> str:
         world_protocol = (
             "\n\nHarness solver protocol:\n"
             "Read $HARNESS_WORLD_CONTEXT and $HARNESS_PROGRESS_FILE before acting. "
@@ -335,7 +334,19 @@ class PiAdapter:
             "Treat Internet access as optional and non-essential; solve from benchmark targets "
             "and local tools first."
         )
-        return task.objective.description + world_protocol
+        return self._system_prompt() + task.objective.description + world_protocol
+
+    def _system_prompt(self) -> str:
+        reference = self.pi.system_prompt_file
+        if not reference:
+            return ""
+        path = Path(reference)
+        if not path.is_file():
+            raise AgentError(f"Pi system prompt file was not found: {reference}")
+        text = path.read_text(encoding="utf-8")
+        if len(text.encode("utf-8")) > 64 * 1024:
+            raise AgentError("Pi system prompt file exceeds 64 KiB")
+        return text.rstrip() + "\n\n"
 
     def _create_command(
         self,

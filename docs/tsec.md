@@ -37,6 +37,13 @@ pi:
 
 On Linux, `network: host` is the recommended TSec mode because the Kali container directly shares the Worker network namespace and VPN routes. If your VPN permits Docker bridge forwarding, `network: environment` can be used instead.
 
+For the benchmark run, `agents/examples/pi-tsec-hackathon.yaml` adds a
+control-loop system prompt (`pi.system_prompt_file: prompts/tsec-solver.md`). The
+prompt tells Pi to observe/act/verify/adjust, to treat Harness verification as the
+only authoritative feedback, and to submit candidates via `$HARNESS_SUBMISSION_INBOX`.
+The ablation matrix (Pi-only vs feedback vs full control spine) is in
+[control-theory.md](control-theory.md).
+
 ## Run
 
 One unfinished challenge:

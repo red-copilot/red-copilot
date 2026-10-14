@@ -346,10 +346,15 @@ class BenchmarkRunner:
                     actor=f"benchmark:{session.benchmark}",
                 )
             revision_after_feedback = world.snapshot.revision
+            focus = context_builder.build_focus(
+                world.snapshot,
+                reference=session.objective.description,
+            )
             (run_dir / "world.context.txt").write_text(
                 context_builder.render(
                     world.snapshot,
                     query=session.objective.description,
+                    focus=focus,
                 ),
                 encoding="utf-8",
             )
@@ -413,6 +418,11 @@ class BenchmarkRunner:
             run_kwargs = {
                 "task": task,
                 "task_dir": agent_workspace,
+                # Externally provisioned benchmarks have no verifier-bearing task
+                # tree to sanitize; the agent workspace is the task view. Passing
+                # it directly avoids the local-run guard that rejects a task
+                # directory nested under the authoritative run root.
+                "agent_task_dir": agent_workspace,
                 "run_dir": agent_workspace,
                 "environment_project": None,
                 "environment_network": None,

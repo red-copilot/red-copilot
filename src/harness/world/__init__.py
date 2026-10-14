@@ -1,4 +1,11 @@
 from .context import WorldContextBuilder
+from .focus import (
+    DEFAULT_FOCUS_CLAIM_THRESHOLD,
+    FocusBuilder,
+    FocusItem,
+    FocusRequest,
+    FocusSet,
+)
 from .live import WorldInboxCursor
 from .models import (
     ActionRecord,
@@ -24,6 +31,7 @@ from .sqlite import SQLiteWorldRepository
 from .store import FileWorldRepository, WorldStore
 
 __all__ = [
+    "DEFAULT_FOCUS_CLAIM_THRESHOLD",
     "ActionRecord",
     "Artifact",
     "Capability",
@@ -31,6 +39,10 @@ __all__ = [
     "Entity",
     "Failure",
     "FileWorldRepository",
+    "FocusBuilder",
+    "FocusItem",
+    "FocusRequest",
+    "FocusSet",
     "Goal",
     "Hypothesis",
     "IngestReport",

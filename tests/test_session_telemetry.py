@@ -312,7 +312,8 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     ledger.record_submission(accepted=True, completed=True)
     assert ledger.accepted_submissions == 1
     assert ledger.objective_completed is False
-    assert ledger.no_progress_count == 1
+    assert ledger.no_progress_count == 0
+    assert ledger.unconfirmed_progress == 0
     with pytest.raises(ValueError):
         ledger.record_trusted_progress("objective_completed")
     registry = VerifierRegistry()
@@ -364,7 +365,8 @@ def test_successful_tool_exit_is_not_task_progress() -> None:
     )
 
     assert ledger.execution_succeeded == 1
-    assert ledger.no_progress_count == 1
+    assert ledger.no_progress_count == 0
+    assert ledger.unconfirmed_progress == 1
     assert ledger.objective_completed is False
 
 
@@ -385,6 +387,8 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
     )
     asyncio.run(session.close("objective-complete"))
 
-    assert calls == [["docker", "kill", "harness_pi_run_demo"]]
+    from harness.pi_container import _container_name
+
+    assert calls == [["docker", "kill", _container_name(run_dir)]]
     control = tmp_path / "run_demo" / "agent.control.jsonl"
     assert "objective-complete" in control.read_text(encoding="utf-8")

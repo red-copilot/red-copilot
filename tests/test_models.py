@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from harness.models import AgentSpec, TaskSpec, load_agent, load_suite, load_task
+from harness.models import AgentSpec, TaskSpec, load_agent, load_task
 
 
 def test_example_contracts_are_valid() -> None:
@@ -13,7 +13,7 @@ def test_example_contracts_are_valid() -> None:
     )
     agent = load_agent(Path("agents/examples/demo.yaml"))
     pi_agent = load_agent(Path("agents/examples/pi.yaml"))
-    suite = load_suite(Path("benchmarks/examples/smoke-suite.yaml"))
+    hackathon_agent = load_agent(Path("agents/examples/pi-tsec-hackathon.yaml"))
     assert task.api_version == "harness/v1"
     assert task.budgets.wall_time == 30
     assert docker_verifier.verification.type == "docker"
@@ -24,7 +24,9 @@ def test_example_contracts_are_valid() -> None:
     assert pi_agent.pi is not None
     assert pi_agent.pi.model == "gpt-5.6-sol"
     assert pi_agent.pi.cap_add == ["NET_RAW"]
-    assert suite.repeat == 2
+    assert hackathon_agent.type == "pi"
+    assert hackathon_agent.pi is not None
+    assert hackathon_agent.pi.system_prompt_file == "prompts/tsec-solver.md"
 
 
 def test_docker_agent_requires_image() -> None:

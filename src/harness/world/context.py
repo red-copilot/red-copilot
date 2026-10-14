@@ -3,8 +3,24 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .focus import DEFAULT_FOCUS_CLAIM_THRESHOLD, FocusBuilder, FocusItem, FocusRequest, FocusSet
 from .models import WorldSnapshot
 from .retrieval import WorldRetriever
+
+
+def _clip(text: str | None, limit: int) -> str:
+    if not text:
+        return ""
+    return text if len(text) <= limit else text[:limit].rstrip() + " ..."
+
+
+def _focus_line(item: FocusItem, *, with_reason: bool = False) -> str:
+    confidence = f" conf={item.confidence:.2f}" if item.confidence is not None else ""
+    reason = f" ({item.reason})" if with_reason and item.reason else ""
+    return (
+        f"- [{item.epistemic_status}] {item.kind}:{item.type} {item.label}"
+        f"{confidence}{reason}"
+    )
 
 
 class WorldContextBuilder:
@@ -17,18 +33,43 @@ class WorldContextBuilder:
         max_failures: int = 10,
         max_relations: int = 20,
         max_chars: int = 16000,
+        focus_max_chars: int = 2000,
+        focus_claim_threshold: float = DEFAULT_FOCUS_CLAIM_THRESHOLD,
+        focus_enabled: bool = True,
         retriever: WorldRetriever | None = None,
+        focus_builder: FocusBuilder | None = None,
     ) -> None:
         self.max_observations = max_observations
         self.max_failures = max_failures
         self.max_relations = max_relations
         self.max_chars = max_chars
+        self.focus_max_chars = focus_max_chars
+        self.focus_claim_threshold = focus_claim_threshold
+        self.focus_enabled = focus_enabled
+        self.focus_builder = focus_builder or FocusBuilder()
         self.retriever = retriever or WorldRetriever(
             limits={
                 "observations": max_observations,
                 "failures": max_failures,
                 "relations": max_relations,
             }
+        )
+
+    def build_focus(
+        self,
+        snapshot: WorldSnapshot,
+        *,
+        reference: str,
+        subgoal: str | None = None,
+    ) -> FocusSet:
+        """Derive the bounded working set for one solver round."""
+        return self.focus_builder.build(
+            snapshot,
+            FocusRequest(
+                reference=reference,
+                subgoal=subgoal,
+                claim_threshold=self.focus_claim_threshold,
+            ),
         )
 
     @staticmethod
@@ -61,7 +102,72 @@ class WorldContextBuilder:
         compact = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return f"- {prefix} {object_id} [{type_name}] {compact}"
 
-    def render(self, snapshot: WorldSnapshot, *, query: str | None = None) -> str:
+    def render(
+        self,
+        snapshot: WorldSnapshot,
+        *,
+        query: str | None = None,
+        focus: FocusSet | None = None,
+    ) -> str:
+        """Render the Agent context, optionally prefixed by a bounded focus block.
+
+        The focus block is rendered first and owns its own character budget, so
+        it can never be truncated away by the wider state projection. When
+        ``focus`` is ``None`` or focus rendering is disabled the output is
+        byte-identical to the body-only projection.
+        """
+        body = self._render_body(snapshot, query=query)
+        if focus is None or not self.focus_enabled:
+            return body
+        return self._render_focus(focus) + "\n" + body
+
+    def _render_focus(self, focus: FocusSet) -> str:
+        budget = max(1, self.focus_max_chars)
+        marker = "[focus truncated to character budget]"
+        lines: list[str] = []
+        used = 0
+        truncated = False
+
+        def add(line: str, *, is_marker: bool = False) -> bool:
+            nonlocal used, truncated
+            addition = len(line) + 1
+            reserve = 0 if is_marker else len(marker) + 1
+            if used + addition + reserve > budget:
+                if not is_marker:
+                    truncated = True
+                return False
+            lines.append(line)
+            used += addition
+            return True
+
+        def add_section(title: str, items: list[FocusItem]) -> None:
+            if not add("") or not add(f"### {title}"):
+                return
+            if not items:
+                add("- none")
+                return
+            for item in items:
+                if not add(_focus_line(item)):
+                    return
+
+        add("## Focus")
+        add(f"reference: {_clip(focus.reference, 300) or 'none'}")
+        add(f"subgoal: {_clip(focus.subgoal, 300) if focus.subgoal else 'none'}")
+        add_section("Established facts", focus.established)
+        add_section("Open unknowns", focus.unknowns)
+        if add("") and add("### Next focus"):
+            if focus.next_focus is None:
+                add("- none")
+            else:
+                add(_focus_line(focus.next_focus, with_reason=True))
+        if focus.missing:
+            add("")
+            add("missing: " + ", ".join(focus.missing))
+        if truncated:
+            add(marker, is_marker=True)
+        return "\n".join(lines) + "\n"
+
+    def _render_body(self, snapshot: WorldSnapshot, *, query: str | None = None) -> str:
         selected = self.retriever.retrieve(snapshot, query=query)
         lines = [
             "# Red Harness World Context",

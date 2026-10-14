@@ -483,6 +483,7 @@ class SolverLoop:
             event_type=event_type,
             replan_reasons=self.progress.replan_reasons,
             no_progress_count=self.progress.no_progress_count,
+            unconfirmed_progress=self.progress.unconfirmed_progress,
             replans_used=self.progress.replan_count,
             remaining_budget_fraction=self.progress.remaining_budget_fraction,
             force_replan=force_replan,
@@ -502,12 +503,20 @@ class SolverLoop:
         )
 
     def _write_context(self) -> None:
-        (self.run_dir / "world.context.txt").write_text(
-            self.context_builder.render(self.world.snapshot, query=self.context_query)
-            if self.world_context_enabled
-            else "",
-            encoding="utf-8",
-        )
+        if self.world_context_enabled:
+            focus = self.context_builder.build_focus(
+                self.world.snapshot,
+                reference=self.context_query,
+                subgoal=self.progress.current_subgoal,
+            )
+            rendered = self.context_builder.render(
+                self.world.snapshot,
+                query=self.context_query,
+                focus=focus,
+            )
+        else:
+            rendered = ""
+        (self.run_dir / "world.context.txt").write_text(rendered, encoding="utf-8")
         self._sync_agent_views()
 
     def _sync_agent_views(self) -> None:

@@ -1,5 +1,11 @@
 # QA — Testing, architecture and performance
 
+> **Note (2026-10-13).** The suite/evaluation tooling referenced in QA-02
+> (`suite.py`, `scoring.py`, `evaluation.py`, `harness compare-evaluations`) was
+> removed during the control-spine simplification. `tests/test_control_properties.py`,
+> `tests/test_control_metrics.py` and the frozen spine-closure test in
+> `tests/test_architecture.py` now guard the simplification.
+
 **Scope:** `tests/`, `.github/workflows/ci.yml`, `pyproject.toml`, `docs/architecture.md`. Existing architecture import guard and Pi/Docker/SDK smoke workflows should remain.
 
 ### QA-01 [x] P0 — Enforced correctness gates

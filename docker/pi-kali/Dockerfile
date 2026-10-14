@@ -3,9 +3,16 @@ FROM ${KALI_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PI_VERSION=1.0.4
+# Kali mirror base URL (overridable for fast regional mirrors, e.g.
+# https://mirrors.tuna.tsinghua.edu.cn/kali or https://mirrors.ustc.edu.cn/kali).
+ARG KALI_MIRROR=http://http.kali.org/kali
 
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
-        -exec sed -i 's/kali-rolling/kali-last-snapshot/g' {} + \
+        -exec sed -i \
+            -e "s#http://http.kali.org/kali#${KALI_MIRROR}#g" \
+            -e "s#https://http.kali.org/kali#${KALI_MIRROR}#g" \
+            -e "s#http://kali.download/kali#${KALI_MIRROR}#g" \
+            -e 's/kali-rolling/kali-last-snapshot/g' {} + \
     && grep -Rqs 'kali-last-snapshot' /etc/apt \
     && apt-get update \
     && apt-get install -y --no-install-recommends \

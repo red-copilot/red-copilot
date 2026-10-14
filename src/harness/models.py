@@ -91,6 +91,7 @@ class PiSpec(BaseModel):
     themes: bool = False
     mcp: bool = False
     offline: bool = True
+    system_prompt_file: str | None = None
     env_passthrough: list[str] = Field(default_factory=list)
     cap_add: list[str] = Field(default_factory=list)
     extra_args: list[str] = Field(default_factory=list)
@@ -146,34 +147,6 @@ class AgentSpec(BaseModel):
         return self
 
 
-class SuiteTaskSpec(BaseModel):
-    path: str = Field(min_length=1)
-    weight: float = Field(default=1.0, gt=0)
-
-
-class SuiteSpec(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    api_version: Literal["harness/v1"] = Field(alias="apiVersion")
-    id: str = Field(min_length=1)
-    repeat: int = Field(default=1, ge=1)
-    base_seed: int = Field(default=0, ge=0)
-    workers: int = Field(default=1, ge=1, le=64)
-    pass_k: list[int] = Field(default_factory=lambda: [1])
-    tasks: list[SuiteTaskSpec] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def validate_pass_k(self) -> SuiteSpec:
-        if not self.pass_k:
-            raise ValueError("pass_k must contain at least one k")
-        if len(set(self.pass_k)) != len(self.pass_k):
-            raise ValueError("pass_k values must be unique")
-        if any(k < 1 or k > self.repeat for k in self.pass_k):
-            raise ValueError("each pass_k value must be between 1 and repeat")
-        self.pass_k.sort()
-        return self
-
-
 class VerificationResult(BaseModel):
     success: bool
     score: float = Field(ge=0, le=100)
@@ -195,7 +168,3 @@ def load_task(path: str | Path) -> TaskSpec:
 
 def load_agent(path: str | Path) -> AgentSpec:
     return AgentSpec.model_validate(_load_yaml(Path(path)))
-
-
-def load_suite(path: str | Path) -> SuiteSpec:
-    return SuiteSpec.model_validate(_load_yaml(Path(path)))

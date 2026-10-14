@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from .progress import ProgressLedger
 from .skills import SkillSpec, StateSelector
 from .world import WorldSnapshot
+from .world.focus import FocusBuilder, FocusItem, FocusRequest, FocusSet
 
 
 class PlanCandidate(BaseModel):
@@ -16,6 +17,7 @@ class PlanCandidate(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
     novelty: float = Field(ge=0.0, le=1.0)
     goal_relevance: float = Field(default=0.0, ge=0.0, le=1.0)
+    focus_relevance: float = Field(default=0.0, ge=0.0, le=1.0)
     information_gain: float = Field(default=0.0, ge=0.0, le=1.0)
     failure_penalty: float = Field(default=0.0, ge=0.0, le=1.0)
     budget_fit: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -138,6 +140,37 @@ def _goal_relevance(skill: SkillSpec, goal_tokens: set[str]) -> float:
     return len(goal_tokens & skill_tokens) / len(goal_tokens)
 
 
+def _focus_reference(snapshot: WorldSnapshot, progress: ProgressLedger) -> str:
+    if progress.active_goal and progress.active_goal in snapshot.goals:
+        return snapshot.goals[progress.active_goal].description
+    return progress.active_goal or ""
+
+
+def _selector_matches_focus_item(selector: StateSelector, item: FocusItem) -> bool:
+    if selector.kind != item.kind or not fnmatch.fnmatchcase(item.type, selector.type):
+        return False
+    if selector.scope is None:
+        return True
+    return item.scope is not None and fnmatch.fnmatchcase(item.scope, selector.scope)
+
+
+def _focus_relevance(skill: SkillSpec, focus: FocusSet) -> float:
+    """Fraction of a skill's outputs that advance the current focus frontier."""
+    if not skill.produces:
+        return 0.0
+    targets = (
+        [focus.next_focus]
+        if focus.next_focus is not None
+        else [*focus.established, *focus.unknowns]
+    )
+    matched = sum(
+        1
+        for selector in skill.produces
+        if any(_selector_matches_focus_item(selector, item) for item in targets)
+    )
+    return matched / len(skill.produces)
+
+
 class HeuristicSkillPlanner:
     """Reference planner that ranks applicable skills without executing them."""
 
@@ -173,6 +206,13 @@ class HeuristicSkillPlanner:
     ) -> list[PlanCandidate]:
         progress = progress or ProgressLedger()
         goal_tokens = _goal_tokens(snapshot, progress)
+        focus = FocusBuilder().build(
+            snapshot,
+            FocusRequest(
+                reference=_focus_reference(snapshot, progress),
+                subgoal=progress.current_subgoal,
+            ),
+        )
         budget_remaining = progress.remaining_budget_fraction
         candidates: list[PlanCandidate] = []
         applicability = {item.skill_id: item for item in self.explain(snapshot, skills)}
@@ -185,6 +225,7 @@ class HeuristicSkillPlanner:
             ]
             novelty = len(novel) / len(skill.produces) if skill.produces else 0.0
             relevance = _goal_relevance(skill, goal_tokens)
+            focus_relevance = _focus_relevance(skill, focus)
             failure_penalty = min(
                 1.0,
                 progress.failed_skill_counts.get(skill.id, 0) / 3.0,
@@ -194,10 +235,11 @@ class HeuristicSkillPlanner:
                 continue
             friction = (skill.cost + skill.risk + skill.noise) / 3.0
             score = (
-                0.35 * novelty
-                + 0.25 * relevance
-                + 0.25 * (1.0 - friction)
-                + 0.15 * budget_fit
+                0.30 * novelty
+                + 0.20 * relevance
+                + 0.20 * focus_relevance
+                + 0.20 * (1.0 - friction)
+                + 0.10 * budget_fit
                 - 0.20 * failure_penalty
             )
 
@@ -207,6 +249,7 @@ class HeuristicSkillPlanner:
                     score=max(0.0, min(1.0, score)),
                     novelty=novelty,
                     goal_relevance=relevance,
+                    focus_relevance=focus_relevance,
                     information_gain=novelty,
                     failure_penalty=failure_penalty,
                     budget_fit=budget_fit,
@@ -260,6 +303,7 @@ class RollingHorizonPlanner:
             rationale_parts = [
                 f"novelty={candidate.novelty:.2f}",
                 f"goal_relevance={candidate.goal_relevance:.2f}",
+                f"focus_relevance={candidate.focus_relevance:.2f}",
                 f"information_gain={candidate.information_gain:.2f}",
                 f"failure_penalty={candidate.failure_penalty:.2f}",
                 f"budget_fit={candidate.budget_fit:.2f}",

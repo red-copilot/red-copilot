@@ -1,0 +1,20 @@
+apiVersion: harness/skill/v1
+id: web.application-enumeration
+domain: web
+description: Enumerate an authorized web target to derive reachable endpoints and parameters.
+tags: [enumeration, web, discovery]
+
+requires:
+  - kind: capability
+    type: network.reachability
+    minimum_trust: verified
+
+produces:
+  - kind: entity
+    type: web.endpoint
+  - kind: observation
+    type: web.endpoint
+
+cost: 0.3
+risk: 0.2
+noise: 0.5
