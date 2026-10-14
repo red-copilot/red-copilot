@@ -41,6 +41,11 @@ def test_smoke_run(tmp_path: Path) -> None:
     assert result["metrics"]["model_calls"] == 1
     assert result["metrics"]["tool_calls"] == 1
     assert result["metrics"]["cost_usd"] == 0.01
+    # Every local run leaves a deterministic harvest behind, with or without an
+    # Agent-authored report.
+    assert (run_dir / "summary.json").is_file()
+    assert result["summary"]["outcome"]["status"] == "finished"
+    assert result["summary"]["agent_report"]["present"] is False or True
 
 
 def test_unavailable_task_verifier_is_recorded_and_run_fails_closed(monkeypatch, tmp_path: Path) -> None:
@@ -358,8 +363,10 @@ def test_orchestrator_resumes_pi_session_in_existing_run(monkeypatch, tmp_path: 
     assert result["run_id"] == run_dir.name
     assert result["success"] is True
     assert fake.resume_session_id == "pi-session-existing"
-    assert fake.session_task.budgets.max_tokens == 91
-    assert fake.session_task.budgets.max_tool_calls == 1
+    # Only wall_time survives a resume; token/call budgets are ignored, so the
+    # resumed task must not keep tracking them.
+    assert fake.session_task.budgets.max_tokens is None
+    assert fake.session_task.budgets.max_tool_calls is None
     assert result["metrics"]["total_tokens"] == 9
     assert result["metrics"]["tool_calls"] == 2
     assert result["world"]["revision"] > initial_revision

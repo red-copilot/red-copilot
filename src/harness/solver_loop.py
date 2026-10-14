@@ -11,6 +11,7 @@ from typing import ClassVar
 from .aci import TypedACI
 from .action_verifier import ActionVerifier
 from .cognition import frontier_context, round_brief, ruled_out_intents
+from .hints import HINTS_FILE, HintCursor
 from .planner import RollingHorizonPlanner, RollingPlan
 from .progress import ProgressLedger
 from .session import AgentEvent, AgentObservation, AgentSession
@@ -90,6 +91,7 @@ class SolverLoop:
         max_replans: int = DEFAULT_MAX_REPLANS,
         processed_event_ids: dict[str, str] | None = None,
         world_inbox_path: Path | None = None,
+        hint_cursor: HintCursor | None = None,
         sync_agent_views: Callable[[], None] | None = None,
         summary_path: Path | None = None,
     ) -> None:
@@ -109,6 +111,16 @@ class SolverLoop:
             world,
             actor=actor,
         )
+        self.hint_cursor = hint_cursor or HintCursor(run_dir / HINTS_FILE)
+        # The cursor offset is not checkpointed, so a resumed loop would re-read
+        # every previously delivered hint. The World's persisted human.hint
+        # observations are the durable delivery ledger: seed the delivered set
+        # from them so hints are steered exactly once per run.
+        self._delivered_hint_ids: set[str] = {
+            record_id.removeprefix("human.hint:")
+            for record_id in world.snapshot.observations
+            if record_id.startswith("human.hint:")
+        }
         self.progress_path = run_dir / "progress.json"
         self.summary_path = summary_path or (run_dir / "agent.summary.md")
         self.sync_agent_views = sync_agent_views
@@ -311,6 +323,42 @@ class SolverLoop:
         }
         if (semantic_agent_update and aci_mutations) or live_ingest.accepted:
             self.progress.request_replan("world_state_changed")
+
+        # Operator hints: advisory guidance recorded at evidence tier so the
+        # Agent sees them, but never an objective verdict. A new hint also
+        # requests a replan, mirroring how benchmark feedback re-enters planning.
+        for hint in self.hint_cursor.poll():
+            if hint.id in self._delivered_hint_ids:
+                continue
+            self._delivered_hint_ids.add(hint.id)
+            self.world.upsert(
+                "observation",
+                Observation(
+                    id=f"human.hint:{hint.id}",
+                    type="human.hint",
+                    content={"text": hint.text},
+                    confidence=1.0,
+                    source="harness.hint",
+                    provenance=Provenance(epistemic_status="evidence"),
+                ),
+                actor="harness",
+            )
+            self.progress.request_replan("hint_received")
+            self.trace.emit(
+                "solver.hint",
+                actor="harness",
+                data={"hint_id": hint.id, "text": hint.text},
+            )
+            await session.observe(
+                AgentObservation(
+                    type="solver.hint",
+                    data={
+                        "id": hint.id,
+                        "text": hint.text,
+                        "message": f"Operator hint ({hint.id}): {hint.text}",
+                    },
+                )
+            )
         after_revision = self.world.revision
         if live_ingest.accepted or live_ingest.rejected:
             self.trace.emit(
@@ -600,7 +648,10 @@ class SolverLoop:
                     "reason": "soft_time_limit",
                     "summary_file": "agent.summary.md",
                     "message": (
-                        "Time is up. Stop launching new probes. Write a short report to "
+                        "Time is up, and this finalize instruction overrides any earlier "
+                        "instruction that told you to keep working. Stop launching new "
+                        "probes and do not run any more commands. Based only on what you "
+                        "have already confirmed, write a short report to "
                         "$HARNESS_SUMMARY_FILE covering: confirmed facts (with the evidence "
                         "that confirms them), unconfirmed hypotheses, what you tried and what "
                         "it ruled out, and the intents you were pursuing but did not finish. "
@@ -674,7 +725,9 @@ class SolverLoop:
                     "reason": "summary_missing",
                     "summary_file": "agent.summary.md",
                     "message": (
-                        "Your round ended without a summary. Write $HARNESS_SUMMARY_FILE now: "
+                        "Your round ended without a summary. This instruction overrides any "
+                        "earlier instruction to keep working: run no more commands. Write "
+                        "$HARNESS_SUMMARY_FILE now, based only on what you already confirmed: "
                         "confirmed facts with their evidence, unconfirmed hypotheses, what you "
                         "tried and ruled out, and unfinished intents. Then stop."
                     ),
@@ -787,6 +840,29 @@ class SolverLoop:
                 "errors": [error.model_dump() for error in report.errors[:10]],
             },
         )
+        # Late hints still land in the World so the end-of-run summary can
+        # include guidance the operator added while the session was closing.
+        for hint in self.hint_cursor.poll():
+            if hint.id in self._delivered_hint_ids:
+                continue
+            self._delivered_hint_ids.add(hint.id)
+            self.world.upsert(
+                "observation",
+                Observation(
+                    id=f"human.hint:{hint.id}",
+                    type="human.hint",
+                    content={"text": hint.text},
+                    confidence=1.0,
+                    source="harness.hint",
+                    provenance=Provenance(epistemic_status="evidence"),
+                ),
+                actor="harness",
+            )
+            self.trace.emit(
+                "solver.hint",
+                actor="harness",
+                data={"hint_id": hint.id, "late": True},
+            )
 
     def _write_context(self) -> None:
         if self.world_context_enabled:

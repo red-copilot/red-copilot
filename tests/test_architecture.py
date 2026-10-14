@@ -46,6 +46,7 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.budget",
         "harness.cognition",
         "harness.extract",
+        "harness.hints",
         "harness.models",
         "harness.network_policy",
         "harness.pi_adapter",

@@ -1061,6 +1061,7 @@ def test_pi_rpc_uses_verified_target_network_id(monkeypatch, tmp_path: Path) -> 
     assert len(docker_commands) == 1
 
 
+
 def test_legacy_pi_json_runner_uses_verified_target_network_id(monkeypatch, tmp_path: Path) -> None:
     from harness.pi_adapter import PiAdapter
 

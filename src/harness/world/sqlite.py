@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from .models import WorldEvent, WorldObjectKind, WorldSnapshot
+from .models import KIND_COLLECTIONS, WorldEvent, WorldObjectKind, WorldSnapshot
 from .reducer import WorldReducer
 from .repository import WorldConflictError
 
@@ -116,25 +116,13 @@ class SQLiteWorldRepository:
 
     def _load_snapshot(self, connection: sqlite3.Connection) -> WorldSnapshot:
         snapshot = WorldSnapshot(revision=self._current_revision(connection))
-        collection_names = {
-            "entity": "entities",
-            "relation": "relations",
-            "observation": "observations",
-            "artifact": "artifacts",
-            "capability": "capabilities",
-            "hypothesis": "hypotheses",
-            "goal": "goals",
-            "action": "actions",
-            "constraint": "constraints",
-            "failure": "failures",
-        }
         rows = connection.execute(
             "SELECT kind, object_id, payload_json FROM world_objects "
             "ORDER BY kind, object_id"
         ).fetchall()
         for row in rows:
             kind = row["kind"]
-            collection = getattr(snapshot, collection_names[kind])
+            collection = getattr(snapshot, KIND_COLLECTIONS[kind])
             payload = json.loads(row["payload_json"])
             # Reuse the reducer's validation/provenance model without changing revision.
             temp = WorldSnapshot()
@@ -147,7 +135,7 @@ class SQLiteWorldRepository:
                 source_event_id=payload.get("provenance", {}).get("source_event_id"),
             )
             self._reducer.apply(temp, event)
-            source_collection = getattr(temp, collection_names[kind])
+            source_collection = getattr(temp, KIND_COLLECTIONS[kind])
             collection[row["object_id"]] = source_collection[row["object_id"]]
         return snapshot
 
@@ -155,18 +143,7 @@ class SQLiteWorldRepository:
     def _snapshot_view(snapshot: WorldSnapshot) -> WorldSnapshot:
         """Return a detached collection view without re-copying every record."""
         view = snapshot.model_copy(deep=False)
-        for name in (
-            "entities",
-            "relations",
-            "observations",
-            "artifacts",
-            "capabilities",
-            "hypotheses",
-            "goals",
-            "actions",
-            "constraints",
-            "failures",
-        ):
+        for name in KIND_COLLECTIONS.values():
             setattr(view, name, dict(getattr(snapshot, name)))
         return view
 
@@ -255,19 +232,7 @@ class SQLiteWorldRepository:
                 cached = getattr(self, "_snapshot_cache", None)
                 if cached is not None and cached.revision == current_revision:
                     snapshot = cached.model_copy(deep=False)
-                    collection_names = {
-                        "entity": "entities",
-                        "relation": "relations",
-                        "observation": "observations",
-                        "artifact": "artifacts",
-                        "capability": "capabilities",
-                        "hypothesis": "hypotheses",
-                        "goal": "goals",
-                        "action": "actions",
-                        "constraint": "constraints",
-                        "failure": "failures",
-                    }
-                    collection_name = collection_names[event.kind]
+                    collection_name = KIND_COLLECTIONS[event.kind]
                     setattr(snapshot, collection_name, dict(getattr(cached, collection_name)))
                 else:
                     snapshot = self._load_snapshot(connection)
@@ -305,19 +270,8 @@ class SQLiteWorldRepository:
                         (event.kind, object_id),
                     )
                 else:
-                    collection_names = {
-                        "entity": "entities",
-                        "relation": "relations",
-                        "observation": "observations",
-                        "artifact": "artifacts",
-                        "capability": "capabilities",
-                        "hypothesis": "hypotheses",
-                        "goal": "goals",
-                        "action": "actions",
-                        "constraint": "constraints",
-                        "failure": "failures",
-                    }
-                    record = getattr(candidate, collection_names[event.kind])[object_id]
+                    collection_name = KIND_COLLECTIONS[event.kind]
+                    record = getattr(candidate, KIND_COLLECTIONS[event.kind])[object_id]
                     record_json = json.dumps(
                         record.model_dump(mode="json"),
                         ensure_ascii=False,

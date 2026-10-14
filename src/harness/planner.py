@@ -10,6 +10,7 @@ from .progress import ProgressLedger
 from .skills import SkillSpec, StateSelector
 from .world import TRUST_RANK, WorldSnapshot
 from .world.focus import FocusBuilder, FocusItem, FocusRequest, FocusSet
+from .world.models import KIND_COLLECTIONS
 
 
 class PlanCandidate(BaseModel):
@@ -66,22 +67,10 @@ class Planner(Protocol):
     ) -> list[PlanCandidate]: ...
 
 
-_COLLECTIONS = {
-    "entity": "entities",
-    "relation": "relations",
-    "observation": "observations",
-    "artifact": "artifacts",
-    "capability": "capabilities",
-    "hypothesis": "hypotheses",
-    "goal": "goals",
-    "action": "actions",
-    "constraint": "constraints",
-    "failure": "failures",
-}
 
 
 def _selector_rejection(snapshot: WorldSnapshot, selector: StateSelector) -> str | None:
-    collection = getattr(snapshot, _COLLECTIONS[selector.kind])
+    collection = getattr(snapshot, KIND_COLLECTIONS[selector.kind])
     minimum_rank = TRUST_RANK[selector.minimum_trust]
     typed: list = []
     scoped: list = []

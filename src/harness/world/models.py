@@ -24,6 +24,22 @@ WorldObjectKind = Literal[
     "failure",
 ]
 
+# Canonical mapping from a World object kind to its WorldSnapshot collection
+# field. Every consumer that resolves kind -> snapshot field (reducer, SQLite
+# store, planner, focus) uses this table instead of restating it.
+KIND_COLLECTIONS: dict[str, str] = {
+    "entity": "entities",
+    "relation": "relations",
+    "observation": "observations",
+    "artifact": "artifacts",
+    "capability": "capabilities",
+    "hypothesis": "hypotheses",
+    "goal": "goals",
+    "action": "actions",
+    "constraint": "constraints",
+    "failure": "failures",
+}
+
 
 class StateSelector(BaseModel):
     """A declarative reference to a World record at a minimum trust level.

@@ -164,6 +164,23 @@ Every run writes an append-only `trace.jsonl`; `harness audit-run` checks that t
 result, trace, progress, and World exports agree. A consistent report does not
 authenticate their sources or independently prove task success.
 
+## Operator hints
+
+An operator can inject guidance into a run at any time, including while the Agent
+is mid-turn:
+
+```bash
+harness hint .harness/runs/run_... --text "the login bypass is on the API host"
+echo "flag format is zc{...}" | harness hint .harness/runs/run_...
+```
+
+Hints are appended to the run's `hints.jsonl`. The SolverLoop polls the file on
+every event, records each hint in World state as an evidence-tier
+`human.hint` observation, requests a replan, and steers the running Agent with a
+`solver.hint` observation (one-shot Agents read it from `agent.feedback.jsonl`).
+Hints are advisory: they can redirect exploration, but they never verify the
+objective — only a verifier or benchmark evaluation can do that.
+
 ## Control spine
 
 Red Harness keeps a single closed feedback loop:
@@ -406,20 +423,15 @@ objective completion; the final task verifier or benchmark evaluation controls t
 
 ### Rolling-horizon planning
 
-The Harness exposes an optional short-horizon planner at:
-
-```text
-GET /v1/runs/{run_id}/plan/rolling?horizon=1..3
-```
-
-It combines the current World Snapshot, Skill Registry, and `progress.json` to return at most three
-`PlannedAction` records. Each action includes a skill, expected observations, an inspectable rationale
+The optional short-horizon planner combines the current World Snapshot, Skill Registry, and
+`progress.json` into at most three `PlannedAction` records. Each action includes a skill, expected
+observations, an inspectable rationale
 with goal relevance, information gain, repeated-failure penalty, and remaining-budget fit,
 and explicit replan triggers such as action failure, missing expected observations, changed world
 revision, repeated no-progress, or contradicted hypotheses.
 
 The planner can filter state requirements by minimum provenance level (`claim`, `evidence`, or
-`verified`). Capabilities are checked for expiry. The rolling planner is also used by the interactive
+`verified`). Capabilities are checked for expiry. The rolling planner is used by the interactive
 SolverLoop. A session receives an initial
 `solver.plan.updated` observation and receives a new plan when verification, repeated no-progress,
 or benchmark feedback requests replanning. Plans are persisted to `plan.json` and guide the Agent;
@@ -432,12 +444,5 @@ publication remains explicit.
 SQLite is the default World State backend. `world.db` is authoritative; `world.events.jsonl` and
 `world.snapshot.json` are compatibility/debug exports. The database uses WAL mode, persistent event
 sequence numbers, event-id deduplication, and optional optimistic `expected_revision` checks.
-
-Incremental consumers can request:
-
-```text
-GET /v1/runs/{run_id}/world/events?after_sequence=<sequence>
-```
-
-Each returned event includes its persistent `sequence` cursor. Legacy JSONL state can still be
+Legacy JSONL state can still be
 passed to `--resume-world`; new runs may resume directly from a previous `world.db`.

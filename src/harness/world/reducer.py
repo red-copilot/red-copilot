@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .models import (
+    KIND_COLLECTIONS,
     ActionRecord,
     Artifact,
     Capability,
@@ -16,24 +17,24 @@ from .models import (
     is_agent_actor,
 )
 
-_KIND_MAP = {
-    "entity": ("entities", Entity),
-    "relation": ("relations", Relation),
-    "observation": ("observations", Observation),
-    "artifact": ("artifacts", Artifact),
-    "capability": ("capabilities", Capability),
-    "hypothesis": ("hypotheses", Hypothesis),
-    "goal": ("goals", Goal),
-    "action": ("actions", ActionRecord),
-    "constraint": ("constraints", Constraint),
-    "failure": ("failures", Failure),
+_KIND_MODELS = {
+    "entity": Entity,
+    "relation": Relation,
+    "observation": Observation,
+    "artifact": Artifact,
+    "capability": Capability,
+    "hypothesis": Hypothesis,
+    "goal": Goal,
+    "action": ActionRecord,
+    "constraint": Constraint,
+    "failure": Failure,
 }
 
 
 class WorldReducer:
     def apply(self, snapshot: WorldSnapshot, event: WorldEvent) -> WorldSnapshot:
-        collection_name, model_type = _KIND_MAP[event.kind]
-        collection = getattr(snapshot, collection_name)
+        collection = getattr(snapshot, KIND_COLLECTIONS[event.kind])
+        model_type = _KIND_MODELS[event.kind]
         object_id = event.object.get("id")
         if not isinstance(object_id, str) or not object_id:
             raise ValueError("world events require object.id")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -24,6 +25,44 @@ app = typer.Typer(
     help="Reproducible evaluation runtime for security agents.",
     no_args_is_help=True,
 )
+
+
+@app.command("hint")
+def hint_command(
+    run_dir: Annotated[Path, typer.Argument(file_okay=False)],
+    text: Annotated[
+        str,
+        typer.Option(
+            "--text",
+            "-t",
+            help="Hint text; pass '-' (default) to read multi-line input from stdin.",
+        ),
+    ] = "-",
+) -> None:
+    """Append an operator hint to a run's hint inbox.
+
+    Hints are advisory guidance: the running Agent absorbs them on its next
+    turn and they are recorded in World state, but they never verify the
+    objective by themselves.
+    """
+    from .hints import append_hint
+
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise typer.BadParameter(f"not a run directory: {run_dir}")
+    if text == "-":
+        text = sys.stdin.read()
+    if not text.strip():
+        raise typer.BadParameter("hint text is empty")
+    try:
+        record = append_hint(run_dir, text)
+    except OSError as exc:
+        # e.g. hints.jsonl is a symlink; O_NOFOLLOW refuses to follow it.
+        raise typer.BadParameter(f"cannot write hint inbox: {exc}") from exc
+    typer.echo(
+        json.dumps(
+            {"id": record.id, "created_at": record.created_at, "file": "hints.jsonl"}
+        )
+    )
 
 
 @app.command("audit-run")

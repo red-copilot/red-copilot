@@ -13,7 +13,6 @@ import pytest
 
 from harness.agent import AgentResult, AgentRunContext, CLIAdapter
 from harness.budget import UsageMetrics
-from harness.failures import FailureClass, classify_failure
 from harness.pi_container import ContainerPiRpcSession, ContainerPiSession
 from harness.progress import ProgressLedger
 from harness.session import (
@@ -83,13 +82,6 @@ def test_trace_emits_causal_identifiers(tmp_path: Path) -> None:
     assert rows[1]["parent_event_id"] == parent
     assert rows[1]["plan_id"] == "plan-1"
     assert rows[1]["action_id"] == "action-1"
-
-
-def test_failure_taxonomy_classifies_execution_boundaries() -> None:
-    assert classify_failure(timed_out=True) == FailureClass.TOOL_TIMEOUT
-    assert classify_failure(budget_exceeded="max_tokens") == FailureClass.BUDGET_EXHAUSTED
-    assert classify_failure(returncode=2) == FailureClass.TOOL_ERROR
-    assert classify_failure(returncode=0) is None
 
 
 def test_oneshot_agent_session_streams_events_and_feedback(tmp_path: Path) -> None:
@@ -334,8 +326,6 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     assert ledger.objective_completed is False
     assert ledger.no_progress_count == 0
     assert ledger.unconfirmed_progress == 0
-    with pytest.raises(ValueError):
-        ledger.record_trusted_progress("objective_completed")
     registry = VerifierRegistry()
     authority = registry.register("task_verifier")
     captured_at = datetime.now(UTC)

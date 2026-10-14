@@ -22,6 +22,7 @@ from .agent import (
     ContainerLimits,
     _terminate_process,
     build_container_command,
+    run_docker,
 )
 from .agent_workspace import prepare_agent_task_view
 from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor, UsageMetrics, charge_usage_event
@@ -99,6 +100,7 @@ class ContainerPiRpcSession:
             "solver.budget",
             "solver.finalize",
             "solver.round",
+            "solver.hint",
         }
     )
 
@@ -848,24 +850,7 @@ class ContainerPiAdapter(PiAdapter):
         self.trace = trace
         self._tool_started: dict[str, float] = {}
 
-    @staticmethod
-    def _docker(
-        command: list[str],
-        *,
-        cwd: Path,
-        check: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if check and result.returncode != 0:
-            raise AgentError(f"{' '.join(command[:3])} failed: {result.stderr.strip()}")
-        return result
+    _docker = staticmethod(run_docker)
 
     def _container_command(
         self,

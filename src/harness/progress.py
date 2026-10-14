@@ -44,8 +44,6 @@ class ProgressLedger(BaseModel):
     verified_actions: int = 0
     execution_succeeded: int = 0
     evidence_confirmed: int = 0
-    capability_acquired: int = 0
-    goal_advanced: int = 0
     contradicted_actions: int = 0
     pending_actions: int = 0
     skipped_verifications: int = 0
@@ -272,21 +270,6 @@ class ProgressLedger(BaseModel):
                 self.replan_reasons.append("benchmark_negative_feedback")
         # Submission feedback may ask the runtime to stop early, but only the
         # final evaluator can establish objective completion.
-
-    def record_trusted_progress(self, kind: str) -> None:
-        """Record progress only from a Harness-owned verifier or benchmark."""
-        if kind == "evidence_confirmed":
-            self.evidence_confirmed += 1
-        elif kind == "capability_acquired":
-            self.capability_acquired += 1
-        elif kind == "goal_advanced":
-            self.goal_advanced += 1
-        elif kind == "objective_completed":
-            raise ValueError("objective completion requires an authorized ObjectiveVerdict")
-        else:
-            raise ValueError(f"unknown trusted progress kind: {kind}")
-        self.no_progress_count = 0
-        self.unconfirmed_progress = 0
 
     def record_objective_verdict(
         self,

@@ -1,8 +1,8 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`src/harness/` is the Python package (a modular monolith). Subpackages: `api/` (FastAPI
-control plane), `benchmark/` (adapter contracts and TSec integration), `world/`
+`src/harness/` is the Python package (a modular monolith). Subpackages: `benchmark/` (adapter
+contracts and TSec integration), `world/`
 (event-sourced state), `runtime/` (lifecycle, checkpoints, evidence). Top-level modules
 include `cli.py`, `orchestrator.py`, `agent.py`, `gateway.py`. Tests live in `tests/` as
 `test_<module>.py`. Fixtures and baselines sit under `benchmarks/examples/` and
@@ -19,6 +19,8 @@ modules must not import API/CLI/Docker code: `tests/test_architecture.py` enforc
   --allow-host-agent --seed 42` - run one task.
 - `harness validate`, `harness validate-skill`, `harness preflight` - check task, skill,
   and agent contracts.
+- `harness hint <run_dir> --text "..."` - append operator guidance to a run's
+  `hints.jsonl`; the SolverLoop steers the Agent with it on the next event.
 
 Prerequisites: Docker for Docker agents, sidecar Gateway, and Docker verifiers;
 `sudo apt-get install -y bubblewrap` for the verifier sandbox; Pi 1.0.4 via
