@@ -37,6 +37,8 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         tcpdump \
         ffuf \
         gobuster \
+        dirb \
+        wordlists \
         nikto \
         whatweb \
         sqlmap \
@@ -53,6 +55,7 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         nodejs \
         npm \
     && node -e 'const [M,m]=process.versions.node.split(".").map(Number); if (M < 22 || (M === 22 && m < 19)) { console.error("Pi requires Node >= 22.19"); process.exit(1) }' \
+    && test -s /usr/share/wordlists/dirb/common.txt \
     && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && pi --version \
     && apt-get clean \

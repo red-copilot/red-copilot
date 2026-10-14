@@ -5,13 +5,14 @@ import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from harness.agent import AgentResult, CLIAdapter
 from harness.budget import UsageMetrics
 from harness.failures import FailureClass, classify_failure
-from harness.pi_container import ContainerPiSession
+from harness.pi_container import ContainerPiRpcSession, ContainerPiSession
 from harness.progress import ProgressLedger
 from harness.session import AgentEvent, AgentObservation, OneShotAgentSession
 from harness.trace import TraceRecorder
@@ -392,3 +393,40 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
     assert calls == [["docker", "kill", _container_name(run_dir)]]
     control = tmp_path / "run_demo" / "agent.control.jsonl"
     assert "objective-complete" in control.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        AgentEvent(type="model.usage_missing", data={"source": "pi"}),
+        AgentEvent(type="model.usage", data={"input_tokens": "many"}),
+        AgentEvent(type="model.usage", data={"total_tokens": -1}),
+        AgentEvent(
+            type="model.usage",
+            data={"input_tokens": 6, "output_tokens": 5, "total_tokens": 1},
+        ),
+        AgentEvent(type="model.usage", data={"cost_usd": float("nan")}),
+        AgentEvent(type="model.usage", data={"cost_usd": -1.0}),
+        AgentEvent(type="model.usage", data={"model_calls": True}),
+        AgentEvent(type="model.request", data={"count": True}),
+        AgentEvent(type="tool.call", data={"count": -2}),
+    ],
+)
+def test_usage_accounting_rules_match_between_oneshot_and_pi_sessions(
+    tmp_path: Path, event: AgentEvent
+) -> None:
+    oneshot = OneShotAgentSession(object(), run_kwargs={}, run_dir=tmp_path)
+    oneshot._account(event)
+
+    pi_session = object.__new__(ContainerPiRpcSession)
+    pi_session.adapter = SimpleNamespace(
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test")
+    )
+    pi_session._metrics = UsageMetrics()
+    pi_session._budget_exceeded = None
+    pi_session._account(event)
+
+    assert oneshot.usage_metrics == UsageMetrics().as_dict()
+    assert oneshot.usage_telemetry_valid is False
+    assert pi_session._metrics.as_dict() == UsageMetrics().as_dict()
+    assert pi_session._budget_exceeded == "invalid_telemetry"

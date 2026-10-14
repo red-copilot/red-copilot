@@ -1,0 +1,21 @@
+apiVersion: harness/skill/v1
+id: recon.active
+domain: recon
+description: Active port scanning and service version detection on authorized targets.
+tags: [recon, active, nmap, portscan]
+
+requires:
+  - kind: capability
+    type: network.reachability
+    minimum_trust: evidence
+
+produces:
+  - kind: observation
+    type: network.service
+  - kind: entity
+    type: network.service
+
+cost: 0.2
+risk: 0.1
+noise: 0.5
+

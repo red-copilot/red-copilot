@@ -154,9 +154,10 @@ def test_planner_prefers_novel_outputs() -> None:
 
     candidates = HeuristicSkillPlanner().propose(snapshot, [redundant, novel])
 
-    assert [item.skill_id for item in candidates] == ["novel", "redundant"]
+    # A skill whose declared outputs all already hold is dropped: re-running it
+    # cannot teach the solver anything new.
+    assert [item.skill_id for item in candidates] == ["novel"]
     assert candidates[0].novelty == 1.0
-    assert candidates[1].novelty == 0.0
 
 
 def test_planner_ignores_expired_capabilities() -> None:

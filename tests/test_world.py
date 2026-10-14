@@ -13,16 +13,16 @@ from harness.world import (
     Hypothesis,
     Observation,
     Relation,
-    WorldStore,
+    SQLiteWorldRepository,
     WorldSubmission,
-    ingest_world_inbox,
     write_submission,
 )
+from harness.world.live import WorldInboxCursor
 
 
-def test_world_store_replays_and_materializes_snapshot(tmp_path):
+def test_world_repository_replays_and_materializes_snapshot(tmp_path):
     event_path = tmp_path / "world.events.jsonl"
-    store = WorldStore(event_path)
+    store = SQLiteWorldRepository(event_path)
 
     store.upsert(
         "observation",
@@ -90,7 +90,8 @@ def test_world_store_replays_and_materializes_snapshot(tmp_path):
     assert snapshot.constraints["constraint-1"].status == "active"
     assert snapshot.relations["rel-1"].type == "supports"
 
-    restored = WorldStore(event_path)
+    store.flush()
+    restored = SQLiteWorldRepository(tmp_path / "world.db")
     assert restored.snapshot == snapshot
 
     materialized = json.loads((tmp_path / "world.snapshot.json").read_text())
@@ -98,8 +99,8 @@ def test_world_store_replays_and_materializes_snapshot(tmp_path):
     assert materialized["hypotheses"]["hyp-1"]["status"] == "open"
 
 
-def test_world_store_supports_updates_and_removals(tmp_path):
-    store = WorldStore(tmp_path / "world.events.jsonl")
+def test_world_repository_supports_updates_and_removals(tmp_path):
+    store = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     goal = Goal(id="goal-1", description="obtain objective", status="active", priority=1.0)
 
     store.upsert("goal", goal)
@@ -112,7 +113,7 @@ def test_world_store_supports_updates_and_removals(tmp_path):
 
 
 def test_world_inbox_validates_agent_submissions(tmp_path):
-    store = WorldStore(tmp_path / "world.events.jsonl")
+    store = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     inbox = tmp_path / "world.inbox.jsonl"
 
     write_submission(
@@ -132,12 +133,13 @@ def test_world_inbox_validates_agent_submissions(tmp_path):
         handle.write('{"kind":"capability","object":{"type":"missing-id"}}\n')
         handle.write('{"kind":"unknown","object":{"id":"bad"}}\n')
 
-    report = ingest_world_inbox(inbox, store, actor="agent:test")
+    report = WorldInboxCursor(inbox, store, actor="agent:test").poll()
 
     assert report.accepted == 1
     assert report.rejected == 2
     assert store.snapshot.capabilities["cap-shell"].scope == "host-1"
 
+    store.flush()
     persisted = [
         json.loads(line)
         for line in (tmp_path / "world.events.jsonl").read_text().splitlines()
@@ -148,7 +150,7 @@ def test_world_inbox_validates_agent_submissions(tmp_path):
 
 
 def test_world_temporal_metadata_and_provenance(tmp_path):
-    store = WorldStore(tmp_path / "world.events.jsonl")
+    store = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     now = datetime.now(UTC)
     observation = Observation(
         id="obs-temporal",
@@ -208,7 +210,7 @@ def test_world_temporal_links_require_unique_nonempty_ids():
 
 
 def test_event_provenance_overrides_agent_actor(tmp_path):
-    store = WorldStore(tmp_path / "world.events.jsonl")
+    store = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     store.upsert(
         "capability",
         {

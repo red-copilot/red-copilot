@@ -1,0 +1,21 @@
+apiVersion: harness/skill/v1
+id: exploit.vuln-verify
+domain: web
+description: Craft minimal PoC to confirm a suspected vulnerability without destructive effects.
+tags: [exploit, verify, poc, confirm]
+
+requires:
+  - kind: observation
+    type: web.finding
+    minimum_trust: claim
+
+produces:
+  - kind: observation
+    type: vuln.confirmed
+  - kind: artifact
+    type: vuln.poc
+
+cost: 0.4
+risk: 0.4
+noise: 0.3
+

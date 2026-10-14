@@ -14,6 +14,14 @@ def test_load_skill_contract() -> None:
     assert skill.produces[0].kind == "observation"
 
 
+def test_bundled_example_skills_are_all_valid_and_multidomain() -> None:
+    results = scan_skills("skills")
+    assert len(results) >= 8
+    assert all(item["valid"] for item in results)
+    domains = {item["domain"] for item in results}
+    assert {"network", "web", "pwn", "crypto", "cloud", "benchmark"} <= domains
+
+
 def test_scan_skills_reports_invalid_files(tmp_path: Path) -> None:
     valid = tmp_path / "valid.yaml"
     valid.write_text(

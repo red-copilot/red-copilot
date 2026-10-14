@@ -1,0 +1,22 @@
+apiVersion: harness/skill/v1
+id: binary.static-triage
+domain: pwn
+description: Inspect ELF/binary mitigations, symbols, and decompiled control flow to formulate an exploit hypothesis.
+tags: [binary, pwn, elf, reverse, triage]
+
+requires:
+  - kind: capability
+    type: network.reachability
+    minimum_trust: claim
+
+produces:
+  - kind: observation
+    type: binary.protection
+  - kind: hypothesis
+    type: binary.vulnerability
+  - kind: artifact
+    type: flag.candidate
+
+cost: 0.3
+risk: 0.2
+noise: 0.2

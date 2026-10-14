@@ -6,16 +6,9 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from .world.models import WorldObjectKind
+from .world.models import StateSelector
 
-
-class StateSelector(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    kind: WorldObjectKind
-    type: str = Field(min_length=1)
-    scope: str | None = None
-    minimum_trust: Literal["claim", "evidence", "verified"] = "claim"
+__all__ = ["SkillSpec", "StateSelector", "load_skill", "load_skills", "scan_skills"]
 
 
 class SkillSpec(BaseModel):

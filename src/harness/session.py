@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -10,7 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .agent import AgentResult
-from .budget import UsageMetrics
+from .budget import UsageMetrics, charge_usage_event
 from .secureio import open_regular_file
 
 
@@ -48,6 +47,45 @@ class AgentSession(Protocol):
     async def result(self) -> AgentResult: ...
 
 
+def feedback_record(observation: AgentObservation) -> str:
+    """Serialize one Harness-to-Agent observation for the feedback file."""
+
+    payload = {
+        "id": f"feedback_{uuid.uuid4().hex}",
+        "type": observation.type,
+        "data": observation.data,
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def control_record(reason: str) -> str:
+    """Serialize the session shutdown record written to the control file."""
+
+    return (
+        json.dumps(
+            {"type": "session.close_requested", "data": {"reason": reason}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
+def append_feedback(path: Path, line: str) -> int:
+    """Append one feedback line without following symlinks; returns the new offset."""
+
+    with open_regular_file(path, "a") as handle:
+        handle.write(line)
+        handle.flush()
+        return handle.tell()
+
+
+def append_control(path: Path, line: str) -> None:
+    with open_regular_file(path, "a") as handle:
+        handle.write(line)
+        handle.flush()
+
+
 class OneShotAgentSession:
     """Compatibility session that streams normalized events around a legacy adapter.run()."""
 
@@ -82,53 +120,9 @@ class OneShotAgentSession:
     def usage_telemetry_valid(self) -> bool:
         return self._usage_telemetry_valid
 
-    @staticmethod
-    def _counter(data: dict[str, Any], name: str, default: int = 0) -> int | None:
-        value = data.get(name, default)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return None
-        return value
-
-    @staticmethod
-    def _cost(data: dict[str, Any]) -> float | None:
-        value = data.get("cost_usd", 0.0)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        amount = float(value)
-        return amount if math.isfinite(amount) and amount >= 0 else None
-
     def _account(self, event: AgentEvent) -> None:
-        if event.type == "model.usage_missing":
+        if not charge_usage_event(self._usage_metrics, event.type, event.data):
             self._usage_telemetry_valid = False
-        elif event.type == "model.request":
-            count = self._counter(event.data, "count", 1)
-            if count is None:
-                self._usage_telemetry_valid = False
-            else:
-                self._usage_metrics.model_calls += count
-        elif event.type == "model.usage":
-            input_tokens = self._counter(event.data, "input_tokens")
-            output_tokens = self._counter(event.data, "output_tokens")
-            total_tokens = self._counter(
-                event.data, "total_tokens", (input_tokens or 0) + (output_tokens or 0)
-            )
-            cost = self._cost(event.data)
-            if (
-                None in (input_tokens, output_tokens, total_tokens, cost)
-                or total_tokens < input_tokens + output_tokens
-            ):
-                self._usage_telemetry_valid = False
-            else:
-                self._usage_metrics.input_tokens += input_tokens
-                self._usage_metrics.output_tokens += output_tokens
-                self._usage_metrics.total_tokens += total_tokens
-                self._usage_metrics.cost_usd += cost
-        elif event.type in {"tool.call", "tool.denied"}:
-            count = self._counter(event.data, "count", 1)
-            if count is None:
-                self._usage_telemetry_valid = False
-            else:
-                self._usage_metrics.tool_calls += count
 
     @classmethod
     async def start(
@@ -201,19 +195,9 @@ class OneShotAgentSession:
         )
 
     async def observe(self, observation: AgentObservation) -> None:
-        record = {
-            "id": f"feedback_{uuid.uuid4().hex}",
-            "type": observation.type,
-            "data": observation.data,
-        }
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        await asyncio.to_thread(self._append_feedback, line)
-
-    def _append_feedback(self, line: str) -> None:
-        with open_regular_file(self.feedback_path, "a") as handle:
-            handle.write(line)
-            handle.flush()
-            self._feedback_offset = handle.tell()
+        self._feedback_offset = await asyncio.to_thread(
+            append_feedback, self.feedback_path, feedback_record(observation)
+        )
 
     async def checkpoint(self) -> AgentCheckpoint:
         return AgentCheckpoint(
@@ -226,17 +210,7 @@ class OneShotAgentSession:
         if self._closed:
             return
         self._closed = True
-        record = {
-            "type": "session.close_requested",
-            "data": {"reason": reason},
-        }
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        await asyncio.to_thread(self._append_control, line)
-
-    def _append_control(self, line: str) -> None:
-        with open_regular_file(self.control_path, "a") as handle:
-            handle.write(line)
-            handle.flush()
+        await asyncio.to_thread(append_control, self.control_path, control_record(reason))
 
     async def result(self) -> AgentResult:
         if self._task is None:

@@ -4,6 +4,7 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+from .extract import extract_facts
 from .progress import ProgressLedger
 from .session import AgentEvent
 from .world import (
@@ -199,6 +200,24 @@ class TypedACI:
                 actor="harness",
                 source_event_id=event.event_id,
             )
-            return 2
+            mutations = 2
+            for fact in extract_facts(event.data):
+                world.upsert(
+                    "observation",
+                    Observation(
+                        id=fact["id"],
+                        type=fact["type"],
+                        content=fact["content"],
+                        confidence=1.0,
+                        source="harness.extract",
+                        provenance=Provenance(
+                            source="harness.extract", epistemic_status="evidence"
+                        ),
+                    ),
+                    actor="harness",
+                    source_event_id=event.event_id,
+                )
+                mutations += 1
+            return mutations
 
         return 0

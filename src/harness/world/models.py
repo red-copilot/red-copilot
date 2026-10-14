@@ -4,11 +4,42 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+WorldObjectKind = Literal[
+    "entity",
+    "relation",
+    "observation",
+    "artifact",
+    "capability",
+    "hypothesis",
+    "goal",
+    "action",
+    "constraint",
+    "failure",
+]
+
+
+class StateSelector(BaseModel):
+    """A declarative reference to a World record at a minimum trust level.
+
+    Selectors are the shared vocabulary for skill preconditions/outputs and for
+    goal target states. They live in the World layer so both domain records
+    (``Goal.required_states``) and planner-facing skill metadata can reuse one
+    validated type without a reverse import.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: WorldObjectKind
+    type: str = Field(min_length=1)
+    scope: str | None = None
+    minimum_trust: Literal["claim", "evidence", "verified"] = "claim"
 
 
 class Provenance(BaseModel):
@@ -106,6 +137,10 @@ class Goal(WorldRecord):
     priority: float = Field(default=0.5, ge=0.0, le=1.0)
     parent_id: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
+    # Declarative target states. When set, the goal-driven frontier only proposes
+    # skills that (transitively) produce one of these states; an empty list keeps
+    # the legacy "all enabled skills" behavior.
+    required_states: list[StateSelector] = Field(default_factory=list)
 
 
 class ActionRecord(WorldRecord):
@@ -146,20 +181,6 @@ WorldObject = (
     | Constraint
     | Failure
 )
-WorldObjectKind = Literal[
-    "entity",
-    "relation",
-    "observation",
-    "artifact",
-    "capability",
-    "hypothesis",
-    "goal",
-    "action",
-    "constraint",
-    "failure",
-]
-
-
 class WorldEvent(BaseModel):
     schema_version: Literal["harness/world/v1"] = "harness/world/v1"
     id: str = Field(default_factory=lambda: _id("wevt"))

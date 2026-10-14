@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from .agent_workspace import (
     prepare_agent_task_view,
     prepare_agent_workspace_for_container,
 )
-from .budget import BudgetMonitor, UsageMetrics
+from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor, UsageMetrics
 from .models import AgentSpec, TaskSpec, _is_reserved_credential_env
 from .secureio import open_regular_file, read_regular_text
 from .trace import TraceRecorder
@@ -21,6 +22,179 @@ from .trace import TraceRecorder
 
 class AgentError(RuntimeError):
     pass
+
+
+# Harness-normalized Agent event stream (the per-run artifact).
+NORMALIZED_EVENT_FILE = "events.jsonl"
+# Agent-authored typed solver events (``action.intent``, ``world.observe``, ...).
+# RPC sessions read Pi's stdout rather than the shared file, so the Agent gets
+# its own file there; one-shot JSON sessions keep the shared file.
+AGENT_EVENT_FILE = "agent.events.jsonl"
+
+
+def task_environment(
+    task: TaskSpec,
+    *,
+    task_dir: Path | str,
+    run_dir: Path | str,
+    environment_project: str | None,
+    seed: int,
+    network_profile: str,
+    event_file_name: str = NORMALIZED_EVENT_FILE,
+) -> dict[str, str]:
+    """Canonical ``HARNESS_*`` task contract for host and container Agents."""
+
+    run_root = Path(run_dir)
+    return {
+        "HARNESS_TASK_ID": task.id,
+        "HARNESS_TASK_DIR": str(task_dir),
+        "HARNESS_RUN_DIR": str(run_root),
+        "HARNESS_OBJECTIVE": task.objective.description,
+        "HARNESS_ENV_PROJECT": environment_project or "",
+        "HARNESS_EVENT_FILE": str(run_root / event_file_name),
+        "HARNESS_WORLD_INBOX": str(run_root / "world.inbox.jsonl"),
+        "HARNESS_WORLD_CONTEXT": str(run_root / "world.context.txt"),
+        "HARNESS_SUBMISSION_INBOX": str(run_root / "submission.inbox.jsonl"),
+        "HARNESS_FEEDBACK_FILE": str(run_root / "agent.feedback.jsonl"),
+        "HARNESS_SUMMARY_FILE": str(run_root / "agent.summary.md"),
+        "HARNESS_PROGRESS_FILE": str(run_root / "progress.json"),
+        "HARNESS_NETWORK_PROFILE": network_profile,
+        "HARNESS_SEED": str(seed),
+    }
+
+
+def gateway_environment(gateway_url: str, gateway_token: str) -> dict[str, str]:
+    """Environment that routes an Agent's model traffic through the Harness Gateway."""
+
+    return {
+        "HARNESS_GATEWAY_URL": gateway_url,
+        "HARNESS_GATEWAY_TOKEN": gateway_token,
+        "OPENAI_BASE_URL": f"{gateway_url}/v1",
+        "OPENAI_API_KEY": gateway_token,
+    }
+
+
+@dataclass(frozen=True)
+class ContainerLimits:
+    """Docker resource limits shared by container Agent adapters."""
+
+    pids: int = 256
+    memory: str = "2g"
+    cpus: str = "2"
+    tmpfs: tuple[str, ...] = ("/tmp:rw,nosuid,nodev,size=256m",)
+
+
+DEFAULT_CONTAINER_LIMITS = ContainerLimits()
+
+
+def build_container_command(
+    *,
+    spec: AgentSpec,
+    task: TaskSpec,
+    task_dir: Path,
+    run_dir: Path,
+    container_name: str,
+    network: str,
+    environment_project: str | None,
+    seed: int,
+    gateway_url: str | None,
+    gateway_token: str | None,
+    host_gateway: bool,
+    image_command: Sequence[str],
+    agent_task_dir: Path | None = None,
+    workdir: str = "/task",
+    limits: ContainerLimits = DEFAULT_CONTAINER_LIMITS,
+    reserved_env_names: frozenset[str] | None = None,
+    extra_cap_add: Sequence[str] = (),
+    extra_env: Mapping[str, str] | None = None,
+    env_passthrough: Sequence[str] = (),
+    interactive: bool = False,
+    event_file_name: str = NORMALIZED_EVENT_FILE,
+) -> list[str]:
+    """Build the single hardened ``docker create`` command for container Agents."""
+
+    from .network_policy import proxy_environment_overrides, reject_agent_proxy_env
+
+    reserved = frozenset(spec.env) if reserved_env_names is None else reserved_env_names
+    if any(_is_reserved_credential_env(key) for key in reserved):
+        raise AgentError(
+            "container Agent cannot receive reserved credential environment variables"
+        )
+    reject_agent_proxy_env(spec.network_profile, set(reserved))
+    agent_task_dir = agent_task_dir or prepare_agent_task_view(
+        task_dir=task_dir,
+        run_root=run_dir.parent,
+        verifier_entrypoint=task.verification.entrypoint,
+    )
+    container_uid, container_gid = prepare_agent_workspace_for_container(run_dir)
+    command = [
+        "docker",
+        "create",
+        "--rm",
+        "--pull=never",
+        "--name",
+        container_name,
+        "--user",
+        f"{container_uid}:{container_gid}",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        str(limits.pids),
+        "--memory",
+        limits.memory,
+        "--cpus",
+        limits.cpus,
+    ]
+    for mount in limits.tmpfs:
+        command.extend(["--tmpfs", mount])
+    command.extend(["--network", network])
+    if spec.runtime:
+        command.extend(["--runtime", spec.runtime])
+    for capability in extra_cap_add:
+        command.extend(["--cap-add", capability])
+    if host_gateway:
+        command.extend(["--add-host", "host.docker.internal:host-gateway"])
+    command.extend(
+        [
+            "-v",
+            f"{agent_task_dir.resolve()}:/task:ro",
+            "-v",
+            f"{run_dir.resolve()}:/run/harness:rw",
+            "-w",
+            workdir,
+        ]
+    )
+
+    environment = task_environment(
+        task,
+        task_dir="/task",
+        run_dir="/run/harness",
+        environment_project=environment_project,
+        seed=seed,
+        network_profile=spec.network_profile,
+        event_file_name=event_file_name,
+    )
+    if extra_env:
+        environment.update(extra_env)
+    gateway_enabled = bool(gateway_url and gateway_token)
+    if gateway_enabled:
+        environment.update(gateway_environment(str(gateway_url), str(gateway_token)))
+    environment.update(spec.env)
+    if not gateway_enabled:
+        for key in env_passthrough:
+            if key not in os.environ:
+                raise AgentError(f"requested Pi environment variable is missing: {key}")
+            environment[key] = os.environ[key]
+    for key, value in environment.items():
+        command.extend(["-e", f"{key}={value}"])
+    command.extend(proxy_environment_overrides(spec.network_profile))
+    if interactive:
+        command.append("-i")
+    command.extend(image_command)
+    return command
 
 
 @dataclass
@@ -96,7 +270,7 @@ def _run_monitored(
             if exceeded:
                 _terminate_process(proc)
                 break
-            if time.monotonic() - started > task.budgets.wall_time:
+            if time.monotonic() - started > task.budgets.wall_time + FINALIZE_GRACE_SECONDS:
                 timed_out = True
                 trace.emit(
                     "budget.exceeded",
@@ -162,31 +336,17 @@ class CLIAdapter:
         env = os.environ.copy()
         env.update(self.spec.env)
         env.update(
-            {
-                "HARNESS_TASK_ID": task.id,
-                "HARNESS_TASK_DIR": str(task_dir),
-                "HARNESS_RUN_DIR": str(run_dir),
-                "HARNESS_OBJECTIVE": task.objective.description,
-                "HARNESS_ENV_PROJECT": environment_project or "",
-                "HARNESS_EVENT_FILE": str(run_dir / "events.jsonl"),
-                "HARNESS_WORLD_INBOX": str(run_dir / "world.inbox.jsonl"),
-                "HARNESS_WORLD_CONTEXT": str(run_dir / "world.context.txt"),
-                "HARNESS_SUBMISSION_INBOX": str(run_dir / "submission.inbox.jsonl"),
-                "HARNESS_FEEDBACK_FILE": str(run_dir / "agent.feedback.jsonl"),
-                "HARNESS_PROGRESS_FILE": str(run_dir / "progress.json"),
-                "HARNESS_NETWORK_PROFILE": self.spec.network_profile,
-                "HARNESS_SEED": str(seed),
-            }
+            task_environment(
+                task,
+                task_dir=task_dir,
+                run_dir=run_dir,
+                environment_project=environment_project,
+                seed=seed,
+                network_profile=self.spec.network_profile,
+            )
         )
         if gateway_url and gateway_token:
-            env.update(
-                {
-                    "HARNESS_GATEWAY_URL": gateway_url,
-                    "HARNESS_GATEWAY_TOKEN": gateway_token,
-                    "OPENAI_BASE_URL": f"{gateway_url}/v1",
-                    "OPENAI_API_KEY": gateway_token,
-                }
-            )
+            env.update(gateway_environment(gateway_url, gateway_token))
 
         cwd = Path(self.spec.cwd).resolve() if self.spec.cwd else task_dir
         self.trace.emit(
@@ -301,106 +461,21 @@ class DockerAdapter:
         host_gateway: bool,
         agent_task_dir: Path | None = None,
     ) -> list[str]:
-        from .network_policy import proxy_environment_overrides, reject_agent_proxy_env
-
-        forbidden_env = sorted(
-            key for key in self.spec.env if _is_reserved_credential_env(key)
-        )
-        if forbidden_env:
-            raise AgentError("container Agent cannot receive reserved credential environment variables")
-        reject_agent_proxy_env(self.spec.network_profile, set(self.spec.env))
-        agent_task_dir = agent_task_dir or prepare_agent_task_view(
+        return build_container_command(
+            spec=self.spec,
+            task=task,
             task_dir=task_dir,
-            run_root=run_dir.parent,
-            verifier_entrypoint=task.verification.entrypoint,
+            run_dir=run_dir,
+            container_name=container_name,
+            network=network,
+            environment_project=environment_project,
+            seed=seed,
+            gateway_url=gateway_url,
+            gateway_token=gateway_token,
+            host_gateway=host_gateway,
+            agent_task_dir=agent_task_dir,
+            image_command=[str(self.spec.image), *self.spec.command],
         )
-        container_uid, container_gid = prepare_agent_workspace_for_container(run_dir)
-        command = [
-            "docker",
-            "create",
-            "--rm",
-            "--pull=never",
-            "--name",
-            container_name,
-            "--user",
-            f"{container_uid}:{container_gid}",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "256",
-            "--memory",
-            "2g",
-            "--cpus",
-            "2",
-            "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=256m",
-            "--network",
-            network,
-        ]
-        if self.spec.runtime:
-            command.extend(["--runtime", self.spec.runtime])
-        if host_gateway:
-            command.extend(["--add-host", "host.docker.internal:host-gateway"])
-
-        command.extend(
-            [
-                "-v",
-                f"{agent_task_dir.resolve()}:/task:ro",
-                "-v",
-                f"{run_dir.resolve()}:/run/harness:rw",
-                "-w",
-                "/task",
-                "-e",
-                f"HARNESS_TASK_ID={task.id}",
-                "-e",
-                "HARNESS_TASK_DIR=/task",
-                "-e",
-                "HARNESS_RUN_DIR=/run/harness",
-                "-e",
-                f"HARNESS_OBJECTIVE={task.objective.description}",
-                "-e",
-                f"HARNESS_ENV_PROJECT={environment_project or ''}",
-                "-e",
-                "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
-                "-e",
-                "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
-                "-e",
-                "HARNESS_WORLD_CONTEXT=/run/harness/world.context.txt",
-                "-e",
-                "HARNESS_SUBMISSION_INBOX=/run/harness/submission.inbox.jsonl",
-                "-e",
-                "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
-                "-e",
-                "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
-                "-e",
-                f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
-                "-e",
-                f"HARNESS_SEED={seed}",
-            ]
-        )
-        if gateway_url and gateway_token:
-            command.extend(
-                [
-                    "-e",
-                    f"HARNESS_GATEWAY_URL={gateway_url}",
-                    "-e",
-                    f"HARNESS_GATEWAY_TOKEN={gateway_token}",
-                    "-e",
-                    f"OPENAI_BASE_URL={gateway_url}/v1",
-                    "-e",
-                    f"OPENAI_API_KEY={gateway_token}",
-                ]
-            )
-
-        for key, value in sorted(self.spec.env.items()):
-            command.extend(["-e", f"{key}={value}"])
-        command.extend(proxy_environment_overrides(self.spec.network_profile))
-        command.append(str(self.spec.image))
-        command.extend(self.spec.command)
-        return command
 
     def run(
         self,

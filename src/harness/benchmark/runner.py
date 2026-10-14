@@ -14,14 +14,17 @@ from pydantic import ValidationError
 from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import AgentObservation
+from ..solver_policy import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
+from ..budget import enforced_budget_limits
 from ..runtime import bootstrap_solver
-from ..runtime.agent_workspace import create_agent_workspace, sync_agent_workspace
+from ..agent_workspace import create_agent_workspace, sync_agent_workspace
 from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
 from ..runtime.evidence import persist_objective_verdict
 from ..runtime.lifecycle import RunLifecycle, resolve_run_status
-from ..runtime.projections import finalize_world_goal, network_result, world_result
+from ..runtime.projections import finalize_world_goal, network_result, run_summary, world_result
 from ..runtime.results import persist_run_result
+from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from ..world import (
     Entity,
     Failure,
@@ -92,6 +95,9 @@ class BenchmarkRunner:
         seed: int,
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
+        solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
+        max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
+        max_replans: int = BENCHMARK_MAX_REPLANS,
     ) -> dict:
         if agent.type in {"docker", "pi"} and agent.network == "environment":
             raise ValueError(
@@ -190,6 +196,7 @@ class BenchmarkRunner:
                 status="active",
                 priority=1.0,
                 attributes={"benchmark": session.benchmark, "case_id": session.case_id},
+                required_states=list(session.objective.required_states),
             )
             targets = [
                 Entity(
@@ -202,6 +209,13 @@ class BenchmarkRunner:
                 )
                 for target in session.targets
             ]
+            budget_limits, ignored_budgets = enforced_budget_limits(budgets)
+            if ignored_budgets:
+                trace.emit(
+                    "budget.ignored",
+                    actor="harness",
+                    data={"ignored": ignored_budgets, "enforced": ["wall_time"]},
+                )
             runtime = bootstrap_solver(
                 run_dir=run_dir,
                 trace=trace,
@@ -211,8 +225,11 @@ class BenchmarkRunner:
                 skills_root=self.skills_root,
                 targets=targets,
                 target_actor=f"benchmark:{session.benchmark}",
-                budget_limits=budgets.model_dump(exclude_none=True),
+                budget_limits=budget_limits,
                 agent_workspace=agent_workspace,
+                solver_profile=solver_profile,
+                max_unconfirmed_progress=max_unconfirmed_progress,
+                max_replans=max_replans,
             )
             world = runtime.world
             context_builder = runtime.context_builder
@@ -239,6 +256,7 @@ class BenchmarkRunner:
                     "case_id": session.case_id,
                     "agent_id": agent.id,
                     "seed": seed,
+                    "solver_profile": solver_profile.value,
                     "world_revision": world.snapshot.revision,
                 },
             )
@@ -585,19 +603,26 @@ class BenchmarkRunner:
         if agent_result is None:
             raise RuntimeError("agent did not start")
 
+        # The Pi session may be stopped by the solver's own budget check before
+        # the RPC session records its own exhaustion, so treat an empty remaining
+        # budget as exhaustion too. Otherwise a budget stop would be reported as
+        # an ordinary solver failure.
+        budget_exhausted = (
+            bool(agent_result.budget_exceeded) or progress.remaining_budget_fraction <= 0.0
+        )
         status = (
             "error"
             if evaluation_error is not None or evaluation is None
             else resolve_run_status(
                 objective_completed=progress.objective_completed,
                 timed_out=agent_result.timed_out,
-                budget_exceeded=bool(agent_result.budget_exceeded),
+                budget_exceeded=budget_exhausted,
             )
         )
         lifecycle.settle(
             succeeded=progress.objective_completed,
             exhausted=not progress.objective_completed
-            and (agent_result.timed_out or bool(agent_result.budget_exceeded)),
+            and (agent_result.timed_out or budget_exhausted),
         )
         finalize_world_goal(
             world=world,
@@ -610,6 +635,25 @@ class BenchmarkRunner:
         )
         world.flush()
 
+        termination_reason = (
+            "objective-complete"
+            if progress.objective_completed
+            else "budget-exhausted"
+            if budget_exhausted
+            else None
+        )
+        summary = run_summary(
+            world=world,
+            progress=progress,
+            run_dir=run_dir,
+            agent_report_path=agent_workspace / "agent.summary.md",
+            outcome={
+                "status": status,
+                "success": bool(evaluation and evaluation.success),
+                "score": evaluation.score if evaluation is not None else 0.0,
+                "termination_reason": termination_reason,
+            },
+        )
         result = {
             "schema_version": "harness/result/v2",
             "run_id": run_id,
@@ -618,11 +662,15 @@ class BenchmarkRunner:
                 "case_id": session.case_id,
                 "domain": case.domain,
                 "difficulty": case.difficulty,
+                "solver_profile": solver_profile.value,
                 "session": sanitize_observability_data(session.metadata),
             },
             "agent_id": agent.id,
             "status": status,
-            "termination_reason": ("objective-complete" if progress.objective_completed else None),
+            "termination_reason": (
+                termination_reason
+            ),
+            "summary": summary,
             "success": bool(evaluation and evaluation.success),
             "score": evaluation.score if evaluation is not None else 0.0,
             "message": (

@@ -24,7 +24,8 @@ The v1 state schema contains:
 - `Artifact`: a durable or addressable object such as a file, dump, token bundle, or report.
 - `Capability`: an ability acquired by an Agent within a scope.
 - `Hypothesis`: a testable belief with confidence and lifecycle status.
-- `Goal`: a persistent objective or sub-objective.
+- `Goal`: a persistent objective or sub-objective. Its optional `required_states`
+  selectors declare the target World states that drive the goal frontier.
 - `ActionRecord`: a planned/running/completed offensive action with optional target.
 - `Constraint`: an active/satisfied/violated/expired execution or policy boundary.
 - `Failure`: a structured failed attempt or execution condition.
@@ -52,8 +53,8 @@ Each mutation is represented as a `WorldEvent`:
 }
 ```
 
-`WorldReducer` folds events into `WorldSnapshot`. `WorldStore` persists an event and atomically
-materializes the current snapshot after each mutation.
+`WorldReducer` folds events into `WorldSnapshot`. `SQLiteWorldRepository` persists an event and
+atomically materializes the current snapshot after each mutation.
 
 ## Run integration
 
@@ -125,8 +126,8 @@ accepted and imported into SQLite on first open. Provider transcripts are never 
 World-state consumers depend on the `WorldRepository` protocol rather than on JSONL paths. The
 default implementation is `SQLiteWorldRepository`, backed by `world.db` with WAL, persistent
 event sequence numbers, event-id deduplication, optimistic `expected_revision` checks, and a
-materialized `world_objects` projection. `FileWorldRepository` and `WorldStore` remain available
-for compatibility and migration.
+materialized `world_objects` projection. It is the only World store implementation; the
+`world.events.jsonl` and `world.snapshot.json` files are compatibility/debug exports.
 
 Both the Orchestrator and State Plane API continue to accept a repository factory, so a future
 PostgreSQL implementation can replace SQLite without changing Agent, planner, or run semantics.

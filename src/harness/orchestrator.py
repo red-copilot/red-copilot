@@ -18,16 +18,16 @@ from pathlib import Path
 
 from . import __version__
 from .agent import build_agent_adapter
-from .budget import UsageMetrics
-from .environment import build_environment
-from .gateway_runtime import GatewayConfig, build_gateway_runtime
-from .models import AgentSpec, TaskSpec
-from .runtime import bootstrap_solver
-from .runtime.agent_workspace import (
+from .agent_workspace import (
     create_agent_workspace,
     prepare_agent_task_view,
     sync_agent_workspace,
 )
+from .budget import UsageMetrics, enforced_budget_limits
+from .environment import build_environment
+from .gateway_runtime import GatewayConfig, build_gateway_runtime
+from .models import AgentSpec, TaskSpec
+from .runtime import bootstrap_solver
 from .runtime.checkpoint import (
     load_recovery_state,
     run_action_owner,
@@ -247,7 +247,15 @@ class Orchestrator:
             status="active",
             priority=1.0,
             attributes={"task_id": task.id, "category": task.category},
+            required_states=list(task.objective.required_states),
         )
+        budget_limits, ignored_budgets = enforced_budget_limits(task.budgets)
+        if ignored_budgets:
+            trace.emit(
+                "budget.ignored",
+                actor="harness",
+                data={"ignored": ignored_budgets, "enforced": ["wall_time"]},
+            )
         runtime = bootstrap_solver(
             run_dir=run_dir,
             trace=trace,
@@ -256,7 +264,7 @@ class Orchestrator:
             context_query=task.objective.description,
             skills_root=self.skills_root,
             world_repository_factory=self.world_repository_factory,
-            budget_limits=task.budgets.model_dump(exclude_none=True),
+            budget_limits=budget_limits,
             agent_workspace=agent_workspace,
             resume_existing=is_resume,
             solver_profile=solver_profile,

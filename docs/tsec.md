@@ -49,14 +49,14 @@ The ablation matrix (Pi-only vs feedback vs full control spine) is in
 One unfinished challenge:
 
 ```bash
-harness tsec --agent agents/examples/pi-tsec.yaml
+harness tsec --agent agents/examples/pi-tsec-hackathon.yaml
 ```
 
 Specific challenge:
 
 ```bash
 harness tsec \
-  --agent agents/examples/pi-tsec.yaml \
+  --agent agents/examples/pi-tsec-hackathon.yaml \
   --challenge WEB-001
 ```
 
@@ -64,24 +64,32 @@ All unfinished challenges:
 
 ```bash
 harness tsec \
-  --agent agents/examples/pi-tsec.yaml \
+  --agent agents/examples/pi-tsec-hackathon.yaml \
   --all
 ```
 
-Optional limits:
+Optional limits and ablation profiles:
 
 ```bash
 harness tsec \
-  --agent agents/examples/pi-tsec.yaml \
+  --agent agents/examples/pi-tsec-hackathon.yaml \
   --all \
+  --solver-profile pi-world-heuristic \
+  --skills-root skills \
+  --max-unconfirmed-progress 160 \
+  --max-replans 16 \
   --wall-time 3600 \
-  --max-tokens 200000 \
-  --max-model-calls 300 \
-  --max-tool-calls 1000 \
-  --max-cost-usd 20 \
   --start-retries 2 \
   --retry-delay 2
 ```
+
+`--wall-time` is a soft deadline: at that point Harness steers the Agent to write
+`agent.summary.md` (facts, ruled-out hypotheses, unfinished intents) and grants a
+`FINALIZE_GRACE_SECONDS` (180s) window before the container is killed. The
+`--max-tokens`/`--max-model-calls`/`--max-tool-calls`/`--max-cost-usd` flags are still accepted
+but no longer enforced; passing one prints a warning and records a `budget.ignored` trace event.
+
+When a TSec challenge is provisioned, `bootstrap_solver()` seeds each `benchmark.target` entity alongside an `evidence`-level `network.reachability` capability scoped to the target address so `RollingHorizonPlanner` immediately produces an initial 3-step plan (`plan.json`) across bundled multi-domain skills (`network`, `web`, `pwn`, `crypto`, `cloud`, `benchmark`).
 
 If the platform returns `ResourceUnavailable` while starting a challenge, Harness retries according to `--start-retries` and `--retry-delay`. Other SDK state errors are recorded in the trace and surfaced instead of being guessed around.
 
@@ -89,7 +97,7 @@ Hints are opt-in because the TSec SDK documents that viewing a hint reduces flag
 
 ```bash
 harness tsec \
-  --agent agents/examples/pi-tsec.yaml \
+  --agent agents/examples/pi-tsec-hackathon.yaml \
   --challenge WEB-001 \
   --hint
 ```
@@ -98,13 +106,9 @@ Harness calls `get_hint()` only when `--hint` is present and records that a scor
 
 ## Security boundary
 
-The Pi container never receives `BENCHMARK_TOKEN` or `BENCHMARK_BASE_URL`. Red Harness calls the SDK to start, submit and close challenges. Pi emits candidate answers as:
+The Pi container never receives `BENCHMARK_TOKEN` or `BENCHMARK_BASE_URL`. Red Harness calls the SDK to start, submit and close challenges. Pi emits candidate answers to `$HARNESS_SUBMISSION_INBOX` (or compatibility fallback `HARNESS_FLAG=flag{...}`).
 
-```text
-HARNESS_FLAG=flag{...}
-```
-
-Harness extracts them from Pi JSONL and submits them through the SDK. Trace records a SHA256 hash of candidate flags, not plaintext flag values.
+Harness extracts them and submits them through the SDK. Trace records a SHA256 hash of candidate flags, not plaintext flag values.
 
 Challenge close is executed in `finally`, so target resources are released even when Pi or submission fails.
 
@@ -121,7 +125,8 @@ A TSec result records:
   "platform_cumulative_score": 935,
   "benchmark": {
     "challenge_total_score": 120,
-    "hint_used": true
+    "hint_used": true,
+    "solver_profile": "pi-world-heuristic"
   },
   "flags": {
     "expected": 2,

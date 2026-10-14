@@ -133,13 +133,19 @@ CLI 命令随之移除：`serve`、`submit`、`worker`、`otel-export`、`suite`
 
 控制律本身是纯函数（`solver_policy.decide_solver_action`），稳定裕度由以下机制保证：
 
-- **限幅**：重规划次数上限（8）——避免控制量无界振荡。
+- **限幅**：默认重规划次数上限（`DEFAULT_MAX_REPLANS = 8`，外部 1 小时基准评测模式放宽至
+  `BENCHMARK_MAX_REPLANS = 16`）——避免控制量无界振荡。
 - **阻尼 / 死区**：连续无进展上限（6）与剩余预算阈值（5%）触发 STOP——避免在死区里反复
   消耗预算。
 - **中性执行不触发停机**：一次成功的工具执行既不是已确认进展，也不是停滞。它只累加
-  `unconfirmed_progress`（上限 40），只有失败/矛盾/被拒提交才累加 `no_progress_count`
-  （上限 6）。这样在缺少动作级验证器的 benchmark 路径（例如 TSec 只对提交的 flag 判分），
-  不会因为"没有任何动作可被确认"就在探索 6 步后被误判为无进展而停机。
+  `unconfirmed_progress`（本地默认上限 `40`，TSec 基准评测模式默认上限
+  `BENCHMARK_MAX_UNCONFIRMED_PROGRESS = 160`），只有失败/矛盾/被拒提交才累加
+  `no_progress_count`（上限 6）。这样在缺少动作级验证器的 benchmark 路径（例如 TSec 只对
+  提交的 flag 判分），既不会在探索 6 步后被误判为无进展，也不会在 1 小时长题的深入分析中因
+  40 次工具调用而过早停机。
+- **初始可达性能力派生**：`bootstrap_solver()` 在注入 `benchmark.target` 实体时，以相同的
+  `target_actor`（`evidence` 级可信度）自动派生 `network.reachability` 能力，确保
+  `RollingHorizonPlanner` 在开局即可激活匹配的领域技能。
 - **防重复**：`ProgressLedger` 用状态签名抑制相同重规划，避免稳态振荡。
 - **饱和**：`budget.py` 在 token/调用/成本/时间上做硬约束。
 - **采样/时滞**：每个 session 事件后写 checkpoint，崩溃恢复前要求未决动作对账，保证
@@ -156,21 +162,21 @@ CLI 命令随之移除：`serve`、`submit`、`worker`、`otel-export`、`suite`
 - **控制器**：外层 Harness 依误差决定 continue/steer/replan/verify/stop 并逐轮注入反馈；
   内层 Pi 用工具完成具体动作。
 - **执行器**：Pi 在 Kali 容器内的工具集（`read`/`bash`/`edit`/`write`，按需 `NET_RAW`）。
-- **提交协议**：Pi 以 `HARNESS_FLAG=flag{...}` 输出候选答案，Harness 经 SDK 提交并记录
-  flag 的 SHA256（不落明文）。
+- **提交协议**：Pi 向 `$HARNESS_SUBMISSION_INBOX` 追加 JSON 候选（或以 `HARNESS_FLAG=flag{...}`
+  兜底），Harness 经 SDK 提交并记录 flag 的 SHA256（不落明文）。
 
 级联结构的关键约束：Harness **不**替 Pi 完成每一步推理，只调节设定值（子目标）、约束
 （预算/网络/权限）与停机条件；Pi **不**能把自己的结论升级为已验证事实。
 
 ### 消融方案（同一模型、任务、种子、预算）
 
-| 实验 | 目标 |
-| --- | --- |
-| Pi 原生求解 | 基线 |
-| Pi + Harness 验证反馈 | 度量闭环反馈收益 |
-| Pi + World 上下文 | 度量持久状态收益 |
-| Pi + Planner | 度量行动选择收益 |
-| 全量控制主脊 | 总体效果 |
+`harness tsec` 与 `harness run` 均支持 `--solver-profile` 参数直接切换实验配置：
+
+| 实验 | `--solver-profile` | 目标 |
+| --- | --- | --- |
+| Pi 原生求解 + 闭环验证反馈 | `pi-only` | 基线 + 闭环反馈收益 |
+| Pi + World 上下文 | `pi-world` | 度量持久状态与 Focus 集收益 |
+| 全量控制主脊（含 Rolling Planner） | `pi-world-heuristic` | 度量技能选择与总体效果 |
 
 ## 六、验收：可证伪的控制性质
 

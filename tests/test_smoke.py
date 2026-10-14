@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 
 from harness.agent import AgentResult
+from harness.agent_workspace import create_agent_workspace
 from harness.budget import UsageMetrics
 from harness.models import load_agent, load_task
 from harness.orchestrator import Orchestrator, _remaining_budget_task
-from harness.runtime.agent_workspace import create_agent_workspace
 from harness.runtime.bootstrap import bootstrap_solver
 from harness.runtime.checkpoint import save_session_checkpoint
 from harness.session import AgentCheckpoint, AgentEvent

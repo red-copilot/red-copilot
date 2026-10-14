@@ -10,7 +10,9 @@ from harness.models import BudgetSpec, load_task
 from harness.trace import TraceRecorder
 
 
-def test_budget_monitor_accounts_and_exceeds(tmp_path: Path) -> None:
+def test_budget_monitor_accounts_without_enforcing_non_time_limits(tmp_path: Path) -> None:
+    # Token/call/cost ceilings are declared for compatibility but no longer stop
+    # a run; only the soft wall-clock deadline bounds it.
     events = tmp_path / "events.jsonl"
     trace = TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test")
     monitor = BudgetMonitor(
@@ -29,7 +31,7 @@ def test_budget_monitor_accounts_and_exceeds(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert monitor.poll() == "max_tokens"
+    assert monitor.poll() is None
     assert monitor.metrics.total_tokens == 12
     assert monitor.metrics.model_calls == 1
 

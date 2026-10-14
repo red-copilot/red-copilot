@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
+from harness.benchmark import tsec_adapter
 from harness.benchmark.base import BenchmarkCase, Submission
-from harness.benchmark.tsec_adapter import TSecBenchmarkAdapter
+from harness.benchmark.tsec_adapter import (
+    TSecBenchmarkAdapter,
+    extract_flags,
+    run_tsec_challenges,
+)
+from harness.benchmark.tsec_client import TSecConfig
+from harness.models import AgentSpec, BudgetSpec
+from harness.runtime.solver_profile import SolverProfile
 
 
 class FakeTSecClient:
@@ -216,3 +226,229 @@ def test_tsec_malformed_start_response_fails_closed_and_cleans_up() -> None:
         assert client.closed == ["WEB-001"]
 
     asyncio.run(scenario())
+
+
+def test_extract_flags_from_pi_jsonl() -> None:
+    events = [
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "HARNESS_FLAG=flag{one}"}],
+            },
+        },
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": "HARNESS_FLAG=flag{two} HARNESS_FLAG=flag{one}",
+            },
+        },
+    ]
+    raw = "\n".join(json.dumps(item) for item in events)
+    assert extract_flags(raw) == ["flag{one}", "flag{two}"]
+
+
+_TSEC_OBJECTIVE = (
+    "Investigating only the benchmark targets: append one JSON line like "
+    '{"type":"flag","value":"flag{...}"} to $HARNESS_SUBMISSION_INBOX. '
+    "HARNESS_FLAG=<flag> remains a compatibility fallback."
+)
+
+
+def _message(role: str, text: str) -> dict:
+    return {
+        "type": "message_end",
+        "message": {"role": role, "content": [{"type": "text", "text": text}]},
+    }
+
+
+def test_extract_flags_ignores_prompt_placeholders() -> None:
+    # Regression: the objective prompt itself was harvested as a candidate flag,
+    # producing junk submissions (e.g. "<flag>" and "flag{...}").
+    raw = json.dumps(_message("user", _TSEC_OBJECTIVE))
+    assert extract_flags(raw) == []
+    submissions = tsec_adapter._extract_submissions(SimpleNamespace(stdout=raw))
+    assert submissions == []
+
+
+def test_extract_flags_keeps_agent_emitted_values_only() -> None:
+    raw = "\n".join(
+        json.dumps(item)
+        for item in [
+            _message("user", _TSEC_OBJECTIVE),
+            _message("assistant", "The captured value is HARNESS_FLAG=flag{one}"),
+            _message(
+                "toolResult",
+                "cat /var/www/flag.txt -> HARNESS_FLAG=flag{two_real_value}",
+            ),
+        ]
+    )
+    assert extract_flags(raw) == ["flag{one}", "flag{two_real_value}"]
+
+
+def test_extract_flags_rejects_placeholder_shaped_values() -> None:
+    # Template markers and too-short remnants are rejected; a short-but-real
+    # value like "flag{x}" is deliberately still accepted (no false negatives).
+    values = ["<flag>", "flag{...}", "flag{ spaced }", "fl"]
+    raw = "\n".join(json.dumps(_message("assistant", f"HARNESS_FLAG={v}")) for v in values)
+    assert extract_flags(raw) == []
+
+
+def test_extract_submissions_does_not_raw_scan_stdout() -> None:
+    # A non-JSON line must not be harvested anymore: only structured,
+    # Agent-authored candidates are accepted.
+    result = SimpleNamespace(stdout="not json HARNESS_FLAG=flag{rawscanvalue}")
+    assert tsec_adapter._extract_submissions(result) == []
+
+
+def _runner_agent() -> AgentSpec:
+    return AgentSpec.model_validate(
+        {
+            "apiVersion": "harness/v1",
+            "id": "pi-tsec",
+            "type": "pi",
+            "image": "pi:test",
+            "network": "host",
+            "pi": {"provider": "fake", "model": "m"},
+        }
+    )
+
+
+class FakeRunnerClient:
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args) -> None:
+        return None
+
+    async def list_challenges(self):
+        return [
+            SimpleNamespace(
+                unique_code="WEB-001",
+                description="Authorized web challenge",
+                category="web",
+                flag_count=2,
+                correct_flag_count=0,
+                difficulty="medium",
+                level="L2",
+                total_score=100,
+                is_completed=False,
+            )
+        ]
+
+    async def start_challenge(self, code):
+        assert code == "WEB-001"
+        return SimpleNamespace(container_addr=["10.0.0.2:8080"])
+
+    async def close_challenge(self, code):
+        assert code == "WEB-001"
+        self.closed = True
+        return SimpleNamespace(closed=True)
+
+
+class FakeBenchmarkRunner:
+    last_budgets: BudgetSpec | None = None
+    last_kwargs: dict | None = None
+    last_skills_root: Path | None = None
+
+    def __init__(self, *, runs_root: Path, skills_root: Path = Path("skills")):
+        self.runs_root = runs_root
+        type(self).last_skills_root = Path(skills_root)
+
+    async def run_case(self, *, case, budgets, **kwargs):
+        type(self).last_budgets = budgets
+        type(self).last_kwargs = kwargs
+        return {
+            "run_id": "tsec_WEB-001_fake",
+            "benchmark": {
+                "type": "tsec",
+                "case_id": case.id,
+                "domain": case.domain,
+                "difficulty": case.difficulty,
+                "solver_profile": (
+                    kwargs.get("solver_profile", SolverProfile.PI_WORLD_HEURISTIC).value
+                ),
+                "session": {
+                    "hint_used": False,
+                    "initial_correct": 0,
+                    "total_flags": 2,
+                    "remaining_at_start": 2,
+                },
+            },
+            "status": "finished",
+            "success": True,
+            "score": 100.0,
+            "evaluation": {
+                "expected_flags": 2,
+                "initial_correct": 0,
+                "remaining_at_start": 2,
+                "correct": 2,
+                "platform_cumulative_score": 900,
+            },
+        }
+
+
+def test_run_tsec_challenges_uses_generic_benchmark_contract(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            runs_root=tmp_path,
+            skills_root=tmp_path / "custom-skills",
+            challenge_code="WEB-001",
+            seed=1,
+            solver_profile=SolverProfile.PI_WORLD,
+            max_unconfirmed_progress=200,
+            max_replans=20,
+        )
+    )
+
+    assert len(results) == 1
+    result = results[0]
+    assert result["success"] is True
+    assert result["score"] == 100.0
+    assert result["platform_cumulative_score"] == 900
+    assert result["flags"] == {
+        "expected": 2,
+        "initial_correct": 0,
+        "remaining_at_start": 2,
+        "correct": 2,
+    }
+    assert result["benchmark"]["challenge"] == "WEB-001"
+    assert result["benchmark"]["level"] == "L2"
+    assert result["benchmark"]["solver_profile"] == "pi-world"
+    assert FakeBenchmarkRunner.last_skills_root == tmp_path / "custom-skills"
+    assert FakeBenchmarkRunner.last_kwargs is not None
+    assert FakeBenchmarkRunner.last_kwargs["solver_profile"] is SolverProfile.PI_WORLD
+    assert FakeBenchmarkRunner.last_kwargs["max_unconfirmed_progress"] == 200
+    assert FakeBenchmarkRunner.last_kwargs["max_replans"] == 20
+
+
+def test_run_tsec_challenges_applies_platform_wall_time_ceiling(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=7200),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+        )
+    )
+
+    assert FakeBenchmarkRunner.last_budgets is not None
+    assert FakeBenchmarkRunner.last_budgets.wall_time == 3600

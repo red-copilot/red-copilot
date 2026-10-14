@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
@@ -12,13 +10,6 @@ from .models import WorldSnapshot
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
-
-
-@dataclass(frozen=True)
-class RetrievedRecord:
-    kind: str
-    item: Any
-    score: float
 
 
 class WorldRetriever:
@@ -150,11 +141,3 @@ class WorldRetriever:
             output[kind] = ranked[: self.limits.get(kind, len(ranked))]
 
         return output
-
-
-def flatten_retrieval(records: dict[str, Iterable[Any]]) -> list[tuple[str, Any]]:
-    return [
-        (kind, item)
-        for kind, items in records.items()
-        for item in items
-    ]

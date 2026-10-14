@@ -1,0 +1,23 @@
+apiVersion: harness/skill/v1
+id: recon.passive
+domain: recon
+description: Passive reconnaissance — WHOIS, DNS, certificate transparency, and technology fingerprinting.
+tags: [recon, passive, osint, dns, whois]
+
+requires:
+  - kind: capability
+    type: network.reachability
+    minimum_trust: evidence
+
+produces:
+  - kind: observation
+    type: recon.dns
+  - kind: observation
+    type: recon.tech-stack
+  - kind: entity
+    type: network.host
+
+cost: 0.1
+risk: 0.0
+noise: 0.1
+

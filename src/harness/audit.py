@@ -7,11 +7,12 @@ import json
 import math
 import os
 import re
-import stat
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from .secureio import open_beneath, open_regular_file
 
 SCHEMA_VERSION = "harness/audit/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
@@ -68,39 +69,22 @@ def _add(
 
 def _read(path: Path, name: str, remaining: int) -> tuple[bytes, dict[str, Any]]:
     try:
-        fd = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-        )
+        handle = open_regular_file(path, "rb")
     except FileNotFoundError as exc:
         raise _AuditInputError("missing_required_file", name) from exc
     except OSError as exc:
         raise _AuditInputError("unsafe_or_invalid_input", name) from exc
-    try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > remaining:
-            raise _AuditInputError(
-                "input_size_limit_exceeded"
-                if before.st_size > remaining
-                else "unsafe_or_invalid_input",
-                name,
-            )
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(fd, min(1024 * 1024, remaining - total + 1))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > remaining:
-                raise _AuditInputError("input_size_limit_exceeded", name)
-        data = b"".join(chunks)
-        after = os.fstat(fd)
-    except OSError as exc:
-        raise _AuditInputError("input_read_error", name) from exc
-    finally:
-        os.close(fd)
+    with handle:
+        before = os.fstat(handle.fileno())
+        if before.st_size > remaining:
+            raise _AuditInputError("input_size_limit_exceeded", name)
+        try:
+            data = handle.read(remaining + 1)
+            after = os.fstat(handle.fileno())
+        except OSError as exc:
+            raise _AuditInputError("input_read_error", name) from exc
+    if len(data) > remaining:
+        raise _AuditInputError("input_size_limit_exceeded", name)
     changed = (before.st_size, before.st_mtime_ns, before.st_ctime_ns, before.st_ino) != (
         after.st_size,
         after.st_mtime_ns,
@@ -205,38 +189,17 @@ def _read_evidence_artifact(root: Path, reference: str) -> bytes:
         or "\x00" in reference
     ):
         raise ValueError("unsafe evidence artifact reference")
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    directory_fd = os.open(root, directory_flags)
     try:
-        for component in pure_path.parts[:-1]:
-            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
-        file_fd = os.open(
-            pure_path.parts[-1],
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-            dir_fd=directory_fd,
-        )
-        try:
-            info = os.fstat(file_fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_EVIDENCE_BYTES:
+        with open_beneath(root, Path(*pure_path.parts), "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if info.st_size > MAX_EVIDENCE_BYTES:
                 raise ValueError("unsafe or oversized evidence artifact")
-            chunks: list[bytes] = []
-            remaining = MAX_EVIDENCE_BYTES + 1
-            while remaining > 0:
-                chunk = os.read(file_fd, min(64 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            data = b"".join(chunks)
-            if len(data) > MAX_EVIDENCE_BYTES or len(data) != info.st_size:
-                raise ValueError("evidence artifact size changed or exceeded limit")
-            return data
-        finally:
-            os.close(file_fd)
-    finally:
-        os.close(directory_fd)
+            data = handle.read(MAX_EVIDENCE_BYTES + 1)
+    except OSError as exc:
+        raise ValueError("unsafe or oversized evidence artifact") from exc
+    if len(data) > MAX_EVIDENCE_BYTES or len(data) != info.st_size:
+        raise ValueError("evidence artifact size changed or exceeded limit")
+    return data
 
 
 def _validate_objective_evidence(

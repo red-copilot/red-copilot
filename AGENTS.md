@@ -7,7 +7,8 @@ control plane), `benchmark/` (adapter contracts and TSec integration), `world/`
 include `cli.py`, `orchestrator.py`, `agent.py`, `gateway.py`. Tests live in `tests/` as
 `test_<module>.py`. Fixtures and baselines sit under `benchmarks/examples/` and
 `benchmarks/baselines/`; agent configs under `agents/examples/`; JSON Schema contracts in
-`schemas/`; Dockerfiles in `docker/`; architecture and roadmap docs in `docs/`. Domain
+`schemas/` (trace-event only; pydantic models are the source of truth for task, agent and
+policy contracts); Dockerfiles in `docker/`; architecture and roadmap docs in `docs/`. Domain
 modules must not import API/CLI/Docker code: `tests/test_architecture.py` enforces this.
 
 ## Build, Test, and Development Commands
@@ -16,9 +17,7 @@ modules must not import API/CLI/Docker code: `tests/test_architecture.py` enforc
 - `ruff check .` - lint. `pytest -q` - full test suite.
 - `harness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml
   --allow-host-agent --seed 42` - run one task.
-- `harness suite benchmarks/examples/smoke-suite.yaml --agent agents/examples/demo.yaml
-  --allow-host-agent --workers 2` - run a suite in parallel.
-- `harness validate`, `harness validate-suite`, `harness preflight` - check task, suite,
+- `harness validate`, `harness validate-skill`, `harness preflight` - check task, skill,
   and agent contracts.
 
 Prerequisites: Docker for Docker agents, sidecar Gateway, and Docker verifiers;
@@ -31,7 +30,7 @@ Python 3.11+, 4-space indentation, `from __future__ import annotations`, and typ
 public signatures. Use `snake_case` for modules, functions, variables, `PascalCase` for
 classes, and `UPPER_SNAKE_CASE` for constants. Ruff is the only enforced tool
 (`line-length = 100`, per `pyproject.toml`); no formatter is enforced, so match surrounding
-style. YAML uses `apiVersion: harness/v1`; shared contracts live in `schemas/`.
+style. YAML uses `apiVersion: harness/v1`; pydantic models are the authoritative contracts.
 
 ## Testing Guidelines
 Tests use pytest and follow `tests/test_*.py` with `test_*` functions;

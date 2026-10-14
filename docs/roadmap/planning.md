@@ -8,6 +8,10 @@ Accept: deterministic fixtures show verification failure, contradiction and capa
 
 Implemented in `RollingHorizonPlanner` and `SolverLoop`: ranking considers current goal tokens, world records/provenance, skill failures, and remaining budget; expired or insufficiently trusted prerequisites do not satisfy a skill. Replanning follows world/evidence changes and uses a state signature to suppress identical repeats. Refuted hypotheses now set an explicit replan reason as well as annotating action triggers. Deterministic tests cover verification failure, refuted hypotheses, capability gain, failed-skill penalty, trust-qualified prerequisites, and repeated identical signals. See [planner tests](../../tests/test_planner.py) and [solver loop tests](../../tests/test_solver_loop.py). Focused planning/solver tests passed (17 tests); full suite passed (205 passed, 1 Docker integration skipped) on 2026-10-09.
 
+Replanning is now keyed on the recommended action set instead of the raw world revision: the revision advances on almost every event (and the heuristic score drifts with the focus set), so the old signature re-planned and re-notified the Agent for facts that changed no action. `maybe_replan` now suppresses any replan whose ranked `skill_id` list, replan reasons, no-progress count and last verification status are unchanged. Related planner change: a skill whose declared `produces` are all already satisfied is dropped from candidates (novelty `0.0`), because re-running it cannot teach the solver anything. Observed on a live RPC TSec run (`c-03`): 2 replans across 23 tool calls, where a comparable earlier run issued 16 replans across 17 calls. Regression coverage in `tests/test_solver_loop.py` (unrelated world revisions and recurring verifier reasons do not re-publish; a changed frontier does) and `tests/test_planner.py` (redundant skill is excluded). Validation on 2026-10-14: full suite passed (489 passed, 3 skipped); Ruff clean.
+
+The solver now steers the Agent as the budget runs out. Remaining budget is reported per dimension (`ProgressLedger.budget_fractions`, with `remaining_budget_fraction` delegating to it so the two can no longer drift), and crossing 50%, 25% or 10% once each emits a `solver.budget` observation telling the Agent to consolidate verified findings and submit the candidates it already holds instead of opening new exploration. `solver.budget` is in the RPC session's `_STEER_TYPES`, so it is injected as a steer rather than only written to the feedback file. Thresholds fire at most once per run and are not persisted across resume. Verified on a live RPC TSec run (`c-08`): exactly three `solver.budget` observations, one per threshold. Regression coverage in `tests/test_solver_loop.py` (each threshold fires once, no repeat, no fire above the highest threshold). Validation on 2026-10-14: full suite passed (496 passed, 3 skipped); Ruff clean.
+
 ### PLN-02 [~] P2 — Planner ablations and safe fallback
 Deliver: compare Pi-only, Pi+World, Pi+World+heuristic planner on identical tasks/seeds/budgets. Keep planner optional and non-blocking when skills unavailable.
 Accept: published per-domain completion/cost comparisons; if planner does not improve results, retain only optional reference implementation.
@@ -27,5 +31,89 @@ Skill and selector schemas reject unknown top-level execution fields; the planne
 ### PLN-04 [ ] experimental — Multi-agent shared work
 Use existing leased blackboard only where parallelism is demonstrably beneficial; add ownership, conflict handling and cancellation.
 Accept: no duplicate externally visible actions under lease races and positive measured throughput/quality gains.
+
+### PLN-05 [~] P1 — Goal-driven intent-fact frontier
+Deliver: wire the previously unwired intent-fact projection into the solver loop as a
+benchmark-agnostic, goal-driven frontier. `Goal.required_states` (seeded from
+`ObjectiveSpec.required_states`) declares target state selectors; the frontier keeps only
+enabled intents that directly hit an unmet target or are backward-chained prerequisites
+(depth-bounded, cycle-safe). The heuristic ranker becomes a scoring term and ablation
+baseline.
+Accept: deterministic fixtures cover goal-target trust levels, backward chaining, depth
+limit, cycle termination, deterministic ordering, and the all-enabled fallback for tasks
+with no declared targets; the frontier projection is appended to Agent context within a
+character budget; the control-spine closure and size ceilings still hold.
+
+Implemented in `cognition.py` (renamed from `offensive.py`; phase/weight semantics
+removed) and wired through `bootstrap_solver`/`SolverLoop`. New `pi-world-goal` profile is
+the default; `pi-world-heuristic` is retained as the non-frontier ablation baseline.
+`StateSelector` moved to the world layer with `skills.py` re-exporting it, and
+`Goal`/`ObjectiveSpec` gained optional `required_states` (backward-compatible). Validation
+on 2026-10-14: full suite passed (481 passed, 3 skipped); Ruff clean; architecture and
+size-ceiling tests pass (`harness.cognition` added to the frozen control spine; 60
+modules / 14,845 source lines). See
+[cognition tests](../../tests/test_cognition.py) and
+[docs/agent-engineering.md](../agent-engineering.md).
+
+The fixed-seed `pi-world-heuristic` vs `pi-world-goal` per-domain completion/cost ablation
+still requires Docker, Pi and provider credentials, none of which are available in this
+workspace; it remains pending and no planner-benefit claim is made.
+
+### PLN-06 [~] P1 — Round-based execution over the fact/intent graph
+Deliver: a run stops being one long Agent session. When the fact/intent graph changes (a new
+evidence/verified fact, or a newly ruled-out path) or the Agent stalls, Harness opens a new round:
+a fresh `prompt` on the same session carrying a compiled brief of what the previous round
+established, what it ruled out, and the open frontier.
+Accept: rounds fire only on real graph change or stall; the brief is bounded and carries facts,
+ruled-out paths and the frontier; the Agent is told not to repeat ruled-out paths.
+
+Implemented in `cognition.round_brief` plus a round controller in `SolverLoop`: `ruled_out_intents`
+links failed actions, failure records and per-skill failure counts to skill ids, so "tried and
+failed" is graph-visible (`CONTRADICTS` only linked fact to fact). Rounds are debounced - an
+unchanged brief is not re-sent - and stall rounds (`ROUND_STALL_STEPS = 6` tool results with no new
+fact) always fire as the intervention. Harness bookkeeping is excluded from the fact set, because
+every tool result also writes a `tool.execution` observation at evidence tier and would otherwise
+look like progress on every step. Lock-in that produces no hard error is caught by a new
+"repeated without result" signal: `tool.call` now carries a bounded `args_family`
+(`bash:for`, `bash:curl`, ...) alongside an exact argument fingerprint, attempts that gained no
+fact are counted per family, and families with three or more attempts are listed in the brief.
+Verified on live TSec runs (`a-05`, `--wall-time` 150-300): rounds fired, `round-N.md` was written
+and delivered as `solver.round`, the brief listed established facts, the open frontier and
+`bash:cat × 3` style repetition, and `tool.execution` noise was absent. Regression coverage in
+`tests/test_cognition.py` (ruled-out linkage, refuted hypotheses, brief contents and bounds) and
+`tests/test_solver_loop.py` (graph-change round, stall round, no duplicate round) plus
+`tests/test_pi_adapter.py` (command-family derivation). Validation on 2026-10-14: full suite
+passed (509 passed, 3 skipped); Ruff clean. Open: rounds currently fire mostly as `stall` because
+the Agent writes few semantic facts; ruled-out-by-evidence stays empty without hard failures.
+
+Follow-ups from the first live rounds: (1) `graph_changed` now also fires on Agent-authored
+claims, not only evidence/verified facts, because Agent records are new knowledge the run gained
+even while the verdict stays open; the brief lists them in a separate "Leads (agent-claimed,
+unverified)" section. (2) A finalize steer injected into a busy turn could be missed entirely -
+one live run was killed at the grace deadline with no report - so when a settled Agent has still
+not written `agent.summary.md`, `SolverLoop` re-asks once with a fresh `prompt`
+(`solver.finalize`, `reason=summary_missing`) rather than relying on the in-turn steer. Verified
+on a live `a-05` run: `solver.finalize` fired at the soft deadline and the Agent produced the
+report within the grace window (`agent_report.present = true`, 14 summary facts). Regression
+coverage in `tests/test_solver_loop.py` (re-ask fires once on settle when the report is missing,
+and never when it exists) and `tests/test_cognition.py` (leads section, bookkeeping excluded).
+Validation on 2026-10-14: full suite passed (512 passed, 3 skipped); Ruff clean.
+
+The fact surface was the last blocker for `graph_changed` rounds: the graph only grew when the
+Agent chose to call `world.observe`, which it rarely did. Harness now derives facts from tool
+output itself (`harness/extract.py`): nmap `open` lines become `network.service` observations and
+gobuster/dirb/ffuf result lines become `web.endpoint` observations. The adapter keeps a bounded,
+sanitized `output_excerpt` plus `exit_code` on `tool.result`; `TypedACI` parses it and upserts
+Harness-observed evidence observations with content-addressed ids, so repeated identical output
+does not duplicate. Extraction is deliberately conservative: only distinctive regular formats
+match, everything is capped at 25 facts per result, and no raw output is added to World. Verified
+end-to-end in-process (raw Pi `tool_execution_end` -> normalization -> extraction -> observations)
+and on a live run, where 30/30 tool results carried excerpts; that particular run used only
+`curl | head`/`cat`, so it correctly produced no facts. Regression coverage in `tests/test_aci.py`
+(service/endpoint extraction, evidence provenance, idempotent repeats) and
+`tests/test_pi_adapter.py` (excerpt/exit-code normalization feeding extraction). Validation on
+2026-10-14: full suite passed (514 passed, 3 skipped); Ruff clean. Open: only the three bundled
+recon formats are parsed, so a run that never invokes nmap/gobuster/ffuf still leans on stall
+rounds.
 
 **Non-goals:** required task DAG or harness-authored chain-of-thought.

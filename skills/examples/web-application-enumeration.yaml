@@ -7,7 +7,7 @@ tags: [enumeration, web, discovery]
 requires:
   - kind: capability
     type: network.reachability
-    minimum_trust: verified
+    minimum_trust: evidence
 
 produces:
   - kind: entity

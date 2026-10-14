@@ -4,8 +4,20 @@ import pytest
 
 from harness.agent import AgentError, DockerAdapter
 from harness.models import AgentSpec, TaskSpec
+from harness.pi_container import ContainerPiAdapter
 from harness.trace import TraceRecorder
 from harness.verifier import build_docker_verifier_command
+
+SHARED_TASK_ENV = (
+    "HARNESS_TASK_DIR=/task",
+    "HARNESS_RUN_DIR=/run/harness",
+    "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
+    "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
+    "HARNESS_WORLD_CONTEXT=/run/harness/world.context.txt",
+    "HARNESS_SUBMISSION_INBOX=/run/harness/submission.inbox.jsonl",
+    "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
+    "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
+)
 
 
 def test_docker_agent_runtime_flag(monkeypatch, tmp_path: Path) -> None:
@@ -219,3 +231,109 @@ def test_network_projection_reports_strict_profiles() -> None:
     assert network_result(target)["enforcement"] == "docker-internal-network"
     assert network_result(model)["enforcement"] == "docker-internal-network-gateway-proxy"
     assert network_result(offline)["enforcement"] == "docker-none"
+
+
+def _task() -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "apiVersion": "harness/v1",
+            "id": "task",
+            "name": "Task",
+            "objective": {"description": "test"},
+        }
+    )
+
+
+def _docker_container_command(monkeypatch, tmp_path: Path) -> list[str]:
+    monkeypatch.setattr("harness.agent.shutil.which", lambda _: "/usr/bin/docker")
+    adapter = DockerAdapter(
+        AgentSpec.model_validate(
+            {
+                "apiVersion": "harness/v1",
+                "id": "container-agent",
+                "type": "docker",
+                "image": "agent:test",
+            }
+        ),
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run", "task"),
+    )
+    task_dir = Path("benchmarks/examples/hello").resolve()
+    run_dir = tmp_path / "run-docker"
+    run_dir.mkdir()
+    return adapter._create_command(
+        _task(),
+        task_dir=task_dir,
+        run_dir=run_dir,
+        container_name="container-agent",
+        network="none",
+        environment_project=None,
+        seed=1,
+        gateway_url=None,
+        gateway_token=None,
+        host_gateway=False,
+    )
+
+
+def _pi_container_command(monkeypatch, tmp_path: Path) -> list[str]:
+    monkeypatch.setenv("FAKE_PROVIDER_KEY", "secret")
+    monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
+    adapter = ContainerPiAdapter(
+        AgentSpec.model_validate(
+            {
+                "apiVersion": "harness/v1",
+                "id": "pi-agent",
+                "type": "pi",
+                "image": "harness-pi-kali:test",
+                "pi": {"provider": "fake", "model": "m", "mode": "json"},
+            }
+        ),
+        allow_host=False,
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run", "task"),
+    )
+    task_dir = Path("benchmarks/examples/hello").resolve()
+    run_dir = tmp_path / "run-pi"
+    run_dir.mkdir()
+    return adapter._container_command(
+        _task(),
+        task_dir=task_dir,
+        run_dir=run_dir,
+        container_name="pi-agent",
+        network="none",
+        environment_project=None,
+        seed=1,
+        gateway_url=None,
+        gateway_token=None,
+        host_gateway=False,
+    )
+
+
+@pytest.mark.parametrize("builder", [_docker_container_command, _pi_container_command])
+def test_container_agents_share_hardening_flags(monkeypatch, tmp_path: Path, builder) -> None:
+    command = builder(monkeypatch, tmp_path)
+
+    assert "--privileged" not in command
+    assert "--read-only" in command
+    assert command[command.index("--cap-drop") + 1] == "ALL"
+    assert "no-new-privileges" in command
+    assert command[command.index("--network") + 1] == "none"
+    assert command[command.index("--user") + 1] == (
+        f"{(tmp_path / ('run-docker' if builder is _docker_container_command else 'run-pi')).stat().st_uid}:"
+        f"{(tmp_path / ('run-docker' if builder is _docker_container_command else 'run-pi')).stat().st_gid}"
+    )
+    for entry in SHARED_TASK_ENV:
+        assert entry in command, entry
+    assert "/tmp:rw,nosuid,nodev" in " ".join(command)
+
+
+def test_container_agents_keep_their_own_resource_limits(monkeypatch, tmp_path: Path) -> None:
+    docker_command = _docker_container_command(monkeypatch, tmp_path)
+    pi_command = _pi_container_command(monkeypatch, tmp_path)
+
+    assert docker_command[docker_command.index("--pids-limit") + 1] == "256"
+    assert docker_command[docker_command.index("--memory") + 1] == "2g"
+    assert docker_command[docker_command.index("--cpus") + 1] == "2"
+
+    assert pi_command[pi_command.index("--pids-limit") + 1] == "512"
+    assert pi_command[pi_command.index("--memory") + 1] == "4g"
+    assert pi_command[pi_command.index("--cpus") + 1] == "4"
+    assert "/var/tmp:rw,nosuid,nodev,size=256m" in pi_command

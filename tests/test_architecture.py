@@ -43,6 +43,8 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.benchmark.protocol",
         "harness.benchmark.runner",
         "harness.budget",
+        "harness.cognition",
+        "harness.extract",
         "harness.models",
         "harness.network_policy",
         "harness.pi_adapter",
@@ -50,7 +52,6 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.planner",
         "harness.progress",
         "harness.runtime",
-        "harness.runtime.agent_workspace",
         "harness.runtime.bootstrap",
         "harness.runtime.checkpoint",
         "harness.runtime.evidence",
@@ -75,7 +76,6 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.world.repository",
         "harness.world.retrieval",
         "harness.world.sqlite",
-        "harness.world.store",
     }
 )
 # Subsystems deliberately removed as open-loop complexity. They must not reappear

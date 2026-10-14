@@ -4,13 +4,13 @@ import json
 
 import pytest
 
-from harness.world import WorldStore
+from harness.world import SQLiteWorldRepository
 from harness.world.live import WorldInboxCursor
 from harness.world.protocol import WorldSubmission, write_submission
 
 
 def test_world_inbox_cursor_ingests_only_new_lines(tmp_path) -> None:
-    store = WorldStore(tmp_path / "world.events.jsonl")
+    store = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     inbox = tmp_path / "world.inbox.jsonl"
     cursor = WorldInboxCursor(inbox, store, actor="agent:test")
 
@@ -55,7 +55,7 @@ def test_world_inbox_cursor_ingests_only_new_lines(tmp_path) -> None:
 
 
 def test_world_inbox_cursor_handles_partial_and_invalid_lines(tmp_path) -> None:
-    store = WorldStore(tmp_path / "world.events.jsonl")
+    store = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     inbox = tmp_path / "world.inbox.jsonl"
     cursor = WorldInboxCursor(inbox, store, actor="agent:test")
 
@@ -90,7 +90,7 @@ def test_world_inbox_cursor_handles_partial_and_invalid_lines(tmp_path) -> None:
 
 
 def test_world_inbox_rejects_symlinked_agent_input(tmp_path) -> None:
-    store = WorldStore(tmp_path / "world.events.jsonl")
+    store = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     outside = tmp_path / "protected.jsonl"
     outside.write_text("{}\n", encoding="utf-8")
     inbox = tmp_path / "world.inbox.jsonl"

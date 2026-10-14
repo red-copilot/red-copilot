@@ -514,6 +514,57 @@ class TimedOutFakeAgentAdapter(FakeAgentAdapter):
         return self.session
 
 
+class BudgetExceededFakeSession(FakeSession):
+    async def events(self):
+        if False:
+            yield AgentEvent(type="unused", data={})
+
+    async def result(self):
+        return AgentResult(
+            returncode=137,
+            timed_out=False,
+            budget_exceeded="wall_time",
+            stdout="",
+            stderr="",
+            metrics=UsageMetrics(),
+        )
+
+
+class BudgetExceededFakeAgentAdapter(FakeAgentAdapter):
+    async def start_session(self, *, run_dir: Path, **_kwargs):
+        self.session = BudgetExceededFakeSession(run_dir)
+        return self.session
+
+
+class UnsuccessfulBenchmarkAdapter(FakeBenchmarkAdapter):
+    """Evaluator that never confirms the objective, so agent limits decide status."""
+
+    async def evaluate(self, _session):
+        return EvaluationResult(success=False, score=0)
+
+
+class SolverDetectedBudgetSession(FakeSession):
+    async def events(self):
+        # The Agent reports usage far above any declared token ceiling.
+        yield AgentEvent(type="model.usage", data={"total_tokens": 1_000_000, "cost_usd": 0.0})
+
+    async def result(self):
+        return AgentResult(
+            returncode=0,
+            timed_out=False,
+            budget_exceeded=None,
+            stdout="",
+            stderr="",
+            metrics=UsageMetrics(),
+        )
+
+
+class SolverDetectedBudgetAgentAdapter(FakeAgentAdapter):
+    async def start_session(self, *, run_dir: Path, **_kwargs):
+        self.session = SolverDetectedBudgetSession(run_dir)
+        return self.session
+
+
 class WaitingFakeSession(FakeSession):
     def __init__(self, run_dir: Path, started: asyncio.Event) -> None:
         super().__init__(run_dir)
@@ -534,6 +585,63 @@ class WaitingFakeAgentAdapter(FakeAgentAdapter):
     async def start_session(self, *, run_dir: Path, **_kwargs):
         self.session = WaitingFakeSession(run_dir, self.started)
         return self.session
+
+
+def _run_case_with_agent(monkeypatch, tmp_path: Path, agent_adapter, budgets, *, adapter=None):
+    import harness.benchmark.runner as runner_module
+
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: agent_adapter,
+    )
+    agent = AgentSpec.model_validate(
+        {
+            "apiVersion": "harness/v1",
+            "id": "demo",
+            "type": "cli",
+            "command": ["true"],
+        }
+    )
+    return asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=adapter if adapter is not None else FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-BUDGET", benchmark="fake"),
+            agent=agent,
+            budgets=budgets,
+            seed=1,
+            submission_extractor=lambda _result: [],
+            allow_host_agent=True,
+        )
+    )
+
+
+def test_benchmark_runner_reports_agent_budget_exhaustion(monkeypatch, tmp_path: Path) -> None:
+    result = _run_case_with_agent(
+        monkeypatch,
+        tmp_path,
+        BudgetExceededFakeAgentAdapter(),
+        BudgetSpec(wall_time=30),
+        adapter=UnsuccessfulBenchmarkAdapter(),
+    )
+    assert result["status"] == "budget_exceeded"
+    assert result["termination_reason"] == "budget-exhausted"
+
+
+def test_benchmark_runner_keeps_running_past_token_and_cost_ceilings(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Token/call/cost ceilings are no longer enforced: only the soft wall-clock
+    # deadline bounds a run, so a token blowout must not end it.
+    result = _run_case_with_agent(
+        monkeypatch,
+        tmp_path,
+        SolverDetectedBudgetAgentAdapter(),
+        BudgetSpec(wall_time=30, max_tokens=100),
+        adapter=UnsuccessfulBenchmarkAdapter(),
+    )
+    assert result["status"] == "finished"
+    assert result["termination_reason"] is None
 
 
 def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path: Path) -> None:

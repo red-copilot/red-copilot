@@ -43,7 +43,7 @@ class PlannedAction(BaseModel):
 
 
 class RollingPlan(BaseModel):
-    planner: str = "rolling-horizon-world-v2"
+    planner: str = "rolling-horizon"
     world_revision: int
     horizon: int = Field(ge=1, le=3)
     current_subgoal: str | None = None
@@ -174,6 +174,8 @@ def _focus_relevance(skill: SkillSpec, focus: FocusSet) -> float:
 class HeuristicSkillPlanner:
     """Reference planner that ranks applicable skills without executing them."""
 
+    name = "heuristic"
+
     def explain(
         self,
         snapshot: WorldSnapshot,
@@ -224,6 +226,10 @@ class HeuristicSkillPlanner:
                 selector for selector in skill.produces if not _selector_matches(snapshot, selector)
             ]
             novelty = len(novel) / len(skill.produces) if skill.produces else 0.0
+            if skill.produces and novelty == 0.0:
+                # Every declared output already holds, so running this skill again
+                # would not teach the solver anything new.
+                continue
             relevance = _goal_relevance(skill, goal_tokens)
             focus_relevance = _focus_relevance(skill, focus)
             failure_penalty = min(
@@ -265,8 +271,15 @@ class HeuristicSkillPlanner:
 class RollingHorizonPlanner:
     """Build a short action horizon over the existing skill candidate ranker."""
 
-    def __init__(self, candidate_planner: HeuristicSkillPlanner | None = None) -> None:
+    def __init__(self, candidate_planner: Planner | None = None) -> None:
         self.candidate_planner = candidate_planner or HeuristicSkillPlanner()
+
+    @property
+    def name(self) -> str:
+        candidate = getattr(self.candidate_planner, "name", None)
+        if not isinstance(candidate, str) or not candidate:
+            candidate = self.candidate_planner.__class__.__name__.lower()
+        return f"rolling-horizon-{candidate}"
 
     @staticmethod
     def _expected_observations(candidate: PlanCandidate) -> list[str]:
@@ -354,6 +367,7 @@ class RollingHorizonPlanner:
             replan_reasons.append("hypothesis_contradicted")
 
         return RollingPlan(
+            planner=self.name,
             world_revision=snapshot.revision,
             horizon=horizon,
             current_subgoal=progress.current_subgoal,

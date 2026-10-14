@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -9,10 +10,101 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .agent import AgentError, AgentResult, _terminate_process
-from .budget import BudgetMonitor
+from .agent import (
+    AGENT_EVENT_FILE,
+    NORMALIZED_EVENT_FILE,
+    AgentError,
+    AgentResult,
+    _terminate_process,
+)
+from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
+
+# Leading commands that say nothing about what the attempt is actually doing.
+_FAMILY_NOISE_HEADS = frozenset(
+    {"cd", "export", "set", "sudo", "env", "rm", "mkdir", "timeout", "sleep"}
+)
+
+
+def _command_family(tool: str, arguments: object) -> str | None:
+    """Coarse identity of a shell command, e.g. ``bash:for`` or ``bash:curl``.
+
+    Repeated near-identical attempts (the same loop with a different wordlist or
+    path) share a family even when their exact arguments differ, which is the
+    signal that a line of attack is being ground down.
+    """
+    if not isinstance(arguments, dict):
+        return None
+    command = arguments.get("command") or arguments.get("cmd")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    lines = [
+        line
+        for line in command.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    tokens = [
+        token
+        for line in lines
+        for segment in re.split(r"[;&|]+", line)
+        for token in segment.split()
+    ]
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("#"):
+            index += 1  # inline comment
+            continue
+        if "=" in token and not token.startswith(("/", "-", ".")):
+            index += 1  # leading VAR=value assignment
+            continue
+        head = token.strip("'\"").rsplit("/", 1)[-1]
+        if head in _FAMILY_NOISE_HEADS:
+            index += 2  # drop the command and its argument
+            continue
+        return f"{tool}:{head[:16]}"
+    return None
+
+
+def _tool_output_excerpt(event: object, *, limit: int = 8 * 1024) -> str | None:
+    """Bounded, sanitized excerpt of a tool result for fact extraction.
+
+    Only what an extractor needs is kept: the excerpt is truncated and scrubbed
+    by the shared observability sanitizer before it reaches any artifact.
+    """
+    if not isinstance(event, dict):
+        return None
+    result = event.get("result")
+    if not isinstance(result, dict):
+        return None
+    structured = result.get("structuredContent")
+    text = structured.get("output") if isinstance(structured, dict) else None
+    if not isinstance(text, str):
+        content = result.get("content")
+        if isinstance(content, list):
+            text = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            )
+    if not isinstance(text, str) or not text:
+        return None
+    excerpt = text[:limit]
+    from .trace import sanitize_observability_data
+
+    return sanitize_observability_data({"output": excerpt}).get("output")
+
+
+def _tool_exit_code(event: object) -> int | None:
+    if not isinstance(event, dict):
+        return None
+    structured = (event.get("result") or {}).get("structuredContent")
+    if isinstance(structured, dict):
+        code = structured.get("exit_code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code
+    return None
 
 
 class PiAdapter:
@@ -81,12 +173,26 @@ class PiAdapter:
             tool_call_id = str(event.get("toolCallId") or "")
             if tool_call_id:
                 self._tool_started[tool_call_id] = time.monotonic()
+            arguments = event.get("args")
+            fingerprint = (
+                hashlib.sha256(
+                    json.dumps(arguments, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()[:16]
+                if arguments
+                else None
+            )
             return [
                 (
                     "tool.call",
                     {
                         "tool": event.get("toolName", "unknown"),
                         "tool_call_id": event.get("toolCallId"),
+                        # Bounded identity of the arguments, so repeated identical
+                        # attempts are visible without storing agent text.
+                        "args_fingerprint": fingerprint,
+                        "args_family": _command_family(
+                            str(event.get("toolName", "unknown")), arguments
+                        ),
                         "source": "pi",
                     },
                 )
@@ -109,6 +215,10 @@ class PiAdapter:
                             else None
                         ),
                         "failure_class": "tool_error" if is_error else None,
+                        "exit_code": _tool_exit_code(event),
+                        # Bounded and sanitized; the fact extractor derives
+                        # semantic observations from it without keeping raw output.
+                        "output_excerpt": _tool_output_excerpt(event),
                     },
                 )
             ]
@@ -331,6 +441,10 @@ class PiAdapter:
             "evidence to revise the current hypothesis or path; do not resubmit the same value. "
             "When feedback requests replanning, reread $HARNESS_WORLD_CONTEXT and "
             "$HARNESS_PROGRESS_FILE, then continue from updated state. "
+            "There is no token or call budget and no hard stop; the wall-clock limit is a soft "
+            "deadline. When Harness sends solver.finalize, stop probing and write your report to "
+            "$HARNESS_SUMMARY_FILE: confirmed facts with their evidence, unconfirmed hypotheses, "
+            "what you tried and ruled out, and unfinished intents. "
             "Treat Internet access as optional and non-essential; solve from benchmark targets "
             "and local tools first."
         )
@@ -415,9 +529,12 @@ class PiAdapter:
                 "-e",
                 "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
                 "-e",
+                "HARNESS_SUMMARY_FILE=/run/harness/agent.summary.md",
+                "-e",
                 "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
                 "-e",
-                "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
+                "HARNESS_EVENT_FILE=/run/harness/"
+                + (AGENT_EVENT_FILE if self.pi.mode == "rpc" else NORMALIZED_EVENT_FILE),
                 "-e",
                 f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
                 "-e",
@@ -584,7 +701,10 @@ class PiAdapter:
                             ["docker", "kill", container_name], capture_output=True, check=False
                         )
                         break
-                    if time.monotonic() - started > task.budgets.wall_time:
+                    if (
+                        time.monotonic() - started
+                        > task.budgets.wall_time + FINALIZE_GRACE_SECONDS
+                    ):
                         timed_out = True
                         self.trace.emit("budget.exceeded", data={"budget": "wall_time"})
                         _terminate_process(proc)

@@ -88,3 +88,58 @@ def test_untrusted_world_inbox_cannot_upgrade_a_claim_to_verified(tmp_path) -> N
 
     assert report.accepted == 1
     assert world.snapshot.observations["obs-1"].provenance.epistemic_status == "claim"
+
+
+def test_tool_output_is_extracted_into_evidence_observations(tmp_path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger()
+    output = (
+        "Starting Nmap\n"
+        "80/tcp   open  http    Apache httpd 2.4.41\n"
+        "443/tcp  open  ssl/https\n"
+        "\n"
+        "http://10.0.0.5/admin  (Status: 200) [Size: 1234]\n"
+        "\n"
+        "login   [Status: 302, Size: 0, Words: 1, Lines: 1]\n"
+        "static  [Status: 200, Size: 42, Words: 1, Lines: 1]\n"
+    )
+    typed = TypedACI()
+    typed.apply(
+        AgentEvent(
+            type="tool.result",
+            data={
+                "tool": "bash",
+                "tool_call_id": "c1",
+                "output_excerpt": output,
+                "is_error": False,
+            },
+        ),
+        world=world,
+        progress=progress,
+        actor="agent:pi",
+    )
+
+    snapshot = world.snapshot
+    services = {o.id: o for o in snapshot.observations.values() if o.type == "network.service"}
+    endpoints = {o.id: o for o in snapshot.observations.values() if o.type == "web.endpoint"}
+    assert {o.content["port"] for o in services.values()} == {80, 443}
+    assert all(o.provenance.epistemic_status == "evidence" for o in services.values())
+    assert len(endpoints) == 3
+    assert {o.content.get("status") for o in endpoints.values()} == {200, 302}
+
+    # Repeated identical output is content-addressed, so it does not duplicate.
+    typed.apply(
+        AgentEvent(
+            type="tool.result",
+            data={
+                "tool": "bash",
+                "tool_call_id": "c2",
+                "output_excerpt": output,
+                "is_error": False,
+            },
+        ),
+        world=world,
+        progress=progress,
+        actor="agent:pi",
+    )
+    assert len([o for o in world.snapshot.observations.values() if o.type == "web.endpoint"]) == 3

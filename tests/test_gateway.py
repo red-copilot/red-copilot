@@ -131,7 +131,9 @@ def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path
     assert session._metrics.model_calls == 1
     assert session._metrics.total_tokens == 12
     assert session._metrics.cost_usd == 0.0001
-    assert session._budget_exceeded == "max_tokens"
+    # Token ceilings are declared but no longer enforced, so trusted gateway
+    # usage is still charged exactly once without stopping the run.
+    assert session._budget_exceeded is None
     assert checkpoint.gateway_event_offset == trusted_events.stat().st_size
 
 

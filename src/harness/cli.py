@@ -9,13 +9,15 @@ from typing import Annotated
 import typer
 from pydantic import ValidationError
 
-from .benchmark.tsec import TSecRunner, load_tsec_config
+from .benchmark.tsec_adapter import run_tsec_challenges
+from .benchmark.tsec_client import load_tsec_config
 from .gateway_runtime import GatewayConfig
 from .models import BudgetSpec, load_agent, load_task
 from .orchestrator import Orchestrator
 from .preflight import run_preflight
 from .runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from .skills import load_skill
+from .solver_policy import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 
 app = typer.Typer(
     name="harness",
@@ -221,6 +223,7 @@ def tsec(
     challenge: Annotated[str | None, typer.Option("--challenge")] = None,
     run_all: Annotated[bool, typer.Option("--all")] = False,
     runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".harness/tsec-runs"),
+    skills_root: Annotated[Path, typer.Option("--skills-root")] = Path("skills"),
     base_url_env: Annotated[str, typer.Option("--base-url-env")] = "BENCHMARK_BASE_URL",
     token_env: Annotated[str, typer.Option("--benchmark-token-env")] = "BENCHMARK_TOKEN",
     seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
@@ -242,10 +245,27 @@ def tsec(
             help="Allow a trusted CLI agent to execute on the host.",
         ),
     ] = False,
+    solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
+        DEFAULT_SOLVER_PROFILE
+    ),
+    max_unconfirmed_progress: Annotated[
+        int, typer.Option("--max-unconfirmed-progress", min=1)
+    ] = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
+    max_replans: Annotated[int, typer.Option("--max-replans", min=1)] = BENCHMARK_MAX_REPLANS,
 ) -> None:
     """Run TSec Benchmark challenges through the generic benchmark runtime."""
     spec = load_agent(agent)
     config = load_tsec_config(base_url_env=base_url_env, token_env=token_env)
+    if any(
+        value is not None
+        for value in (max_tokens, max_model_calls, max_tool_calls, max_cost_usd)
+    ):
+        typer.echo(
+            "warning: token, model-call, tool-call and cost budgets are no longer "
+            "enforced; only --wall-time bounds a run, and it is a soft deadline "
+            "followed by a finalize grace window",
+            err=True,
+        )
     budgets = BudgetSpec(
         wall_time=wall_time,
         max_tokens=max_tokens,
@@ -254,10 +274,12 @@ def tsec(
         max_cost_usd=max_cost_usd,
     )
     results = asyncio.run(
-        TSecRunner(runs_root=runs_root).run(
+        run_tsec_challenges(
             config=config,
             agent=spec,
             budgets=budgets,
+            runs_root=runs_root,
+            skills_root=skills_root,
             challenge_code=challenge,
             run_all=run_all,
             seed=seed,
@@ -265,6 +287,9 @@ def tsec(
             start_retries=start_retries,
             retry_delay=retry_delay,
             allow_host_agent=allow_host_agent,
+            solver_profile=solver_profile,
+            max_unconfirmed_progress=max_unconfirmed_progress,
+            max_replans=max_replans,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))

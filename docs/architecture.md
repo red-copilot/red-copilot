@@ -3,14 +3,17 @@
 Harness is one deployable Python application, not a collection of microservices.
 Modules are separated by responsibilities and explicit composition points.
 The single closed feedback loop that these modules form is described in
-[control-theory.md](control-theory.md).
+[control-theory.md](control-theory.md); the Agent-facing cognition layer is
+described in [agent-engineering.md](agent-engineering.md).
 
 - `runtime/`: application-level composition, solver initialization, run state.
 - `world/`: domain state, event storage, snapshots, retrieval. No benchmark or HTTP dependencies.
 - `benchmark/`: externally provisioned challenge lifecycle, submissions and adapters.
 - `agent.py`, `session.py`, `pi_*.py`: agent/session integration and infrastructure.
 - `tool_adapter.py`: domain-neutral async tool plugin contract; concrete tools are explicitly selected by application composition and remain subject to Gateway authorization.
-- `solver_loop.py`, `planner.py`, `action_verifier.py`: solver policies.
+- `solver_loop.py`, `planner.py`, `cognition.py`, `action_verifier.py`: solver
+  policies. `cognition.py` derives the goal-driven intent-fact frontier that the
+  default planner ranks.
 - `orchestrator.py`: local-run lifecycle and environment integration.
 
 The first extraction is `runtime.bootstrap_solver`. Both local runs and

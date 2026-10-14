@@ -8,7 +8,10 @@ env: {}
 pi:
   provider: opencode-go
   model: longcat-2.5-preview-free
-  mode: json
+  # RPC keeps the control loop closed: Harness delivers the objective via
+  # `prompt` and injects verification/plan/world feedback via `steer`. The
+  # one-shot `json` mode only wrote feedback to a file the Agent never read.
+  mode: rpc
   thinking: medium
   tools:
     - read

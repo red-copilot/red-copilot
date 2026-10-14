@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,26 @@ from .trace import TraceRecorder
 MAX_AGENT_TELEMETRY_BYTES = 64 * 1024 * 1024
 MAX_AGENT_TELEMETRY_CHUNK_BYTES = 1024 * 1024
 MAX_AGENT_TELEMETRY_EVENT_BYTES = 4 * 1024 * 1024
+# After the soft wall-clock deadline the Harness stops enforcing limits and
+# steers the Agent to summarise what it found and what it was trying to do. The
+# container is only killed if the Agent never settles within this grace window.
+FINALIZE_GRACE_SECONDS = 180
+
+
+def enforced_budget_limits(spec: BudgetSpec) -> tuple[dict[str, float], list[str]]:
+    """Return the limits the Harness still enforces, plus ignored declarations.
+
+    Only the (soft) wall-clock deadline bounds a run. Token, model-call,
+    tool-call and cost ceilings are still parsed for backwards compatibility but
+    no longer stop a run; callers surface them so an ignored limit is visible
+    rather than silently dropped.
+    """
+    ignored = [
+        name
+        for name in ("max_tokens", "max_model_calls", "max_tool_calls", "max_cost_usd")
+        if getattr(spec, name) is not None
+    ]
+    return {"wall_time": float(spec.wall_time)}, ignored
 
 
 @dataclass
@@ -27,6 +48,65 @@ class UsageMetrics:
 
     def as_dict(self) -> dict[str, int | float]:
         return asdict(self)
+
+
+def _usage_integer(data: Mapping[str, Any], key: str, default: int = 0) -> int | None:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _usage_cost(data: Mapping[str, Any]) -> float | None:
+    value = data.get("cost_usd", 0.0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    amount = float(value)
+    return amount if math.isfinite(amount) and amount >= 0 else None
+
+
+def charge_usage_event(
+    metrics: UsageMetrics,
+    event_type: str,
+    data: Mapping[str, Any],
+) -> bool:
+    """Validate one untrusted usage event and charge ``metrics``.
+
+    Returns ``False`` for malformed, negative or inconsistent telemetry so every
+    accounting path fails closed the same way.
+    """
+
+    if event_type == "model.usage_missing":
+        return False
+    if event_type == "model.request":
+        count = _usage_integer(data, "count", 1)
+        if count is None:
+            return False
+        metrics.model_calls += count
+    elif event_type == "model.usage":
+        input_tokens = _usage_integer(data, "input_tokens")
+        output_tokens = _usage_integer(data, "output_tokens")
+        total_tokens = _usage_integer(
+            data, "total_tokens", (input_tokens or 0) + (output_tokens or 0)
+        )
+        model_calls = _usage_integer(data, "model_calls")
+        cost = _usage_cost(data)
+        if (
+            None in (input_tokens, output_tokens, total_tokens, model_calls, cost)
+            or total_tokens < input_tokens + output_tokens
+        ):
+            return False
+        metrics.input_tokens += input_tokens
+        metrics.output_tokens += output_tokens
+        metrics.total_tokens += total_tokens
+        metrics.model_calls += model_calls
+        metrics.cost_usd += cost
+    elif event_type in {"tool.call", "tool.denied"}:
+        count = _usage_integer(data, "count", 1)
+        if count is None:
+            return False
+        metrics.tool_calls += count
+    return True
 
 
 class BudgetMonitor:
@@ -136,72 +216,13 @@ class BudgetMonitor:
                 data={"budget": self.exceeded, "reason": "untrusted usage telemetry was invalid"},
             )
             return
-        self._check()
+        # Token/call/cost limits are no longer enforced: only the wall-clock
+        # deadline bounds a run, and it is soft (see FINALIZE_GRACE_SECONDS).
+        # Telemetry is still validated above so untrusted usage fails closed.
 
     @staticmethod
     def _reject_json_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON constant: {value}")
 
-    @staticmethod
-    def _integer(data: dict[str, Any], key: str, default: int = 0) -> int | None:
-        value = data.get(key, default)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return None
-        return value
-
-    @staticmethod
-    def _cost(data: dict[str, Any]) -> float | None:
-        value = data.get("cost_usd", 0.0)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        numeric = float(value)
-        return numeric if math.isfinite(numeric) and numeric >= 0 else None
-
     def _account(self, event_type: str, data: dict[str, Any]) -> bool:
-        if event_type == "model.usage_missing":
-            return False
-        if event_type == "model.request":
-            count = self._integer(data, "count", 1)
-            if count is None:
-                return False
-            self.metrics.model_calls += count
-        elif event_type == "model.usage":
-            input_tokens = self._integer(data, "input_tokens")
-            output_tokens = self._integer(data, "output_tokens")
-            total_tokens = self._integer(
-                data, "total_tokens", (input_tokens or 0) + (output_tokens or 0)
-            )
-            model_calls = self._integer(data, "model_calls")
-            cost = self._cost(data)
-            if (
-                None in (input_tokens, output_tokens, total_tokens, model_calls, cost)
-                or total_tokens < input_tokens + output_tokens
-            ):
-                return False
-            self.metrics.input_tokens += input_tokens
-            self.metrics.output_tokens += output_tokens
-            self.metrics.total_tokens += total_tokens
-            self.metrics.model_calls += model_calls
-            self.metrics.cost_usd += cost
-        elif event_type in {"tool.call", "tool.denied"}:
-            count = self._integer(data, "count", 1)
-            if count is None:
-                return False
-            self.metrics.tool_calls += count
-        return True
-
-    def _check(self) -> None:
-        checks = (
-            ("max_tokens", self.budgets.max_tokens, self.metrics.total_tokens),
-            ("max_model_calls", self.budgets.max_model_calls, self.metrics.model_calls),
-            ("max_tool_calls", self.budgets.max_tool_calls, self.metrics.tool_calls),
-            ("max_cost_usd", self.budgets.max_cost_usd, self.metrics.cost_usd),
-        )
-        for name, limit, value in checks:
-            if limit is not None and value > limit:
-                self.exceeded = name
-                self.trace.emit(
-                    "budget.exceeded",
-                    data={"budget": name, "limit": limit, "value": value},
-                )
-                return
+        return charge_usage_event(self.metrics, event_type, data)

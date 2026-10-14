@@ -19,16 +19,16 @@ from .models import (
     Observation,
     Provenance,
     Relation,
+    StateSelector,
     WorldEvent,
     WorldRecord,
     WorldSnapshot,
 )
-from .protocol import IngestReport, WorldSubmission, ingest_world_inbox, write_submission
+from .protocol import IngestReport, WorldSubmission, write_submission
 from .reducer import WorldReducer
 from .repository import WorldConflictError, WorldRepository
 from .retrieval import WorldRetriever
 from .sqlite import SQLiteWorldRepository
-from .store import FileWorldRepository, WorldStore
 
 __all__ = [
     "DEFAULT_FOCUS_CLAIM_THRESHOLD",
@@ -38,7 +38,6 @@ __all__ = [
     "Constraint",
     "Entity",
     "Failure",
-    "FileWorldRepository",
     "FocusBuilder",
     "FocusItem",
     "FocusRequest",
@@ -50,6 +49,7 @@ __all__ = [
     "Provenance",
     "Relation",
     "SQLiteWorldRepository",
+    "StateSelector",
     "WorldConflictError",
     "WorldContextBuilder",
     "WorldEvent",
@@ -59,8 +59,6 @@ __all__ = [
     "WorldRepository",
     "WorldRetriever",
     "WorldSnapshot",
-    "WorldStore",
     "WorldSubmission",
-    "ingest_world_inbox",
     "write_submission",
 ]

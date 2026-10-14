@@ -13,7 +13,6 @@ from harness.models import AgentSpec, load_task
 from harness.pi_container import (
     ContainerPiAdapter,
     ContainerPiRpcSession,
-    _container_name,
 )
 from harness.session import AgentEvent, AgentObservation
 from harness.trace import TraceRecorder
@@ -38,10 +37,10 @@ def _pi_spec(mode: str = "rpc") -> AgentSpec:
     )
 
 
-def _adapter(monkeypatch, tmp_path: Path) -> ContainerPiAdapter:
+def _adapter(monkeypatch, tmp_path: Path, mode: str = "rpc") -> ContainerPiAdapter:
     monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
     return ContainerPiAdapter(
-        _pi_spec(),
+        _pi_spec(mode),
         allow_host=False,
         trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
     )
@@ -97,7 +96,7 @@ def test_pi_rpc_session_rejects_unsafe_or_unexpected_startup_session_id() -> Non
         session.run_kwargs = {"resume_session_id": requested_id}
         session._startup_records = []
         session._pi_session_id = None
-        await session._wait_for_session_identity()
+        await session._wait_for_session_identity(timeout=1.0, required=True)
 
     with pytest.raises(AgentError, match="invalid session ID"):
         asyncio.run(verify("../unsafe"))
@@ -206,7 +205,10 @@ def test_pi_container_command_is_restricted_and_passes_direct_secret(
     assert command[command.index("--cpus") + 1] == "4"
     assert "/tmp:rw,nosuid,nodev,size=512m" in command
     assert "FAKE_PROVIDER_KEY=secret" in command
-    assert "HARNESS_EVENT_FILE=/run/harness/events.jsonl" in command
+    # RPC sessions read Pi's stdout, so the Agent gets its own typed-event file
+    # instead of sharing the harness-normalized ``events.jsonl``.
+    assert "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl" in command
+    assert "HARNESS_EVENT_FILE=/run/harness/events.jsonl" not in command
     assert f"{workspace.resolve()}:/run/harness:rw" in command
     assert f"{run_dir.resolve()}:/run/harness:rw" not in command
     task_mount = next(value for value in command if value.endswith(":/task:ro"))
@@ -214,6 +216,113 @@ def test_pi_container_command_is_restricted_and_passes_direct_secret(
     assert not (run_dir / "agent-task-input" / "verifier.py").exists()
     assert "HARNESS_NETWORK_PROFILE=unrestricted" in command
     assert "harness-pi-kali:test" in command
+
+
+def test_json_mode_container_command_keeps_the_shared_event_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    adapter = _adapter(monkeypatch, tmp_path, mode="json")
+    monkeypatch.setenv("FAKE_PROVIDER_KEY", "secret")
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+    run_dir = tmp_path / "run-json"
+    run_dir.mkdir()
+    workspace = run_dir / "agent-workspace"
+    workspace.mkdir()
+
+    command = adapter._container_command(
+        task,
+        task_dir=Path("benchmarks/examples/hello").resolve(),
+        run_dir=workspace,
+        container_name="pi-json-test",
+        network="bridge",
+        environment_project=None,
+        seed=1,
+        gateway_url=None,
+        gateway_token=None,
+        host_gateway=False,
+    )
+    assert "HARNESS_EVENT_FILE=/run/harness/events.jsonl" in command
+    assert "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl" not in command
+
+
+def _rpc_session_for_ingest(tmp_path: Path) -> ContainerPiRpcSession:
+    session = object.__new__(ContainerPiRpcSession)
+    session.run_dir = tmp_path
+    session.agent_event_path = tmp_path / "agent.events.jsonl"
+    session.event_path = tmp_path / "events.jsonl"
+    session._agent_event_offset = 0
+    session._agent_event_remainder = ""
+    session._agent_event_line = 0
+    session._event_offset = 0
+    session.adapter = SimpleNamespace(
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run", "task")
+    )
+    return session
+
+
+def test_rpc_session_ingests_agent_typed_events(tmp_path: Path) -> None:
+    session = _rpc_session_for_ingest(tmp_path)
+    path = session.agent_event_path
+    path.write_text(
+        json.dumps({"type": "action.intent", "data": {"skill_id": "recon.active"}}) + "\n"
+        + '{"type": "world.observe", "dat',
+        encoding="utf-8",
+    )
+
+    # A trailing partial line is buffered rather than parsed.
+    first = session._consume_agent_events()
+    assert [event.type for event in first] == ["action.intent"]
+    assert first[0].event_id == "agent-event-line:1"
+    assert first[0].data == {"skill_id": "recon.active"}
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('a": {"type": "web.endpoint"}}\n')
+    second = session._consume_agent_events()
+    assert [event.type for event in second] == ["world.observe"]
+    assert second[0].event_id == "agent-event-line:2"
+    assert second[0].data == {"type": "web.endpoint"}
+
+    # Malformed lines fail closed into telemetry errors instead of crashing.
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("not json\n")
+    third = session._consume_agent_events()
+    assert [event.type for event in third] == ["agent.telemetry_error"]
+
+    # Everything ingested is mirrored into the normalized artifact stream.
+    persisted = [
+        json.loads(line) for line in session.event_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["type"] for item in persisted] == [
+        "action.intent",
+        "world.observe",
+        "agent.telemetry_error",
+    ]
+    assert session._consume_agent_events() == []
+
+
+def test_rpc_session_agent_event_cursor_recovers_from_truncation(tmp_path: Path) -> None:
+    session = _rpc_session_for_ingest(tmp_path)
+    path = session.agent_event_path
+    path.write_text(
+        json.dumps({"type": "action.intent", "data": {"note": "x" * 200}}) + "\n",
+        encoding="utf-8",
+    )
+    assert [event.type for event in session._consume_agent_events()] == ["action.intent"]
+
+    # The Agent replaced its file with a shorter one: restart from the top and
+    # record the reset rather than reading from a stale offset.
+    path.write_text(json.dumps({"type": "world.observe", "data": {}}) + "\n", encoding="utf-8")
+    assert [event.type for event in session._consume_agent_events()] == ["world.observe"]
+
+
+def test_rpc_session_rejects_oversized_agent_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("harness.pi_container.MAX_AGENT_EVENT_LINE_BYTES", 64)
+    session = _rpc_session_for_ingest(tmp_path)
+    session.agent_event_path.write_text("x" * 200 + "\n", encoding="utf-8")
+    events = session._consume_agent_events()
+    assert [event.type for event in events] == ["agent.telemetry_error"]
 
 
 def test_strict_pi_profile_clears_docker_proxy_and_rejects_proxy_passthrough(
@@ -713,7 +822,7 @@ def test_pi_rpc_session_sends_prompt_and_steers_before_settled(monkeypatch, tmp_
                     },
                 }
             ],
-            ["pi.session", "model.response", "model.usage"],
+            ["pi.session", "model.response", "model.usage", "pi.agent_settled"],
             "total_tokens",
             4,
         ),
@@ -724,7 +833,7 @@ def test_pi_rpc_session_sends_prompt_and_steers_before_settled(monkeypatch, tmp_
                 {"type": "message_start", "message": {"role": "assistant"}},
                 {"type": "message_start", "message": {"role": "assistant"}},
             ],
-            ["pi.session", "model.request", "model.request"],
+            ["pi.session", "model.request", "model.request", "pi.agent_settled"],
             "model_calls",
             2,
         ),
@@ -735,7 +844,7 @@ def test_pi_rpc_session_sends_prompt_and_steers_before_settled(monkeypatch, tmp_
                 {"type": "tool_execution_start", "toolCallId": "tool-1", "toolName": "bash"},
                 {"type": "tool_execution_start", "toolCallId": "tool-2", "toolName": "bash"},
             ],
-            ["pi.session", "tool.call", "tool.call"],
+            ["pi.session", "tool.call", "tool.call", "pi.agent_settled"],
             "tool_calls",
             2,
         ),
@@ -756,13 +865,13 @@ def test_pi_rpc_session_sends_prompt_and_steers_before_settled(monkeypatch, tmp_
                     },
                 }
             ],
-            ["pi.session", "model.response", "model.usage"],
+            ["pi.session", "model.response", "model.usage", "pi.agent_settled"],
             "cost_usd",
             0.01,
         ),
     ],
 )
-def test_pi_rpc_session_kills_container_when_budget_is_exceeded(
+def test_pi_rpc_session_accounts_usage_without_enforcing_non_time_limits(
     monkeypatch,
     tmp_path: Path,
     budget_name: str,
@@ -853,9 +962,12 @@ def test_pi_rpc_session_kills_container_when_budget_is_exceeded(
     events, result = asyncio.run(scenario())
 
     assert [event.type for event in events] == event_types
-    assert killed
-    assert set(killed) == {_container_name(run_dir)}
-    assert result.budget_exceeded == budget_name
+    # Only the soft wall-clock deadline bounds a run: usage above a declared
+    # token/call/cost ceiling is still charged, but no budget stop is raised.
+    assert result.budget_exceeded is None
+    assert result.timed_out is False
+    trace_text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert '"budget.exceeded"' not in trace_text
     assert getattr(result.metrics, metric_name) == metric_value
 
 
@@ -1039,3 +1151,57 @@ def test_pi_missing_system_prompt_file_fails_closed(monkeypatch, tmp_path: Path)
 
     with pytest.raises(AgentError, match="system prompt file was not found"):
         adapter._prompt_text(task)
+
+
+def test_pi_rpc_normalizes_a_coarse_command_family() -> None:
+    from harness.pi_adapter import _command_family
+
+    assert _command_family("bash", {"command": "for id in ../../etc/passwd; do curl $id; done"}) == (
+        "bash:for"
+    )
+    assert _command_family("bash", {"command": "TARGET=x ffuf -w /w -u http://$TARGET"}) == (
+        "bash:ffuf"
+    )
+    assert _command_family("bash", {"command": "/usr/bin/curl -s http://x"}) == "bash:curl"
+    assert _command_family("bash", {"command": "cd /tmp; for id in a b; do curl $id; done"}) == (
+        "bash:for"
+    )
+    assert _command_family("bash", {"command": "timeout 60 curl -s http://x"}) == "bash:curl"
+    assert _command_family(
+        "bash", {"command": "cd /tmp\n# enumerate endpoints\nffuf -u http://x/FUZZ -w /w"}
+    ) == "bash:ffuf"
+    assert _command_family("read", {}) is None
+
+
+def test_pi_tool_output_feeds_fact_extraction(monkeypatch, tmp_path: Path) -> None:
+    from harness.extract import extract_facts
+
+    adapter = _adapter(monkeypatch, tmp_path)
+    raw = json.dumps(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "c1",
+            "toolName": "bash",
+            "isError": False,
+            "result": {
+                "content": [{"type": "text", "text": "ignored"}],
+                "structuredContent": {
+                    "output": (
+                        "admin  [Status: 200, Size: 5]\n"
+                        "http://10.0.0.5/api  (Status: 403) [Size: 0]\n"
+                        "80/tcp   open  http    Apache httpd\n"
+                    ),
+                    "exit_code": 0,
+                },
+            },
+        }
+    )
+    normalized = adapter._normalize_line(raw, account_model=True)
+    assert [event_type for event_type, _ in normalized] == ["tool.result"]
+    data = normalized[0][1]
+    assert data["exit_code"] == 0
+    assert data["output_excerpt"].startswith("admin")
+
+    facts = extract_facts(data)
+    assert {fact["type"] for fact in facts} == {"web.endpoint", "network.service"}
+    assert len(facts) == 3

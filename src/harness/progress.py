@@ -61,12 +61,18 @@ class ProgressLedger(BaseModel):
     unconfirmed_progress: int = 0
     replan_count: int = 0
     failed_skill_counts: dict[str, int] = Field(default_factory=dict)
+    # tool:fingerprint -> attempts that produced no new semantic fact, so a run
+    # that keeps re-trying the same dead end can be told about it.
+    no_gain_tools: dict[str, int] = Field(default_factory=dict)
     reconciled_actions: dict[str, str] = Field(default_factory=dict)
     # Correlates legacy events that predate tool_call_id, so replay uses the
     # same generated action identity after a checkpoint reload.
     tool_event_correlations: dict[str, str] = Field(default_factory=dict)
     budget_limits: dict[str, float] = Field(default_factory=dict)
     budget_used: dict[str, float] = Field(default_factory=dict)
+    # Extra wall-clock room granted after the soft deadline so a run can stop
+    # exploring and write its final summary instead of being cut off.
+    wall_time_grace_seconds: float = Field(default=0.0, ge=0.0)
     tool_calls: int = 0
     model_calls: int = 0
     accepted_submissions: int = 0
@@ -97,6 +103,12 @@ class ProgressLedger(BaseModel):
                 "status": "running",
                 "skill_id": (self.action_intent or {}).get("skill_id"),
             }
+            fingerprint = event.data.get("args_fingerprint")
+            if isinstance(fingerprint, str) and fingerprint:
+                action["args_fingerprint"] = fingerprint
+            family = event.data.get("args_family")
+            if isinstance(family, str) and family:
+                action["args_family"] = family
             self.last_action = action
             call_id = action["tool_call_id"]
             if isinstance(call_id, str) and call_id:
@@ -115,6 +127,12 @@ class ProgressLedger(BaseModel):
                 "skill_id": active_action.get("skill_id")
                 or (self.action_intent or {}).get("skill_id"),
             }
+            fingerprint = active_action.get("args_fingerprint")
+            if isinstance(fingerprint, str) and fingerprint:
+                action["args_fingerprint"] = fingerprint
+            family = active_action.get("args_family")
+            if isinstance(family, str) and family:
+                action["args_family"] = family
             self.last_action = action
             actual = event.data.get("observation")
             if isinstance(actual, str) and actual:
@@ -300,13 +318,27 @@ class ProgressLedger(BaseModel):
 
     @property
     def remaining_budget_fraction(self) -> float:
-        remaining = [1.0]
+        return min(self.budget_fractions().values(), default=1.0)
+
+    @property
+    def wall_time_expired(self) -> bool:
+        """True once the declared (soft) wall-clock window has elapsed."""
+        limit = self.budget_limits.get("wall_time", 0.0)
+        if limit <= 0:
+            return False
+        elapsed = max(0.0, (datetime.now(UTC) - self.started_at).total_seconds())
+        return elapsed >= limit
+
+    def budget_fractions(self) -> dict[str, float]:
+        """Per-dimension remaining budget fraction (``1.0`` when untouched)."""
+        fractions: dict[str, float] = {}
         for key, limit in self.budget_limits.items():
             if limit <= 0:
                 continue
             if key == "wall_time":
                 elapsed = max(0.0, (datetime.now(UTC) - self.started_at).total_seconds())
-                remaining.append(max(0.0, min(1.0, (limit - elapsed) / limit)))
+                effective = limit + self.wall_time_grace_seconds
+                fractions[key] = max(0.0, min(1.0, (effective - elapsed) / effective))
                 continue
             if key == "max_model_calls":
                 used = float(self.model_calls)
@@ -318,8 +350,8 @@ class ProgressLedger(BaseModel):
                 used = self.budget_used.get("cost_usd", 0.0)
             else:
                 continue
-            remaining.append(max(0.0, min(1.0, (limit - used) / limit)))
-        return min(remaining)
+            fractions[key] = max(0.0, min(1.0, (limit - used) / limit))
+        return fractions
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

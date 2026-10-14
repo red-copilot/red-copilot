@@ -174,6 +174,31 @@ def test_audit_verifies_objective_artifact_hash_and_provenance(tmp_path: Path) -
     } <= {i.code for i in report.issues}
 
 
+def test_audit_rejects_symlinked_objective_evidence(tmp_path: Path) -> None:
+    artifact = _write_verified_v2_run(tmp_path)
+    content = artifact.read_bytes()
+    outside = tmp_path / "outside-evidence.json"
+    outside.write_bytes(content)
+    artifact.unlink()
+    artifact.symlink_to(outside)
+
+    report = audit_run(tmp_path)
+
+    assert report.status == "contradictory"
+    assert "objective_evidence_missing_or_unsafe" in {i.code for i in report.issues}
+    assert outside.read_bytes() == content
+
+
+def test_audit_rejects_oversized_objective_evidence(tmp_path: Path, monkeypatch) -> None:
+    artifact = _write_verified_v2_run(tmp_path)
+    monkeypatch.setattr(audit_module, "MAX_EVIDENCE_BYTES", len(artifact.read_bytes()) - 1)
+
+    report = audit_run(tmp_path)
+
+    assert report.status == "contradictory"
+    assert "objective_evidence_missing_or_unsafe" in {i.code for i in report.issues}
+
+
 def test_newer_revision_objective_verdict_supersedes_earlier_success(tmp_path: Path) -> None:
     _write_verified_v2_run(tmp_path)
     trace = TraceRecorder(tmp_path / "trace.jsonl", "run_verified", "task-1")

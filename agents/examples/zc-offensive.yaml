@@ -1,0 +1,17 @@
+apiVersion: harness/v1
+id: zc-offensive-agent
+type: pi
+image: harness/pi-kali:local
+network: environment
+network_profile: model-allowed
+
+pi:
+  mode: rpc
+  provider: openai
+  model: gpt-5.6-sol
+  thinking: high
+  tools: [read, bash, edit, write]
+  env_passthrough: [OPENAI_API_KEY]
+  system_prompt_file: prompts/zc-solver.md
+  cap_add: [NET_RAW]
+

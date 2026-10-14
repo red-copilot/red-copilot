@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
@@ -14,17 +13,41 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from .agent import AgentError, AgentResult, _terminate_process
-from .agent_workspace import (
-    prepare_agent_task_view,
-    prepare_agent_workspace_for_container,
+from .agent import (
+    AGENT_EVENT_FILE,
+    NORMALIZED_EVENT_FILE,
+    AgentError,
+    AgentResult,
+    ContainerLimits,
+    _terminate_process,
+    build_container_command,
 )
-from .budget import BudgetMonitor, UsageMetrics
-from .models import AgentSpec, TaskSpec, _is_reserved_credential_env
+from .agent_workspace import prepare_agent_task_view
+from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor, UsageMetrics, charge_usage_event
+from .models import AgentSpec, TaskSpec
 from .pi_adapter import PiAdapter
 from .secureio import open_regular_file, read_regular_text
-from .session import AgentCheckpoint, AgentEvent, AgentObservation, OneShotAgentSession
+from .session import (
+    AgentCheckpoint,
+    AgentEvent,
+    AgentObservation,
+    OneShotAgentSession,
+    append_control,
+    append_feedback,
+    control_record,
+    feedback_record,
+)
 from .trace import TraceRecorder
+
+# How long to wait for the ``session`` record Pi emits when resuming.
+RPC_RESUME_HANDSHAKE_TIMEOUT = 15.0
+# Fresh RPC runs get a short best-effort read: Pi 1.0.4 does not announce a
+# session record until it is asked to resume one, and blocking startup on a
+# record that never arrives would deadlock before the objective is sent.
+RPC_FRESH_HANDSHAKE_TIMEOUT = 1.0
+# Bounded ingestion of the Agent's own typed event file.
+MAX_AGENT_EVENT_CHUNK_BYTES = 1024 * 1024
+MAX_AGENT_EVENT_LINE_BYTES = 256 * 1024
 
 
 def _container_name(run_dir: Path) -> str:
@@ -73,6 +96,9 @@ class ContainerPiRpcSession:
             "aci.feedback",
             "benchmark.feedback",
             "world.state.updated",
+            "solver.budget",
+            "solver.finalize",
+            "solver.round",
         }
     )
 
@@ -82,6 +108,10 @@ class ContainerPiRpcSession:
         self.run_dir = Path(run_kwargs["run_dir"])
         self.container_name = _container_name(self.run_dir)
         self.event_path = self.run_dir / "events.jsonl"
+        # Agent-authored typed solver events. RPC sessions read Pi's stdout, so
+        # these reach the solver only through this cursor (see
+        # ``_consume_agent_events``).
+        self.agent_event_path = self.run_dir / AGENT_EVENT_FILE
         self.feedback_path = self.run_dir / "agent.feedback.jsonl"
         self.control_path = self.run_dir / "agent.control.jsonl"
         self.raw_path = self.run_dir / "agent.stdout.log"
@@ -100,6 +130,9 @@ class ContainerPiRpcSession:
         self._timed_out = False
         self._budget_exceeded: str | None = None
         self._event_offset = 0
+        self._agent_event_offset = 0
+        self._agent_event_remainder = ""
+        self._agent_event_line = 0
         self._feedback_offset = 0
         self._rpc_line = 0
         self._rpc_epoch = uuid.uuid4().hex
@@ -263,16 +296,28 @@ class ContainerPiRpcSession:
             limit=64 * 1024 * 1024,
         )
         self._started = time.monotonic()
-        await self._wait_for_session_identity()
+        if self.run_kwargs.get("resume_session_id"):
+            await self._wait_for_session_identity(
+                timeout=RPC_RESUME_HANDSHAKE_TIMEOUT, required=True
+            )
+        else:
+            # Best effort only: capture the record if Pi emits one, otherwise
+            # proceed and let ``events()`` send the objective as the first
+            # command and pick up any later session record.
+            await self._wait_for_session_identity(
+                timeout=RPC_FRESH_HANDSHAKE_TIMEOUT, required=False
+            )
 
-    async def _wait_for_session_identity(self) -> None:
+    async def _wait_for_session_identity(self, *, timeout: float, required: bool) -> None:
         if self.process is None or self.process.stdout is None:
             raise RuntimeError("Pi RPC process has no stdout")
         try:
             while True:
-                line = await asyncio.wait_for(self.process.stdout.readline(), timeout=15)
+                line = await asyncio.wait_for(self.process.stdout.readline(), timeout=timeout)
                 if not line:
-                    raise AgentError("Pi RPC exited before reporting its session ID")
+                    if required:
+                        raise AgentError("Pi RPC exited before reporting its session ID")
+                    return
                 self._startup_records.append(line)
                 try:
                     record = json.loads(line)
@@ -291,7 +336,8 @@ class ContainerPiRpcSession:
                 self._pi_session_id = session_id
                 return
         except TimeoutError as exc:
-            raise AgentError("Pi RPC did not report a session ID during startup") from exc
+            if required:
+                raise AgentError("Pi RPC did not report a session ID during startup") from exc
 
     async def _guard_existing_resume_container(self, task_dir: Path) -> None:
         inspect = await asyncio.to_thread(
@@ -362,12 +408,19 @@ class ContainerPiRpcSession:
         startup_records = list(self._startup_records)
         self._startup_records.clear()
         while self.process.returncode is None:
-            remaining = task.budgets.wall_time - (time.monotonic() - self._started)
+            for event in self._consume_agent_events():
+                yield event
+            hard_deadline = task.budgets.wall_time + FINALIZE_GRACE_SECONDS
+            remaining = hard_deadline - (time.monotonic() - self._started)
             if remaining <= 0:
                 self._timed_out = True
                 self.adapter.trace.emit(
                     "budget.exceeded",
-                    data={"budget": "wall_time", "limit": task.budgets.wall_time},
+                    data={
+                        "budget": "wall_time",
+                        "limit": task.budgets.wall_time,
+                        "grace_seconds": FINALIZE_GRACE_SECONDS,
+                    },
                 )
                 await self._kill_container()
                 break
@@ -381,11 +434,15 @@ class ContainerPiRpcSession:
                 if self._budget_exceeded:
                     await self._kill_container()
                     break
-                if time.monotonic() - self._started >= task.budgets.wall_time:
+                if time.monotonic() - self._started >= hard_deadline:
                     self._timed_out = True
                     self.adapter.trace.emit(
                         "budget.exceeded",
-                        data={"budget": "wall_time", "limit": task.budgets.wall_time},
+                        data={
+                            "budget": "wall_time",
+                            "limit": task.budgets.wall_time,
+                            "grace_seconds": FINALIZE_GRACE_SECONDS,
+                        },
                     )
                     await self._kill_container()
                     break
@@ -449,6 +506,8 @@ class ContainerPiRpcSession:
             if self._settled:
                 break
 
+        for event in self._consume_agent_events():
+            yield event
         if not self._settled and not self._timed_out and not self._budget_exceeded:
             event = AgentEvent(
                 type="agent.session.crashed",
@@ -459,13 +518,9 @@ class ContainerPiRpcSession:
             yield event
 
     async def observe(self, observation: AgentObservation) -> None:
-        record = {
-            "id": f"feedback_{uuid.uuid4().hex}",
-            "type": observation.type,
-            "data": observation.data,
-        }
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        await asyncio.to_thread(self._append_feedback, line)
+        self._feedback_offset = await asyncio.to_thread(
+            append_feedback, self.feedback_path, feedback_record(observation)
+        )
         if not self._prompt_sent:
             self._pending_observations.append(observation)
         elif observation.type in self._STEER_TYPES and not self._closed:
@@ -506,9 +561,7 @@ class ContainerPiRpcSession:
         if self._closed:
             return
         self._closed = True
-        record = {"type": "session.close_requested", "data": {"reason": reason}}
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        await asyncio.to_thread(self._append_control, line)
+        await asyncio.to_thread(append_control, self.control_path, control_record(reason))
         await self._kill_container()
 
     async def result(self) -> AgentResult:
@@ -569,16 +622,90 @@ class ContainerPiRpcSession:
             handle.flush()
             self._event_offset = handle.tell()
 
-    def _append_feedback(self, line: str) -> None:
-        with open_regular_file(self.feedback_path, "a") as handle:
-            handle.write(line)
-            handle.flush()
-            self._feedback_offset = handle.tell()
+    def _consume_agent_events(self) -> list[AgentEvent]:
+        """Read typed solver events the Agent appended to its own event file.
 
-    def _append_control(self, line: str) -> None:
-        with open_regular_file(self.control_path, "a") as handle:
-            handle.write(line)
-            handle.flush()
+        The RPC session consumes Pi's stdout, so anything the Agent writes to
+        ``$HARNESS_EVENT_FILE`` (``action.intent``, ``world.observe``, ...) only
+        reaches the solver through this cursor. The file is untrusted: partial
+        trailing lines are buffered, oversized lines and malformed JSON become
+        telemetry errors instead of crashing the stream, and a truncated or
+        replaced file restarts the cursor.
+        """
+        events: list[AgentEvent] = []
+        try:
+            size = self.agent_event_path.stat().st_size
+        except OSError:
+            return events
+        if size < self._agent_event_offset:
+            self._agent_event_offset = 0
+            self._agent_event_remainder = ""
+            self.adapter.trace.emit(
+                "agent.events.reset",
+                actor="harness",
+                data={"reason": "file_truncated_or_replaced"},
+            )
+        try:
+            with open_regular_file(self.agent_event_path, "r", errors="replace") as handle:
+                handle.seek(self._agent_event_offset)
+                chunk = handle.read(MAX_AGENT_EVENT_CHUNK_BYTES)
+                self._agent_event_offset = handle.tell()
+        except OSError:
+            return events
+        if not chunk:
+            return events
+
+        lines = (self._agent_event_remainder + chunk).splitlines(keepends=True)
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._agent_event_remainder = lines.pop()
+        else:
+            self._agent_event_remainder = ""
+        if len(self._agent_event_remainder) > MAX_AGENT_EVENT_LINE_BYTES:
+            self._agent_event_remainder = ""
+            events.append(
+                self._agent_event_error("line exceeds the event size limit", line="")
+            )
+
+        for raw in lines:
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            self._agent_event_line += 1
+            if len(raw) > MAX_AGENT_EVENT_LINE_BYTES:
+                events.append(
+                    self._agent_event_error("line exceeds the event size limit", line="")
+                )
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                events.append(
+                    self._agent_event_error("invalid JSON event", line=stripped[:200])
+                )
+                continue
+            if not isinstance(payload, dict):
+                events.append(
+                    self._agent_event_error("event must be a JSON object", line=stripped[:200])
+                )
+                continue
+            data = payload.get("data")
+            event = AgentEvent(
+                type=str(payload.get("type", "unknown")),
+                data=data if isinstance(data, dict) else {},
+                event_id=f"agent-event-line:{self._agent_event_line}",
+            )
+            self._persist_event(event)
+            events.append(event)
+        return events
+
+    def _agent_event_error(self, message: str, *, line: str) -> AgentEvent:
+        event = AgentEvent(
+            type="agent.telemetry_error",
+            data={"source": "agent.event_file", "message": message, "line": line},
+            event_id=f"agent-event-line:{self._agent_event_line}",
+        )
+        self._persist_event(event)
+        return event
 
     async def _send_command(self, command: dict[str, Any]) -> None:
         if self.process is None or self.process.stdin is None or self.process.stdin.is_closing():
@@ -594,75 +721,38 @@ class ContainerPiRpcSession:
         return f"Harness feedback ({observation.type}): {payload}"
 
     def _account(self, event: AgentEvent) -> None:
-        if event.type == "model.usage_missing":
-            self._budget_exceeded = "invalid_telemetry"
-            self.adapter.trace.emit(
-                "agent.telemetry_error",
-                data={"message": "model usage telemetry was missing"},
-            )
-            self.adapter.trace.emit(
-                "budget.exceeded",
-                data={
-                    "budget": self._budget_exceeded,
-                    "reason": "model usage telemetry was missing",
-                },
-            )
+        if charge_usage_event(self._metrics, event.type, event.data):
             return
-        if event.type == "model.request":
-            self._metrics.model_calls += 1
-        elif event.type == "model.usage":
-            counters = [
-                event.data.get(field, 0)
-                for field in ("input_tokens", "output_tokens", "total_tokens")
-            ]
-            cost = event.data.get("cost_usd", 0.0)
-            if (
-                any(
-                    isinstance(value, bool) or not isinstance(value, int) or value < 0
-                    for value in counters
+        missing = event.type == "model.usage_missing"
+        self._budget_exceeded = "invalid_telemetry"
+        self.adapter.trace.emit(
+            "agent.telemetry_error",
+            data={
+                "message": (
+                    "model usage telemetry was missing"
+                    if missing
+                    else "invalid or negative Pi usage telemetry"
                 )
-                or counters[2] < counters[0] + counters[1]
-                or isinstance(cost, bool)
-                or not isinstance(cost, (int, float))
-                or not math.isfinite(float(cost))
-                or cost < 0
-            ):
-                self._budget_exceeded = "invalid_telemetry"
-                self.adapter.trace.emit(
-                    "agent.telemetry_error",
-                    data={"message": "invalid or negative Pi usage telemetry"},
-                )
-                self.adapter.trace.emit(
-                    "budget.exceeded",
-                    data={
-                        "budget": self._budget_exceeded,
-                        "reason": "untrusted Pi usage telemetry was invalid",
-                    },
-                )
-                return
-            self._metrics.input_tokens += counters[0]
-            self._metrics.output_tokens += counters[1]
-            self._metrics.total_tokens += counters[2]
-            self._metrics.cost_usd += float(cost)
-        elif event.type == "tool.call":
-            self._metrics.tool_calls += 1
+            },
+        )
+        self.adapter.trace.emit(
+            "budget.exceeded",
+            data={
+                "budget": self._budget_exceeded,
+                "reason": (
+                    "model usage telemetry was missing"
+                    if missing
+                    else "untrusted Pi usage telemetry was invalid"
+                ),
+            },
+        )
 
     def _check_budget(self) -> None:
-        budgets = self._task.budgets
-        checks = (
-            ("max_tokens", budgets.max_tokens, self._metrics.total_tokens),
-            ("max_model_calls", budgets.max_model_calls, self._metrics.model_calls),
-            ("max_tool_calls", budgets.max_tool_calls, self._metrics.tool_calls),
-            ("max_cost_usd", budgets.max_cost_usd, self._metrics.cost_usd),
-        )
-        for name, limit, used in checks:
-            if limit is not None and used > limit:
-                self._budget_exceeded = name
-                self.adapter.trace.emit(
-                    "budget.exceeded",
-                    data={"budget": name, "limit": limit, "value": used},
-                )
-                return
+        # Only the wall-clock deadline bounds a run, and it is soft: the session
+        # keeps running through the finalize grace window. Token/call/cost
+        # ceilings are no longer enforced; untrusted telemetry still fails closed
+        # through `_invalid_gateway_telemetry` and `_account`.
+        return
 
     def _consume_gateway_events(self) -> None:
         if self.gateway_usage_path is None:
@@ -795,134 +885,55 @@ class ContainerPiAdapter(PiAdapter):
         agent_session_id: str | None = None,
         agent_task_dir: Path | None = None,
     ) -> list[str]:
-        from .network_policy import proxy_environment_overrides, reject_agent_proxy_env
-
-        env_names = set(self.spec.env) | set(self.pi.env_passthrough)
-        if any(_is_reserved_credential_env(key) for key in env_names):
-            raise AgentError("container Agent cannot receive reserved credential environment variables")
-        reject_agent_proxy_env(self.spec.network_profile, env_names)
-        agent_task_dir = agent_task_dir or prepare_agent_task_view(
-            task_dir=task_dir,
-            run_root=run_dir.parent,
-            verifier_entrypoint=task.verification.entrypoint,
-        )
-        container_uid, container_gid = prepare_agent_workspace_for_container(run_dir)
-        command = [
-            "docker",
-            "create",
-            "--rm",
-            "--pull=never",
-            "--name",
-            container_name,
-            "--user",
-            f"{container_uid}:{container_gid}",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "512",
-            "--memory",
-            "4g",
-            "--cpus",
-            "4",
-            "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=512m",
-            "--tmpfs",
-            "/var/tmp:rw,nosuid,nodev,size=256m",
-            "--network",
-            network,
-        ]
-        if self.spec.runtime:
-            command.extend(["--runtime", self.spec.runtime])
-        for capability in self.pi.cap_add:
-            command.extend(["--cap-add", capability])
-        if host_gateway:
-            command.extend(["--add-host", "host.docker.internal:host-gateway"])
-
-        command.extend(
-            [
-                "-v",
-                f"{agent_task_dir.resolve()}:/task:ro",
-                "-v",
-                f"{run_dir.resolve()}:/run/harness:rw",
-                "-w",
-                "/run/harness",
-                "-e",
-                f"HARNESS_TASK_ID={task.id}",
-                "-e",
-                "HARNESS_TASK_DIR=/task",
-                "-e",
-                "HARNESS_RUN_DIR=/run/harness",
-                "-e",
-                f"HARNESS_OBJECTIVE={task.objective.description}",
-                "-e",
-                f"HARNESS_ENV_PROJECT={environment_project or ''}",
-                "-e",
-                "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
-                "-e",
-                "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
-                "-e",
-                "HARNESS_WORLD_CONTEXT=/run/harness/world.context.txt",
-                "-e",
-                "HARNESS_SUBMISSION_INBOX=/run/harness/submission.inbox.jsonl",
-                "-e",
-                "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
-                "-e",
-                "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
-                "-e",
-                f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
-                "-e",
-                f"HARNESS_SEED={seed}",
-                "-e",
-                "PI_CODING_AGENT_DIR=/run/harness/pi-agent",
-                "-e",
-                "PI_CODING_AGENT_SESSION_DIR=/run/harness/pi-sessions",
-                "-e",
-                "PI_TELEMETRY=0",
-                "-e",
-                "PI_SKIP_VERSION_CHECK=1",
-                "-e",
-                "HOME=/run/harness/home",
-            ]
-        )
+        pi_env = {
+            "PI_CODING_AGENT_DIR": "/run/harness/pi-agent",
+            "PI_CODING_AGENT_SESSION_DIR": "/run/harness/pi-sessions",
+            "PI_TELEMETRY": "0",
+            "PI_SKIP_VERSION_CHECK": "1",
+            "HOME": "/run/harness/home",
+        }
         if self.pi.offline or self.spec.network_profile != "unrestricted":
-            command.extend(["-e", "PI_OFFLINE=1"])
-        if gateway_url and gateway_token:
-            command.extend(
-                [
-                    "-e",
-                    f"HARNESS_GATEWAY_URL={gateway_url}",
-                    "-e",
-                    f"HARNESS_GATEWAY_TOKEN={gateway_token}",
-                    "-e",
-                    f"OPENAI_BASE_URL={gateway_url}/v1",
-                    "-e",
-                    f"OPENAI_API_KEY={gateway_token}",
-                ]
-            )
-
-        for key, value in sorted(self.spec.env.items()):
-            command.extend(["-e", f"{key}={value}"])
-        if not (gateway_url and gateway_token):
-            for key in self.pi.env_passthrough:
-                if key not in os.environ:
-                    raise AgentError(f"requested Pi environment variable is missing: {key}")
-                command.extend(["-e", f"{key}={os.environ[key]}"])
-        command.extend(proxy_environment_overrides(self.spec.network_profile))
-
-        if self.pi.mode == "rpc":
-            command.append("-i")
-        command.append(str(self.spec.image))
-        command.extend(
-            self._command(
-                task,
-                gateway_enabled=bool(gateway_url and gateway_token),
-                session_id=agent_session_id,
-            )
+            pi_env["PI_OFFLINE"] = "1"
+        return build_container_command(
+            spec=self.spec,
+            task=task,
+            task_dir=task_dir,
+            run_dir=run_dir,
+            container_name=container_name,
+            network=network,
+            environment_project=environment_project,
+            seed=seed,
+            gateway_url=gateway_url,
+            gateway_token=gateway_token,
+            host_gateway=host_gateway,
+            agent_task_dir=agent_task_dir,
+            workdir="/run/harness",
+            limits=ContainerLimits(
+                pids=512,
+                memory="4g",
+                cpus="4",
+                tmpfs=(
+                    "/tmp:rw,nosuid,nodev,size=512m",
+                    "/var/tmp:rw,nosuid,nodev,size=256m",
+                ),
+            ),
+            reserved_env_names=frozenset(self.spec.env) | frozenset(self.pi.env_passthrough),
+            extra_cap_add=tuple(self.pi.cap_add),
+            extra_env=pi_env,
+            env_passthrough=tuple(self.pi.env_passthrough),
+            interactive=self.pi.mode == "rpc",
+            event_file_name=(
+                AGENT_EVENT_FILE if self.pi.mode == "rpc" else NORMALIZED_EVENT_FILE
+            ),
+            image_command=[
+                str(self.spec.image),
+                *self._command(
+                    task,
+                    gateway_enabled=bool(gateway_url and gateway_token),
+                    session_id=agent_session_id,
+                ),
+            ],
         )
-        return command
 
     async def start_session(
         self,
@@ -1125,7 +1136,10 @@ class ContainerPiAdapter(PiAdapter):
                     if exceeded:
                         _terminate_process(proc)
                         break
-                    if time.monotonic() - started > task.budgets.wall_time:
+                    if (
+                        time.monotonic() - started
+                        > task.budgets.wall_time + FINALIZE_GRACE_SECONDS
+                    ):
                         timed_out = True
                         self.trace.emit(
                             "budget.exceeded",

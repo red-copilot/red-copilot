@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from harness.agent_workspace import validate_agent_task_inputs
-from harness.runtime.agent_workspace import (
+from harness.agent_workspace import (
     create_agent_workspace,
     prepare_agent_task_view,
     prepare_agent_workspace_for_container,
     sync_agent_workspace,
+    validate_agent_task_inputs,
 )
 
 

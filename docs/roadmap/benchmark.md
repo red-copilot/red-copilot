@@ -57,4 +57,19 @@ The SuiteRunner Python API now enforces the same 1–64 worker bound as the CLI 
 
 Generic benchmark adapter outputs are sanitized before persistence or return to the Agent. Target/session metadata, submission metadata, evaluator message/milestones/metadata are bounded and redacted using the shared observability sanitizer; submission metadata is sanitized before it enters World feedback or Agent feedback. Canary tests verify secrets are absent from result, World, trace and workspace artifacts and Agent observations while ordinary evaluation fields remain. Benchmark streaming tests passed (19); full suite passed (445 passed, 4 skipped); Ruff, compileall, architecture tests (4), and `git diff --check` passed on 2026-10-09. Docker/live TSec report execution remains outstanding.
 
+TSec flag extraction no longer harvests the objective prompt. `extract_flags`
+scanned every message role plus a raw-stdout fallback, so the prompt's own
+examples (`HARNESS_FLAG=<flag>`, `flag{...}`) were submitted as candidate flags
+whenever the Agent did not use the submission inbox: a real run submitted only
+those two placeholders, both rejected, and each rejection incremented the
+progress failure counters. Extraction now skips Harness/platform-authored roles
+(`user`/`system`/`human`), rejects template-marked or too-short values, and no
+longer substring-scans unparsed stdout; the structured submission inbox remains
+the primary path. Verified by replaying the recorded runs: the previous junk
+submissions now extract to zero candidates while the inbox-sourced success is
+unaffected. Regression coverage in `tests/test_tsec_adapter.py`
+(prompt-placeholder isolation, Agent-emitted values, placeholder rejection,
+removed raw scan). Validation on 2026-10-14: full suite passed (485 passed,
+3 skipped); Ruff clean.
+
 **Non-goals:** hiding task-specific heuristics in universal solver, evaluation using unverified Agent self-reports.

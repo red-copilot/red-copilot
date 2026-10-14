@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import typing
 import uuid
+from pathlib import Path
 
-from ..models import ObjectiveSpec
+from ..agent import AgentResult
+from ..models import AgentSpec, BudgetSpec, ObjectiveSpec
+from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
+from ..solver_policy import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from .base import (
     BenchmarkAdapter,
     BenchmarkCase,
@@ -14,7 +20,8 @@ from .base import (
     Submission,
     SubmissionResult,
 )
-from .tsec_client import TSecClientAdapter
+from .runner import BenchmarkRunner
+from .tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig
 
 
 def _is_sdk_error(exc: Exception, name: str) -> bool:
@@ -228,3 +235,163 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             return
         result = await self.client.close_challenge(session.case_id)
         state["closed"] = bool(result.closed)
+
+
+_FLAG_RE = re.compile(r"HARNESS_FLAG=([^\s]+)")
+# Roles whose text is authored by Harness or the platform. The TSec objective
+# prompt itself contains literal examples such as ``HARNESS_FLAG=<flag>`` and
+# ``flag{...}``; never harvest candidates from them.
+_NON_AGENT_ROLES = frozenset({"user", "system", "human"})
+# Markers that appear in template/example text rather than in a captured value.
+_PLACEHOLDER_MARKERS = ("...", "\u2026", "<", ">")
+_MIN_FLAG_LENGTH = 6
+_MAX_FLAG_LENGTH = 512
+
+
+def _is_candidate_flag(value: str) -> bool:
+    """Reject prompt/example placeholders while keeping real captured values."""
+    if not _MIN_FLAG_LENGTH <= len(value) <= _MAX_FLAG_LENGTH:
+        return False
+    if any(character.isspace() for character in value):
+        return False
+    return not any(marker in value for marker in _PLACEHOLDER_MARKERS)
+
+
+def extract_flags(raw_jsonl: str) -> list[str]:
+    """Extract ``HARNESS_FLAG=...`` candidates the Agent actually emitted.
+
+    Only Agent-authored messages (assistant turns and tool output) are scanned:
+    Harness/platform prompt text is skipped and obvious template placeholders
+    are discarded, so an echoed example can never be submitted as a flag.
+    """
+
+    flags: list[str] = []
+    seen: set[str] = set()
+    for line in raw_jsonl.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if isinstance(role, str) and role.lower() in _NON_AGENT_ROLES:
+            continue
+        content = message.get("content")
+        texts: list[str] = []
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    texts.append(item["text"])
+        for text in texts:
+            for match in _FLAG_RE.finditer(text):
+                flag = match.group(1)
+                if _is_candidate_flag(flag) and flag not in seen:
+                    seen.add(flag)
+                    flags.append(flag)
+    return flags
+
+
+def _extract_submissions(result: AgentResult) -> list[Submission]:
+    values = extract_flags(result.stdout)
+    seen: set[str] = set()
+    submissions: list[Submission] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        submissions.append(Submission(type="flag", value=value))
+    return submissions
+
+
+async def run_tsec_challenges(
+    *,
+    config: TSecConfig,
+    agent: AgentSpec,
+    budgets: BudgetSpec,
+    runs_root: str | Path,
+    skills_root: str | Path = "skills",
+    challenge_code: str | None = None,
+    run_all: bool = False,
+    seed: int = 0,
+    use_hint: bool = False,
+    start_retries: int = 2,
+    retry_delay: float = 2.0,
+    allow_host_agent: bool = False,
+    solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
+    max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
+    max_replans: int = BENCHMARK_MAX_REPLANS,
+) -> list[dict]:
+    """Run selected TSec challenges through the generic benchmark runtime."""
+
+    results: list[dict] = []
+    effective_budgets = budgets.model_copy(update={"wall_time": min(budgets.wall_time, 3600)})
+    runner = BenchmarkRunner(runs_root=runs_root, skills_root=skills_root)
+    try:
+        async with TSecClientAdapter(config) as client:
+            adapter = TSecBenchmarkAdapter(
+                client,
+                use_hint=use_hint,
+                start_retries=start_retries,
+                retry_delay=retry_delay,
+            )
+            cases = await adapter.discover()
+            if challenge_code and not any(case.id == challenge_code for case in cases):
+                raise TSecAdapterError(f"challenge not found: {challenge_code}")
+
+            selected = [
+                case
+                for case in cases
+                if not bool(case.metadata.get("is_completed"))
+                and (run_all or challenge_code is None or case.id == challenge_code)
+            ]
+            if not run_all and challenge_code is None:
+                selected = selected[:1]
+
+            for index, case in enumerate(selected):
+                result = await runner.run_case(
+                    adapter=adapter,
+                    case=case,
+                    agent=agent,
+                    budgets=effective_budgets,
+                    seed=seed + index,
+                    submission_extractor=_extract_submissions,
+                    allow_host_agent=allow_host_agent,
+                    solver_profile=solver_profile,
+                    max_unconfirmed_progress=max_unconfirmed_progress,
+                    max_replans=max_replans,
+                )
+                evaluation = result.get("evaluation", {})
+                session_meta = result.get("benchmark", {}).get("session", {})
+                result["benchmark"].update(
+                    {
+                        "challenge": case.id,
+                        "level": case.metadata.get("level"),
+                        "challenge_total_score": case.metadata.get("total_score", 0),
+                        "hint_used": bool(session_meta.get("hint_used")),
+                    }
+                )
+                result["flags"] = {
+                    "expected": int(evaluation.get("expected_flags", 0)),
+                    "initial_correct": int(evaluation.get("initial_correct", 0)),
+                    "remaining_at_start": int(evaluation.get("remaining_at_start", 0)),
+                    "correct": int(evaluation.get("correct", 0)),
+                }
+                result["platform_cumulative_score"] = evaluation.get(
+                    "platform_cumulative_score"
+                )
+                results.append(result)
+    except Exception as exc:
+        if _is_sdk_error(exc, "VpnCheckError"):
+            reason = getattr(exc, "detail", None)
+            raise TSecAdapterError(
+                f"TSec VPN preflight failed: {getattr(exc, 'message', str(exc))}; "
+                f"detail={reason}"
+            ) from exc
+        raise
+    return results

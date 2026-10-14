@@ -23,11 +23,10 @@ Version 0.8 provides:
 - event-sourced universal world-state runtime with materialized snapshots
 - domain-neutral skill metadata registry for planner and domain extensions
 - rolling-horizon planner integrated with the interactive SolverLoop
-- Firecracker capability detection and machine-profile contract
 - GitHub Actions coverage for Pi 1.0.4, Docker Agent, sidecar Gateway, and Docker Verifier
 
 > [!WARNING]
-> CLI agents and `verification.type: python` execute trusted host processes. Pi runs inside a restricted Docker container by default. `runtime: runsc` requires gVisor to be installed and registered with Docker. v0.8 defines and validates the Firecracker host/profile contract, but it does not yet launch microVMs; CI does not provide `/dev/kvm`.
+> CLI agents and `verification.type: python` execute trusted host processes. Pi runs inside a restricted Docker container by default. `runtime: runsc` requires gVisor to be installed and registered with Docker.
 
 ## Install
 
@@ -273,29 +272,30 @@ Output reports availability of:
 ```text
 docker
 gvisor_runsc
-firecracker
-kvm
 pi
+bwrap
 ```
-
-### Firecracker contract
-
-v0.7 contains a `FirecrackerProfile` that validates kernel/rootfs images and generates the boot-source, root drive, and machine configuration expected by a future Firecracker backend. `FirecrackerBackend.validate_host()` requires both the `firecracker` binary and `/dev/kvm`.
-
-This is deliberately not advertised as a runnable backend yet. VM lifecycle, jailer/network setup, snapshotting, and run-bundle mounts remain future work.
 
 ## Budgets and result bundles
 
-Task budgets can enforce:
+Only the wall-clock deadline bounds a run, and it is **soft**:
 
 ```yaml
 budgets:
   wall_time: 3600
-  max_tokens: 200000
-  max_model_calls: 300
-  max_tool_calls: 1000
-  max_cost_usd: 20
 ```
+
+At `wall_time` Harness sends `solver.finalize`, asking the Agent to stop probing and write
+`agent.summary.md` (confirmed facts, unconfirmed hypotheses, what was tried and ruled out,
+unfinished intents). The run then has a `FINALIZE_GRACE_SECONDS` (180s) window to finish that
+report before the container is killed as a last resort.
+
+`max_tokens`, `max_model_calls`, `max_tool_calls` and `max_cost_usd` are still accepted for
+backwards compatibility but are **no longer enforced**; declaring one records a `budget.ignored`
+trace event and the CLI prints a warning.
+
+Every run also writes `summary.json` and a `summary` block in `result.json`: a deterministic
+facts/intents/exploration digest built from World state and progress, plus the Agent's own report.
 
 Each run is stored beneath `.harness/runs/<run_id>/`:
 
@@ -349,10 +349,10 @@ rationale are documented in [`docs/control-theory.md`](docs/control-theory.md).
 3. **Done:** Tool Gateway, model proxy, credential isolation, streaming accounting.
 4. **Done:** Docker Verifier sandbox and Docker Agent Gateway support.
 5. **Done:** isolated Gateway sidecar, Docker runtime profiles.
-6. **Done:** Firecracker host/profile capability contract.
-7. **Done:** first-class Pi JSON adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
-8. **Done:** control-spine simplification (open-loop subsystems removed, single feedback loop).
-9. Containerized Pi adapter hardening, KVM-enabled Firecracker lifecycle, and snapshot pooling.
+6. **Done:** first-class Pi JSON adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
+7. **Done:** control-spine simplification (open-loop subsystems removed, single feedback loop).
+8. **Done:** dead-contract removal and duplicate-path consolidation (Firecracker stub, file world store, unreferenced schemas removed; single Docker command builder, usage accounting and TSec path).
+9. Containerized Pi adapter hardening and snapshot pooling.
 
 
 ### Benchmark adapters

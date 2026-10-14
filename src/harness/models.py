@@ -6,6 +6,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .world.models import StateSelector
+
 
 def _is_reserved_credential_env(name: str) -> bool:
     normalized = name.upper()
@@ -21,6 +23,10 @@ def _is_reserved_credential_env(name: str) -> bool:
 
 class ObjectiveSpec(BaseModel):
     description: str = Field(min_length=1)
+    # Optional declarative target states. When present they become
+    # ``Goal.required_states`` and drive the goal-driven frontier. Absent/empty
+    # keeps the legacy behavior for existing tasks.
+    required_states: list[StateSelector] = Field(default_factory=list)
 
 
 class BudgetSpec(BaseModel):
