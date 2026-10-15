@@ -19,6 +19,9 @@ _CONTAINER_GID = 65532
 def create_agent_workspace(run_dir: Path) -> Path:
     workspace = run_dir / "agent-workspace"
     workspace.mkdir(mode=0o700)
+    # The Agent owns its notes: plain markdown it writes and re-reads across
+    # rounds and sessions. The Harness never parses them.
+    (workspace / "notes").mkdir(mode=0o700, exist_ok=True)
     return workspace
 
 

@@ -71,7 +71,6 @@ def test_budget_monitor_accounts_usage_under_the_limits(tmp_path: Path) -> None:
     assert monitor.metrics.total_tokens == 12
     assert monitor.metrics.model_calls == 1
     assert monitor.usage_exceeded is None
-    assert monitor.usage_deadline_reached() is False
     assert '"budget.exceeded"' not in (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
 
 
@@ -92,19 +91,17 @@ def test_budget_monitor_usage_crossing_is_soft_with_grace_window(tmp_path: Path)
 
     # Crossing a usage ceiling does not stop the supervised process on the
     # spot: it opens the same finalize grace window the soft wall-clock
-    # deadline uses, and reports the dimension once the window has elapsed.
+    # deadline uses, and poll() reports the dimension once the window elapsed.
     assert monitor.poll() is None
     assert monitor.exceeded is None
     assert monitor.usage_exceeded == "max_tokens"
-    assert monitor.usage_deadline_reached() is False
     trace_text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
     assert '"budget.exceeded"' in trace_text
     assert '"budget":"max_tokens"' in trace_text
     assert f'"grace_seconds":{FINALIZE_GRACE_SECONDS}' in trace_text
 
-    monitor._usage_deadline -= FINALIZE_GRACE_SECONDS + 1  # time-travel past the window
-    assert monitor.usage_deadline_reached() is True
-    monitor.mark_usage_exceeded()
+    monitor.usage.deadline -= FINALIZE_GRACE_SECONDS + 1  # time-travel past the window
+    assert monitor.poll() == "max_tokens"
     assert monitor.exceeded == "max_tokens"
 
 

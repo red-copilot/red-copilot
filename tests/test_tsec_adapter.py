@@ -5,16 +5,18 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from harness.benchmark import tsec_adapter
 from harness.benchmark.base import BenchmarkCase, Submission
 from harness.benchmark.tsec_adapter import (
+    MAX_PARALLEL_CHALLENGES,
     TSecBenchmarkAdapter,
     extract_flags,
     run_tsec_challenges,
 )
-from harness.benchmark.tsec_client import TSecConfig
+from harness.benchmark.tsec_client import TSecAdapterError, TSecConfig
 from harness.models import AgentSpec, BudgetSpec
-from harness.runtime.solver_profile import SolverProfile
 
 
 class FakeTSecClient:
@@ -353,11 +355,10 @@ class FakeRunnerClient:
 class FakeBenchmarkRunner:
     last_budgets: BudgetSpec | None = None
     last_kwargs: dict | None = None
-    last_skills_root: Path | None = None
+    concurrent_peak: int = 0
 
-    def __init__(self, *, runs_root: Path, skills_root: Path = Path("skills")):
+    def __init__(self, *, runs_root: Path):
         self.runs_root = runs_root
-        type(self).last_skills_root = Path(skills_root)
 
     async def run_case(self, *, case, budgets, **kwargs):
         type(self).last_budgets = budgets
@@ -369,9 +370,6 @@ class FakeBenchmarkRunner:
                 "case_id": case.id,
                 "domain": case.domain,
                 "difficulty": case.difficulty,
-                "solver_profile": (
-                    kwargs.get("solver_profile", SolverProfile.PI_WORLD_HEURISTIC).value
-                ),
                 "session": {
                     "hint_used": False,
                     "initial_correct": 0,
@@ -404,12 +402,9 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
             agent=_runner_agent(),
             budgets=BudgetSpec(wall_time=30),
             runs_root=tmp_path,
-            skills_root=tmp_path / "custom-skills",
             challenge_code="WEB-001",
             seed=1,
-            solver_profile=SolverProfile.PI_WORLD,
             max_unconfirmed_progress=200,
-            max_replans=20,
         )
     )
 
@@ -426,12 +421,8 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
     }
     assert result["benchmark"]["challenge"] == "WEB-001"
     assert result["benchmark"]["level"] == "L2"
-    assert result["benchmark"]["solver_profile"] == "pi-world"
-    assert FakeBenchmarkRunner.last_skills_root == tmp_path / "custom-skills"
     assert FakeBenchmarkRunner.last_kwargs is not None
-    assert FakeBenchmarkRunner.last_kwargs["solver_profile"] is SolverProfile.PI_WORLD
     assert FakeBenchmarkRunner.last_kwargs["max_unconfirmed_progress"] == 200
-    assert FakeBenchmarkRunner.last_kwargs["max_replans"] == 20
 
 
 def test_run_tsec_challenges_applies_platform_wall_time_ceiling(
@@ -452,3 +443,72 @@ def test_run_tsec_challenges_applies_platform_wall_time_ceiling(
 
     assert FakeBenchmarkRunner.last_budgets is not None
     assert FakeBenchmarkRunner.last_budgets.wall_time == 3600
+
+
+def _challenge(code: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        unique_code=code,
+        description="Authorized web challenge",
+        category="web",
+        flag_count=1,
+        correct_flag_count=0,
+        difficulty="easy",
+        level="L2",
+        total_score=100,
+        is_completed=False,
+    )
+
+
+class FakeMultiChallengeClient(FakeRunnerClient):
+    async def list_challenges(self):
+        return [_challenge("WEB-001"), _challenge("WEB-002"), _challenge("WEB-003")]
+
+
+class ConcurrentRunner(FakeBenchmarkRunner):
+    active = 0
+    peak = 0
+
+    async def run_case(self, *, case, budgets, **kwargs):
+        type(self).active += 1
+        type(self).peak = max(type(self).peak, type(self).active)
+        try:
+            await asyncio.sleep(0.01)
+            return await super().run_case(case=case, budgets=budgets, **kwargs)
+        finally:
+            type(self).active -= 1
+
+
+def test_run_tsec_challenges_bounds_concurrency_to_the_parallel_limit(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeMultiChallengeClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", ConcurrentRunner)
+    ConcurrentRunner.peak = 0
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            runs_root=tmp_path,
+            run_all=True,
+            parallel=2,
+        )
+    )
+
+    assert len(results) == 3
+    assert ConcurrentRunner.peak == 2
+
+
+def test_run_tsec_challenges_rejects_parallel_above_the_platform_cap(tmp_path: Path) -> None:
+    with pytest.raises(TSecAdapterError):
+        asyncio.run(
+            run_tsec_challenges(
+                config=TSecConfig(base_url="https://example.invalid", token="secret"),
+                agent=_runner_agent(),
+                budgets=BudgetSpec(wall_time=30),
+                runs_root=tmp_path,
+                run_all=True,
+                parallel=MAX_PARALLEL_CHALLENGES + 1,
+            )
+        )

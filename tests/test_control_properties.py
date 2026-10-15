@@ -82,27 +82,13 @@ def test_forged_verifier_authority_cannot_complete_the_reference(tmp_path: Path)
 
 
 # 2. Stability: the loop is bounded and converges to STOP instead of oscillating.
-def test_replans_are_capped_and_converge_to_stop() -> None:
-    actions: list[SolverAction] = []
-    replans_used = 0
-    while True:
-        decision = decide_solver_action(
-            event_type="world.observe",
-            replan_reasons=["world_state_changed"],
-            no_progress_count=1,
-            replans_used=replans_used,
-        )
-        actions.append(decision.action)
-        if decision.action is SolverAction.REPLAN:
-            replans_used += 1
-            continue
-        assert decision.action is SolverAction.STOP
-        assert decision.reason == "replan_limit"
-        break
+def test_a_steady_loop_only_ever_continues_or_verifies() -> None:
+    actions = {
+        decide_solver_action(event_type=event_type).action
+        for event_type in ("tool.result", "tool.call", "progress.updated", "world.observe")
+    }
 
-    assert replans_used == 8
-    assert actions[-1] is SolverAction.STOP
-    assert all(action is SolverAction.REPLAN for action in actions[:-1])
+    assert actions == {SolverAction.CONTINUE, SolverAction.VERIFY}
 
 
 def test_no_progress_converges_monotonically_to_stop() -> None:
@@ -114,9 +100,9 @@ def test_no_progress_converges_monotonically_to_stop() -> None:
     stop_index = actions.index(SolverAction.STOP)
     assert stop_index == 6  # DEFAULT_MAX_NO_PROGRESS
     assert all(action is SolverAction.STOP for action in actions[stop_index:])
-    # No oscillation: once the loop starts replanning it does not fall back to VERIFY.
-    replan_index = actions.index(SolverAction.REPLAN)
-    assert SolverAction.VERIFY not in actions[replan_index:]
+    # No oscillation: before the bound the loop keeps verifying rather than
+    # drifting into an unbounded middle state.
+    assert all(action is SolverAction.VERIFY for action in actions[:stop_index])
 
 
 def test_low_budget_without_progress_stops_before_budget_is_spent() -> None:
@@ -221,15 +207,15 @@ def test_unconfirmed_progress_bound_terminates_an_unproductive_loop() -> None:
 
 
 # 5. Counterfactual decision: a change in estimated state changes the action.
-def test_world_state_change_alters_the_next_decision() -> None:
-    steady = decide_solver_action(event_type="world.observe")
-    changed = decide_solver_action(
-        event_type="world.observe", replan_reasons=["world_state_changed"]
+def test_remaining_budget_alters_the_next_decision() -> None:
+    funded = decide_solver_action(event_type="tool.call")
+    starved = decide_solver_action(
+        event_type="tool.call", no_progress_count=1, remaining_budget_fraction=0.04
     )
 
-    assert steady.action is SolverAction.VERIFY
-    assert changed.action is SolverAction.REPLAN
-    assert changed.reason == "world_state_changed"
+    assert funded.action is SolverAction.CONTINUE
+    assert starved.action is SolverAction.STOP
+    assert starved.reason == "low_budget_without_progress"
 
 
 # 6. Dead time: a dispatched action is not completion until it is verified.

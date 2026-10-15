@@ -25,7 +25,11 @@ MAX_CHECKPOINT_BYTES = 8 * 1024 * 1024
 
 
 class RunCheckpoint(BaseModel):
-    schema_version: Literal["harness/checkpoint/v2"] = "harness/checkpoint/v2"
+    # v3 (per-role crew cursors plus a crew control snapshot) is read-only
+    # legacy: multi-role execution was removed, so new records are always v2.
+    schema_version: Literal["harness/checkpoint/v2", "harness/checkpoint/v3"] = (
+        "harness/checkpoint/v2"
+    )
     run_id: str
     world_revision: int = Field(ge=0)
     event_offset: int = Field(ge=0)
@@ -35,7 +39,6 @@ class RunCheckpoint(BaseModel):
     pending_actions: list[dict[str, Any]] = Field(default_factory=list)
     agent_session_id: str | None = Field(default=None, min_length=1, max_length=256)
     session_checkpoint_id: str | None = None
-    plan_revision: int | None = Field(default=None, ge=0)
     processed_event_ids: dict[str, str] = Field(default_factory=dict)
     progress_event_count: int | None = Field(default=None, ge=0)
 
@@ -169,7 +172,6 @@ async def save_session_checkpoint(
     session: Any,
     world_revision: int,
     progress: Any,
-    plan_revision: int | None = None,
     budget_used: dict[str, float] | None = None,
     processed_event_ids: dict[str, str] | None = None,
 ) -> RunCheckpoint | None:
@@ -201,7 +203,6 @@ async def save_session_checkpoint(
         pending_actions=pending,
         session_checkpoint_id=cursor.id,
         agent_session_id=getattr(cursor, "session_id", None),
-        plan_revision=plan_revision,
         processed_event_ids=processed_event_ids or {},
         progress_event_count=getattr(progress, "event_count", None),
     )

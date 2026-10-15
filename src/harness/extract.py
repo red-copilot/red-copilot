@@ -61,6 +61,9 @@ def extract_facts(data: dict) -> list[dict]:
     seen: set[str] = set()
 
     def add(type_name: str, detail: str, content: dict) -> None:
+        # The bounds live in the one funnel, so a new parser cannot forget them
+        # and no captured token can carry unbounded tool output into the graph.
+        detail = detail[:_MAX_DETAIL]
         if detail in seen or len(facts) >= MAX_EXTRACTED_FACTS:
             return
         seen.add(detail)
@@ -68,41 +71,38 @@ def extract_facts(data: dict) -> list[dict]:
             {
                 "id": _fact_id("observation", type_name, detail),
                 "type": type_name,
-                "content": content,
+                "content": {
+                    key: value[:_MAX_DETAIL] if isinstance(value, str) else value
+                    for key, value in content.items()
+                },
             }
         )
 
     for port, proto, service in _NMAP_OPEN.findall(excerpt):
-        detail = f"{proto}/{port}"
         add(
             "network.service",
-            detail,
+            f"{proto}/{port}",
             {"port": int(port), "proto": proto, "service": service or None},
         )
     for url, status in _GOBUSTER.findall(excerpt):
-        detail = url[:_MAX_DETAIL]
-        add("web.endpoint", detail, {"url": detail, "status": int(status)})
+        add("web.endpoint", url, {"url": url, "status": int(status)})
     for path, status in _FFUF.findall(excerpt):
         if path.startswith(("http://", "https://")):
             continue  # already covered by the gobuster pattern
-        detail = path[:_MAX_DETAIL]
-        add("web.endpoint", detail, {"path": detail, "status": int(status)})
+        add("web.endpoint", path, {"path": path, "status": int(status)})
     for path, status in _CURL_PAIR.findall(excerpt):
-        detail = path[:_MAX_DETAIL]
-        add("web.endpoint", detail, {"path": detail, "status": int(status)})
+        add("web.endpoint", path, {"path": path, "status": int(status)})
     for url, status, rest in _WHATWEB.findall(excerpt):
         components = _WHATWEB_COMPONENT.findall(rest)[:8]
-        detail = url[:_MAX_DETAIL]
         add(
             "web.technology",
-            detail,
-            {"url": detail, "status": int(status), "components": components},
+            url,
+            {"url": url, "status": int(status), "components": components},
         )
     for port, service, host, login, password in _HYDRA.findall(excerpt):
-        detail = f"{service}:{host}:{login}"[:_MAX_DETAIL]
         add(
             "credential.access",
-            detail,
+            f"{service}:{host}:{login}",
             {
                 "service": service,
                 "host": host,
@@ -112,22 +112,19 @@ def extract_facts(data: dict) -> list[dict]:
             },
         )
     for method, param, technique in _SQLMAP_TECHNIQUE.findall(excerpt):
-        detail = f"{method} {param}"[:_MAX_DETAIL]
         add(
             "web.vulnerability",
-            detail,
+            f"{method} {param}",
             {"method": method, "parameter": param, "technique": technique[:160]},
         )
     for method, param in _SQLMAP_VULNERABLE.findall(excerpt):
-        detail = f"{method} {param}"[:_MAX_DETAIL]
         add(
             "web.vulnerability",
-            detail,
+            f"{method} {param}",
             {"method": method, "parameter": param, "technique": "vulnerable"},
         )
     for path, note in _NIKTO.findall(excerpt):
-        detail = path[:_MAX_DETAIL]
-        add("web.endpoint", detail, {"path": detail, "note": note.strip()[:160]})
+        add("web.endpoint", path, {"path": path, "note": note.strip()[:160]})
     return facts
 
 

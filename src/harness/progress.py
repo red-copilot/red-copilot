@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from .budget import USAGE_DIMENSION_SOURCES, exceeded_usage_dimension
 from .session import AgentEvent
 from .verification import AuthorizedObjectiveVerdict, VerifierRegistry
 
@@ -23,7 +24,7 @@ class ProgressHypothesis(BaseModel):
 
 
 class ProgressLedger(BaseModel):
-    schema_version: str = "harness/progress/v3"
+    schema_version: str = "harness/progress/v4"
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     active_goal: str | None = None
     completed_subgoals: list[str] = Field(default_factory=list)
@@ -39,7 +40,6 @@ class ProgressLedger(BaseModel):
     action_intent: dict[str, Any] | None = None
     expected_observation: str | None = None
     actual_observation: str | None = None
-    replan_reasons: list[str] = Field(default_factory=list)
     last_verification: dict[str, Any] | None = None
     verified_actions: int = 0
     execution_succeeded: int = 0
@@ -59,11 +59,7 @@ class ProgressLedger(BaseModel):
     # keeps exploration alive when no action-level verifier is available while
     # still terminating an endless unproductive loop.
     unconfirmed_progress: int = 0
-    replan_count: int = 0
     failed_skill_counts: dict[str, int] = Field(default_factory=dict)
-    # Tool or argument-family -> attempts that produced no new semantic fact,
-    # so a run that keeps re-trying the same dead end can be told about it.
-    no_gain_tools: dict[str, int] = Field(default_factory=dict)
     reconciled_actions: dict[str, str] = Field(default_factory=dict)
     # Correlates legacy events that predate tool_call_id, so replay uses the
     # same generated action identity after a checkpoint reload.
@@ -220,14 +216,6 @@ class ProgressLedger(BaseModel):
             item = ProgressHypothesis.model_validate(hypothesis)
             self.hypotheses[item.id] = item
 
-        replan_reason = data.get("replan_reason")
-        if (
-            isinstance(replan_reason, str)
-            and replan_reason
-            and replan_reason not in self.replan_reasons
-        ):
-            self.replan_reasons.append(replan_reason)
-
         made_progress = data.get("made_progress")
         if made_progress is False:
             self.no_progress_count += 1
@@ -255,25 +243,17 @@ class ProgressLedger(BaseModel):
         elif status == "pending":
             self.pending_actions += 1
 
-        for reason in data.get("replan_reasons", []):
-            if reason not in self.replan_reasons:
-                self.replan_reasons.append(reason)
-
     def record_submission(self, *, accepted: bool, completed: bool) -> None:
         del completed  # Final evaluation, not submission feedback, owns completion.
         if accepted:
             self.accepted_submissions += 1
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
-            if "benchmark_negative_feedback" in self.replan_reasons:
-                self.replan_reasons.remove("benchmark_negative_feedback")
         else:
             self.rejected_submissions += 1
             self.failure_count += 1
             self.no_progress_count += 1
             self.unconfirmed_progress += 1
-            if "benchmark_negative_feedback" not in self.replan_reasons:
-                self.replan_reasons.append("benchmark_negative_feedback")
         # Submission feedback may ask the runtime to stop early, but only the
         # final evaluator can establish objective completion.
 
@@ -306,14 +286,6 @@ class ProgressLedger(BaseModel):
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
 
-    def consume_replan_reasons(self, reasons: list[str]) -> None:
-        consumed = set(reasons)
-        self.replan_reasons = [reason for reason in self.replan_reasons if reason not in consumed]
-
-    def request_replan(self, reason: str) -> None:
-        if reason and reason not in self.replan_reasons:
-            self.replan_reasons.append(reason)
-
     @property
     def remaining_budget_fraction(self) -> float:
         return min(self.budget_fractions().values(), default=1.0)
@@ -327,34 +299,37 @@ class ProgressLedger(BaseModel):
         elapsed = max(0.0, (datetime.now(UTC) - self.started_at).total_seconds())
         return elapsed >= limit
 
-    def _budget_used(self, key: str) -> float | None:
-        if key == "max_model_calls":
-            return float(self.model_calls)
-        if key == "max_tool_calls":
-            return float(self.tool_calls)
-        if key == "max_tokens":
-            return self.budget_used.get("tokens")
-        if key == "max_cost_usd":
-            return self.budget_used.get("cost_usd")
-        return None
+    @property
+    def usage_snapshot(self) -> dict[str, float]:
+        """Charged usage keyed the way the shared dimension table reads it.
+
+        ``model.usage`` charges tokens and cost into ``budget_used``; model and
+        tool calls are counted on their own. A dimension stays absent until it
+        is first charged, so a caller can tell "nothing charged yet" from zero.
+        """
+        charged: dict[str, float | None] = {
+            "tokens": self.budget_used.get("tokens"),
+            "cost_usd": self.budget_used.get("cost_usd"),
+            "model_calls": float(self.model_calls),
+            "tool_calls": float(self.tool_calls),
+        }
+        return {key: value for key, value in charged.items() if value is not None}
+
+    def _budget_used(self, dimension: str) -> float | None:
+        """Charged usage for one enforced dimension, or ``None`` if never charged."""
+        source = USAGE_DIMENSION_SOURCES.get(dimension)
+        return None if source is None else self.usage_snapshot.get(source[1])
 
     @property
     def budget_exceeded_dimension(self) -> str | None:
-        """The enforced dimension that crossed its ceiling, if any."""
+        """The enforced dimension that crossed its ceiling, if any.
+
+        Scanned by the shared budget accounting so the ledger names the same
+        dimension the live monitor does when two ceilings cross at once.
+        """
         if self.wall_time_expired:
             return "wall_time"
-        for key, limit in sorted(self.budget_limits.items()):
-            if key == "wall_time":
-                continue
-            used = self._budget_used(key)
-            if limit > 0 and used is not None and used >= limit:
-                return key
-        return None
-
-    @property
-    def budget_expired(self) -> bool:
-        """True once the soft wall-clock deadline or any usage ceiling passed."""
-        return self.budget_exceeded_dimension is not None
+        return exceeded_usage_dimension(self.usage_snapshot, self.budget_limits)
 
     @property
     def budget_grace_elapsed(self) -> bool:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 
 from ..models import AgentSpec
@@ -47,20 +48,24 @@ def world_result(
     world: WorldRepository,
     solver_loop: SolverLoop,
     agent_id: str,
+    agent_ids: Iterable[str] | None = None,
+    extra_solver_loops: Iterable[SolverLoop] = (),
 ) -> dict:
+    actors = {agent_actor(item) for item in (agent_ids or (agent_id,))}
+    loops = (solver_loop, *extra_solver_loops)
     return {
         "revision": world.snapshot.revision,
         "agent_authored_records": sum(
-            1 for event in world.events() if event.actor == agent_actor(agent_id)
+            1 for event in world.events() if event.actor in actors
         ),
         "aci": {
-            "accepted_events": solver_loop.stats.aci_accepted,
-            "rejected_events": solver_loop.stats.aci_rejected,
-            "world_mutations": solver_loop.stats.aci_world_mutations,
+            "accepted_events": sum(loop.stats.aci_accepted for loop in loops),
+            "rejected_events": sum(loop.stats.aci_rejected for loop in loops),
+            "world_mutations": sum(loop.stats.aci_world_mutations for loop in loops),
         },
         "legacy_inbox": {
-            "accepted": solver_loop.stats.inbox_accepted,
-            "rejected": solver_loop.stats.inbox_rejected,
+            "accepted": sum(loop.stats.inbox_accepted for loop in loops),
+            "rejected": sum(loop.stats.inbox_rejected for loop in loops),
         },
     }
 
@@ -155,7 +160,6 @@ def run_summary(
         "exploration": {
             "model_calls": progress.model_calls,
             "tool_calls": progress.tool_calls,
-            "replans": progress.replan_count,
             "failed_skills": dict(progress.failed_skill_counts),
             "submissions_accepted": progress.accepted_submissions,
             "submissions_rejected": progress.rejected_submissions,

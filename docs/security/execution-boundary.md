@@ -26,6 +26,19 @@ regular files opened without following a final symlink. Gateway writes use the s
 The task mount and container root filesystem are read-only; only `/tmp` and the Agent
 workspace are writable. No Docker socket is mounted.
 
+### Competing sessions
+
+When an Agent declares `executors`, each session keeps its own container and its own
+`agent-workspace`, `notes`, progress ledger and checkpoint path, so one session can neither read
+nor overwrite another session's control state. The single deliberate exception is
+`executor-shared/`, mounted at `/run/harness-shared` read-write in every session of that case and
+holding only the Agent-authored `shared-findings.md` plus Harness-written archive snapshots.
+Nothing authoritative may live there: it must never contain `world.db`, `world.events.jsonl`,
+`progress.json`, `checkpoint.json`, `result.json`, evidence or verifier logs, and
+`tests/test_executors.py` asserts that boundary. Findings text is untrusted Agent output and is
+read back only for archival, never as evidence or instruction. The run root itself stays
+unmounted from every session container.
+
 ## Process and network boundary
 
 Docker Agents run as the workspace's mapped numeric identity (UID/GID 65532 when Harness

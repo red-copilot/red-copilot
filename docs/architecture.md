@@ -2,21 +2,19 @@
 
 Harness is one deployable Python application, not a collection of microservices.
 Modules are separated by responsibilities and explicit composition points.
-The single closed feedback loop that these modules form is described in
-[control-theory.md](control-theory.md); the Agent-facing cognition layer is
-described in [agent-engineering.md](agent-engineering.md). The agent-side
-architecture as a whole — adapter/session contracts, solver loop, world
-contracts, trust tiers, recovery — is consolidated in
-[agent-architecture.md](agent-architecture.md) (Chinese).
+The single closed feedback loop that these modules form, the pruning rationale,
+the Agent-facing cognition layer and the agent-side architecture as a whole
+(adapter/session contracts, solver loop, world contracts, trust tiers, recovery)
+are consolidated in [agent-architecture.md](agent-architecture.md) (Chinese).
 
 - `runtime/`: application-level composition, solver initialization, run state.
 - `world/`: domain state, event storage, snapshots, retrieval. No benchmark or HTTP dependencies.
 - `benchmark/`: externally provisioned challenge lifecycle, submissions and adapters.
 - `agent.py`, `session.py`, `pi_*.py`: agent/session integration and infrastructure.
 - `tool_adapter.py`: domain-neutral async tool plugin contract; concrete tools are explicitly selected by application composition and remain subject to Gateway authorization.
-- `solver_loop.py`, `planner.py`, `cognition.py`, `action_verifier.py`: solver
-  policies. `cognition.py` derives the goal-driven intent-fact frontier that the
-  default planner ranks.
+- `solver_loop.py`, `solver_policy.py`, `action_verifier.py`: solver policies.
+  `solver_policy.py` is a pure stop law (budget, no-progress); cognition belongs
+  to the Agent, which keeps its own notes and reads markdown knowledge roots.
 - `orchestrator.py`: local-run lifecycle and environment integration.
 
 The first extraction is `runtime.bootstrap_solver`. Both local runs and

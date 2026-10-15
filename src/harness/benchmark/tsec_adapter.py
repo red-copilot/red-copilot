@@ -9,9 +9,7 @@ from pathlib import Path
 
 from ..agent import AgentResult
 from ..models import AgentSpec, BudgetSpec, ObjectiveSpec
-from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from .base import (
-    BENCHMARK_MAX_REPLANS,
     BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     AdapterSessionState,
     BenchmarkAdapter,
@@ -28,6 +26,10 @@ from .tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig
 
 def _is_sdk_error(exc: Exception, name: str) -> bool:
     return type(exc).__name__ == name
+
+
+# The platform caps concurrently running challenge instances per team at three.
+MAX_PARALLEL_CHALLENGES = 3
 
 
 class TSecBenchmarkAdapter(BenchmarkAdapter):
@@ -315,7 +317,6 @@ async def run_tsec_challenges(
     agent: AgentSpec,
     budgets: BudgetSpec,
     runs_root: str | Path,
-    skills_root: str | Path = "skills",
     challenge_code: str | None = None,
     run_all: bool = False,
     seed: int = 0,
@@ -323,15 +324,19 @@ async def run_tsec_challenges(
     start_retries: int = 2,
     retry_delay: float = 2.0,
     allow_host_agent: bool = False,
-    solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
     max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
-    max_replans: int = BENCHMARK_MAX_REPLANS,
+    parallel: int = 1,
 ) -> list[dict]:
     """Run selected TSec challenges through the generic benchmark runtime."""
 
-    results: list[dict] = []
+    if parallel < 1:
+        raise TSecAdapterError("parallel must be at least 1")
+    if parallel > MAX_PARALLEL_CHALLENGES:
+        raise TSecAdapterError(
+            f"the platform allows at most {MAX_PARALLEL_CHALLENGES} running instances"
+        )
     effective_budgets = budgets.model_copy(update={"wall_time": min(budgets.wall_time, 3600)})
-    runner = BenchmarkRunner(runs_root=runs_root, skills_root=skills_root)
+    runner = BenchmarkRunner(runs_root=runs_root)
     try:
         async with TSecClientAdapter(config) as client:
             adapter = TSecBenchmarkAdapter(
@@ -353,19 +358,30 @@ async def run_tsec_challenges(
             if not run_all and challenge_code is None:
                 selected = selected[:1]
 
-            for index, case in enumerate(selected):
-                result = await runner.run_case(
-                    adapter=adapter,
-                    case=case,
-                    agent=agent,
-                    budgets=effective_budgets,
-                    seed=seed + index,
-                    submission_extractor=_extract_submissions,
-                    allow_host_agent=allow_host_agent,
-                    solver_profile=solver_profile,
-                    max_unconfirmed_progress=max_unconfirmed_progress,
-                    max_replans=max_replans,
-                )
+            # Challenges run in independent run directories. At most three are
+            # in flight because the platform caps concurrent instances per team.
+            semaphore = asyncio.Semaphore(parallel)
+
+            async def run_one(index: int, case: BenchmarkCase) -> dict:
+                async with semaphore:
+                    result = await runner.run_case(
+                        adapter=adapter,
+                        case=case,
+                        agent=agent,
+                        budgets=effective_budgets,
+                        seed=seed + index,
+                        submission_extractor=_extract_submissions,
+                        allow_host_agent=allow_host_agent,
+                        max_unconfirmed_progress=max_unconfirmed_progress,
+                    )
+                return result
+
+            raw_results = await asyncio.gather(
+                *(run_one(index, case) for index, case in enumerate(selected))
+            )
+
+            results: list[dict] = []
+            for case, result in zip(selected, raw_results, strict=True):
                 evaluation = result.get("evaluation", {})
                 session_meta = result.get("benchmark", {}).get("session", {})
                 result["benchmark"].update(

@@ -130,3 +130,56 @@ def test_docker_verifier_requires_image() -> None:
                 "verification": {"type": "docker"},
             }
         )
+
+
+def _pi_agent(**overrides) -> AgentSpec:
+    payload = {
+        "apiVersion": "harness/v1",
+        "id": "pi-agent",
+        "type": "pi",
+        "image": "pi:test",
+        "pi": {"provider": "openai", "model": "base-model", "thinking": "low"},
+    }
+    payload.update(overrides)
+    return AgentSpec.model_validate(payload)
+
+
+def test_agent_without_executors_is_its_own_single_session() -> None:
+    agent = _pi_agent()
+
+    assert agent.with_executors() == [agent]
+
+
+def test_executors_derive_one_validated_session_each() -> None:
+    agent = _pi_agent(
+        executors=[
+            {"id": "fast", "model": "cheap-model", "thinking": "minimal"},
+            {"id": "deep", "model": "strong-model", "extra_args": ["--temperature", "0.9"]},
+        ]
+    )
+
+    sessions = agent.with_executors()
+
+    assert [session.id for session in sessions] == ["pi-agent#1-fast", "pi-agent#2-deep"]
+    assert [session.pi.model for session in sessions] == ["cheap-model", "strong-model"]
+    assert sessions[0].pi.thinking == "minimal"
+    assert sessions[1].pi.thinking == "low"  # inherited from the base agent
+    assert sessions[1].pi.extra_args == ["--temperature", "0.9"]
+    assert all(session.executors == [] for session in sessions)
+
+
+def test_executor_overrides_are_validated_at_load_time() -> None:
+    with pytest.raises(ValidationError):
+        _pi_agent(executors=[{"id": "dup"}, {"id": "dup"}])
+    with pytest.raises(ValidationError):
+        _pi_agent(executors=[{"id": "blank-model", "model": ""}])
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(
+            {
+                "apiVersion": "harness/v1",
+                "id": "cli-agent",
+                "type": "cli",
+                "command": ["echo"],
+                "executors": [{"id": "a"}],
+            }
+        )

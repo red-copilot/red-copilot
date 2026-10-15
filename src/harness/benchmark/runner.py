@@ -6,30 +6,41 @@ import asyncio
 import math
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
 from ..agent import AgentResult, AgentRunContext, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
-from .base import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
+from .base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
-from ..budget import enforced_budget_limits
-from ..runtime import bootstrap_solver
-from ..agent_workspace import create_agent_workspace, sync_agent_workspace
+from ..budget import FINALIZE_GRACE_SECONDS, UsageMetrics, enforced_budget_limits
+from ..progress import ProgressLedger
+from ..runtime import SolverRuntime, bootstrap_solver
+from ..runtime.executors import (
+    ExecutorSessionPlan,
+    FindingsArchive,
+    fold_session_progress,
+    plan_executor_sessions,
+    prepare_executor_directories,
+    prepare_shared_findings,
+)
+from ..agent_workspace import sync_agent_workspace
 from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
 from ..runtime.evidence import persist_objective_verdict
 from ..runtime.lifecycle import RunLifecycle, resolve_run_status
 from ..runtime.projections import finalize_world_goal, network_result, run_summary, world_result
 from ..runtime.results import persist_run_result
-from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from ..world import (
     Entity,
     Failure,
     Goal,
     Observation,
+    SQLiteWorldRepository,
 )
 from .base import BenchmarkAdapter, BenchmarkCase, BenchmarkSession, EvaluationResult, Submission
 from .protocol import SubmissionInbox
@@ -73,6 +84,124 @@ def _submission_hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+@dataclass
+class _ExecutorRuntime:
+    """Per-session control state for one competing executor."""
+
+    plan: ExecutorSessionPlan
+    task: TaskSpec
+    runtime: SolverRuntime
+    progress_path: Path
+    submission_inbox: SubmissionInbox
+    session: Any = None
+    result: AgentResult | None = None
+    status: str = "pending"
+    completed: bool = False
+    submissions: int = 0
+
+
+def _merge_results(results: Sequence[AgentResult]) -> AgentResult:
+    """Fold competing session results into one run-level result.
+
+    Usage is summed; the first session-specific stop reason names the run's
+    exhaustion. Raw stdout/stderr stay in the per-session artifacts.
+    """
+    totals: dict[str, int | float] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "model_calls": 0,
+        "tool_calls": 0,
+        "cost_usd": 0.0,
+    }
+    for result in results:
+        for key, value in result.metrics.as_dict().items():
+            totals[key] = totals.get(key, 0) + value
+    return AgentResult(
+        returncode=0 if all(result.returncode == 0 for result in results) else 1,
+        timed_out=any(result.timed_out for result in results),
+        budget_exceeded=next(
+            (result.budget_exceeded for result in results if result.budget_exceeded),
+            None,
+        ),
+        stdout="",
+        stderr="",
+        metrics=UsageMetrics(**totals),
+    )
+
+
+async def _race_sessions(
+    runtimes: Sequence[_ExecutorRuntime],
+    launch: Callable[[_ExecutorRuntime], Awaitable[None]],
+    trace: TraceRecorder,
+) -> None:
+    """Run every session at once and stop the losers on the first objective win.
+
+    A session that raises only takes itself out of the race: the other sessions
+    keep working, and the run fails closed only when nothing is left to evaluate.
+    """
+    tasks = {
+        asyncio.create_task(launch(item), name=f"executor:{item.plan.executor_id}"): item
+        for item in runtimes
+    }
+    pending = set(tasks)
+    failures: list[BaseException] = []
+    won = False
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                item = tasks[task]
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one session must not end the race.
+                    item.status = "error"
+                    failures.append(exc)
+                    trace.emit(
+                        "executor.session.error",
+                        actor="harness",
+                        data={
+                            "executor_id": item.plan.executor_id,
+                            "error_type": type(exc).__name__,
+                            "message": "competing session failed; details omitted",
+                        },
+                    )
+                if item.completed:
+                    won = True
+            if won:
+                break
+        if won:
+            for task in pending:
+                tasks[task].status = "cancelled"
+                task.cancel()
+        for task in list(pending):
+            try:
+                await task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception as exc:  # noqa: BLE001 - losers may fail while stopping.
+                trace.emit(
+                    "executor.session.stop_error",
+                    actor="harness",
+                    data={
+                        "executor_id": tasks[task].plan.executor_id,
+                        "error_type": type(exc).__name__,
+                        "message": "session failed while stopping; details omitted",
+                    },
+                )
+        if not won and failures and len(failures) == len(runtimes):
+            raise failures[0]
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class BenchmarkRunner:
     """Generic lifecycle for externally provisioned and evaluated benchmarks."""
 
@@ -80,10 +209,8 @@ class BenchmarkRunner:
         self,
         *,
         runs_root: str | Path,
-        skills_root: str | Path = "skills",
     ) -> None:
         self.runs_root = Path(runs_root)
-        self.skills_root = Path(skills_root)
 
     async def run_case(
         self,
@@ -95,9 +222,7 @@ class BenchmarkRunner:
         seed: int,
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
-        solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
         max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
-        max_replans: int = BENCHMARK_MAX_REPLANS,
     ) -> dict:
         if agent.type in {"docker", "pi"} and agent.network == "environment":
             raise ValueError(
@@ -107,7 +232,10 @@ class BenchmarkRunner:
         run_id = f"{case.benchmark}_{case.id}_{uuid.uuid4().hex[:8]}"
         run_dir = (self.runs_root / run_id).resolve()
         run_dir.mkdir(parents=True, exist_ok=False)
-        agent_workspace = create_agent_workspace(run_dir)
+        plan = plan_executor_sessions(agent=agent, budgets=budgets, run_dir=run_dir)
+        prepare_executor_directories(plan)
+        shared_findings = prepare_shared_findings(plan)
+        archive = FindingsArchive(run_dir=run_dir) if plan.competing else None
         trace = TraceRecorder(run_dir / "trace.jsonl", run_id, case.id)
         try:
             session = await adapter.provision(case)
@@ -196,7 +324,6 @@ class BenchmarkRunner:
                 status="active",
                 priority=1.0,
                 attributes={"benchmark": session.benchmark, "case_id": session.case_id},
-                required_states=list(session.objective.required_states),
             )
             targets = [
                 Entity(
@@ -209,39 +336,69 @@ class BenchmarkRunner:
                 )
                 for target in session.targets
             ]
-            budget_limits = enforced_budget_limits(budgets)
-            runtime = bootstrap_solver(
-                run_dir=run_dir,
-                trace=trace,
-                goal=root_goal,
-                actor=f"agent:{agent.id}",
-                context_query=session.objective.description,
-                skills_root=self.skills_root,
-                targets=targets,
-                target_actor=f"benchmark:{session.benchmark}",
-                budget_limits=budget_limits,
-                agent_workspace=agent_workspace,
-                solver_profile=solver_profile,
-                max_unconfirmed_progress=max_unconfirmed_progress,
-                max_replans=max_replans,
+            # Every competing session attaches to the same authoritative world
+            # but keeps its own progress ledger, views and checkpoint. The first
+            # session seeds the world; the rest only attach control state.
+            runtimes: list[_ExecutorRuntime] = []
+            world = None
+            registry = None
+            for planned in plan.sessions:
+                attach = world is not None
+                session_runtime = bootstrap_solver(
+                    run_dir=planned.root,
+                    trace=trace,
+                    goal=root_goal,
+                    actor=f"agent:{planned.session_id}",
+                    context_query=session.objective.description,
+                    targets=() if attach else targets,
+                    target_actor=f"benchmark:{session.benchmark}",
+                    budget_limits=enforced_budget_limits(planned.budgets),
+                    agent_workspace=planned.workspace,
+                    max_unconfirmed_progress=max_unconfirmed_progress,
+                    world_repository_factory=(
+                        (lambda _path, shared=world: shared) if attach else SQLiteWorldRepository
+                    ),
+                    verifier_registry=registry,
+                    seed_world=not attach,
+                )
+                if world is None:
+                    world = session_runtime.world
+                    registry = session_runtime.verifier_registry
+                runtimes.append(
+                    _ExecutorRuntime(
+                        plan=planned,
+                        task=TaskSpec(
+                            apiVersion="harness/v1",
+                            id=session.case_id,
+                            name=session.case_id,
+                            category=session.benchmark,
+                            difficulty=case.difficulty,
+                            objective=session.objective,
+                            budgets=planned.budgets,
+                        ),
+                        runtime=session_runtime,
+                        progress_path=planned.root / "progress.json",
+                        submission_inbox=SubmissionInbox(
+                            planned.workspace / "submission.inbox.jsonl"
+                        ),
+                    )
+                )
+            solver_loop = runtimes[0].runtime.loop
+            context_builder = runtimes[0].runtime.context_builder
+            progress = (
+                ProgressLedger(
+                    active_goal=root_goal.id,
+                    budget_limits=enforced_budget_limits(budgets),
+                    wall_time_grace_seconds=FINALIZE_GRACE_SECONDS,
+                )
+                if plan.competing
+                else runtimes[0].runtime.progress
             )
-            world = runtime.world
-            context_builder = runtime.context_builder
-            progress = runtime.progress
-            solver_loop = runtime.loop
-            benchmark_verifier_authority = runtime.verifier_registry.register("benchmark_evaluator")
             progress_path = run_dir / "progress.json"
-            sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
-
-            task = TaskSpec(
-                apiVersion="harness/v1",
-                id=session.case_id,
-                name=session.case_id,
-                category=session.benchmark,
-                difficulty=case.difficulty,
-                objective=session.objective,
-                budgets=budgets,
-            )
+            progress.write(progress_path)
+            for planned in runtimes:
+                sync_agent_workspace(run_dir=planned.plan.root, workspace=planned.plan.workspace)
+            benchmark_verifier_authority = registry.register("benchmark_evaluator")
 
             trace.emit(
                 "run.started",
@@ -250,8 +407,25 @@ class BenchmarkRunner:
                     "case_id": session.case_id,
                     "agent_id": agent.id,
                     "seed": seed,
-                    "solver_profile": solver_profile.value,
                     "world_revision": world.snapshot.revision,
+                },
+            )
+            trace.emit(
+                "executor.sessions.planned",
+                actor="harness",
+                data={
+                    "count": len(runtimes),
+                    "competing": plan.competing,
+                    "shared_findings": str(shared_findings) if shared_findings else None,
+                    "sessions": [
+                        {
+                            "executor_id": item.plan.executor_id,
+                            "session_id": item.plan.session_id,
+                            "model": item.plan.agent.pi.model if item.plan.agent.pi else None,
+                            "root": item.plan.root.name,
+                        }
+                        for item in runtimes
+                    ],
                 },
             )
 
@@ -260,7 +434,6 @@ class BenchmarkRunner:
             submitted_keys: set[tuple[str, str]] = set()
             evaluation: EvaluationResult | None = None
             evaluation_error: Exception | None = None
-            submission_inbox = SubmissionInbox(agent_workspace / "submission.inbox.jsonl")
 
         except asyncio.CancelledError:
             if not lifecycle.terminal:
@@ -288,7 +461,28 @@ class BenchmarkRunner:
                 return False
             return evaluation.success
 
-        async def submit_candidate(submission: Submission, agent_session=None) -> bool:
+        def refresh_session_views() -> None:
+            """Re-render the world projection for the run and every session."""
+            for planned in runtimes:
+                builder = planned.runtime.context_builder
+                focus = builder.build_focus(
+                    world.snapshot,
+                    reference=session.objective.description,
+                )
+                (planned.plan.root / "world.context.txt").write_text(
+                    builder.render(
+                        world.snapshot,
+                        query=session.objective.description,
+                        focus=focus,
+                    ),
+                    encoding="utf-8",
+                )
+                sync_agent_workspace(run_dir=planned.plan.root, workspace=planned.plan.workspace)
+
+        async def submit_candidate(
+            submission: Submission,
+            executor: _ExecutorRuntime | None = None,
+        ) -> bool:
             nonlocal evaluation
             key = (submission.type, submission.value)
             if key in submitted_keys:
@@ -301,15 +495,28 @@ class BenchmarkRunner:
                 data={
                     "type": submission.type,
                     "value_sha256": _submission_hash(submission.value),
+                    "executor_id": executor.plan.executor_id if executor else None,
                 },
             )
             submitted = await adapter.submit(session, submission)
             safe_submission_metadata = sanitize_observability_data(submitted.metadata)
-            progress.record_submission(
+            # The submitting session owns the stall signal (a rejected candidate
+            # is a wrong lead), and the run ledger folds the session counters
+            # once at the end, so submissions are recorded exactly once.
+            submission_ledger = (
+                executor.runtime.progress
+                if executor is not None and plan.competing
+                else progress
+            )
+            submission_ledger.record_submission(
                 accepted=submitted.accepted,
                 completed=submitted.completed,
             )
-            progress.write(progress_path)
+            submission_ledger.write(
+                executor.progress_path
+                if executor is not None and plan.competing
+                else progress_path
+            )
             submission_digest = _submission_hash(submission.value)
             data = submitted.model_dump()
             data["metadata"] = safe_submission_metadata
@@ -358,19 +565,7 @@ class BenchmarkRunner:
                     actor=f"benchmark:{session.benchmark}",
                 )
             revision_after_feedback = world.snapshot.revision
-            focus = context_builder.build_focus(
-                world.snapshot,
-                reference=session.objective.description,
-            )
-            (run_dir / "world.context.txt").write_text(
-                context_builder.render(
-                    world.snapshot,
-                    query=session.objective.description,
-                    focus=focus,
-                ),
-                encoding="utf-8",
-            )
-            sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
+            refresh_session_views()
 
             feedback_data = {
                 "submission_type": submission.type,
@@ -380,31 +575,18 @@ class BenchmarkRunner:
                 "metadata": safe_submission_metadata,
                 "value_sha256": submission_digest,
                 "world_revision": revision_after_feedback,
-                "replan_required": "benchmark_negative_feedback" in progress.replan_reasons,
-                "replan_reasons": list(progress.replan_reasons),
             }
-            if agent_session is not None:
-                await agent_session.observe(
+            # Only the submitting session gets the immediate feedback pointer; the
+            # other sessions see the new world revision through their own context.
+            if executor is not None and executor.session is not None:
+                await executor.session.observe(
                     AgentObservation(
                         type="benchmark.feedback",
                         data=feedback_data,
                     )
                 )
-                if feedback_data["replan_required"]:
-                    await agent_session.observe(
-                        AgentObservation(
-                            type="solver.replan_requested",
-                            data={
-                                "reasons": feedback_data["replan_reasons"],
-                                "world_revision": revision_after_feedback,
-                                "context_path": "world.context.txt",
-                                "progress_path": "progress.json",
-                            },
-                        )
-                    )
-                    await solver_loop.maybe_replan(agent_session)
                 if revision_after_feedback != revision_before_feedback:
-                    await agent_session.observe(
+                    await executor.session.observe(
                         AgentObservation(
                             type="world.state.updated",
                             data={
@@ -417,13 +599,22 @@ class BenchmarkRunner:
                     )
             return submission_completed
 
-        action_owner = run_action_owner(run_dir)
-        action_owner_acquired = False
-        try:
-            action_owner.__enter__()
-            action_owner_acquired = True
+        async def run_executor(executor: _ExecutorRuntime) -> None:
+            """Drive one competing session to its own stop or the objective win."""
+            planned = executor.plan
+            executor.status = "running"
+            trace.emit(
+                "executor.session.started",
+                actor="harness",
+                data={
+                    "executor_id": planned.executor_id,
+                    "session_id": planned.session_id,
+                    "model": planned.agent.pi.model if planned.agent.pi else None,
+                    "budgets": planned.budgets.model_dump(mode="json"),
+                },
+            )
             adapter_instance = build_agent_adapter(
-                agent,
+                planned.agent,
                 allow_host_agent=allow_host_agent,
                 trace=trace,
             )
@@ -436,86 +627,97 @@ class BenchmarkRunner:
                 "agent.capabilities",
                 actor="harness",
                 data={
+                    "executor_id": planned.executor_id,
                     "live_steer": capabilities.live_steer,
                     "typed_event_channel": capabilities.typed_event_channel,
                     "submission_channels": list(capabilities.submission_channels),
                 },
             )
             # Externally provisioned benchmarks have no verifier-bearing task
-            # tree to sanitize; the agent workspace is the task view. Passing
+            # tree to sanitize; the session workspace is the task view. Passing
             # it directly avoids the local-run guard that rejects a task
             # directory nested under the authoritative run root.
             run_context = AgentRunContext(
-                task=task,
-                task_dir=agent_workspace,
-                agent_task_dir=agent_workspace,
-                run_dir=agent_workspace,
+                task=executor.task,
+                task_dir=planned.workspace,
+                agent_task_dir=planned.workspace,
+                run_dir=planned.workspace,
                 seed=seed,
+                shared_findings_dir=plan.shared_dir,
             )
 
             start_session = getattr(adapter_instance, "start_session", None)
-            completed_online = False
             if callable(start_session):
-                agent_session = await start_session(run_context)
+                executor.session = await start_session(run_context)
                 try:
                     await save_session_checkpoint(
-                        run_dir=run_dir,
-                        session=agent_session,
+                        run_dir=planned.root,
+                        session=executor.session,
                         world_revision=world.snapshot.revision,
-                        progress=progress,
-                        plan_revision=solver_loop.planned_world_revision,
-                        processed_event_ids=solver_loop.processed_event_ids,
+                        progress=executor.runtime.progress,
+                        processed_event_ids=executor.runtime.loop.processed_event_ids,
                     )
-                    startup_decision = solver_loop.decide(force_replan=True)
-                    stop_before_stream = startup_decision.action.value == "stop"
-                    if stop_before_stream:
+                    startup_decision = executor.runtime.loop.decide()
+                    if startup_decision.action.value == "stop":
                         trace.emit(
                             "solver.decision",
                             actor="harness",
-                            data={"action": "stop", "reason": startup_decision.reason},
+                            data={
+                                "action": "stop",
+                                "reason": startup_decision.reason,
+                                "executor_id": planned.executor_id,
+                            },
                         )
-                        await agent_session.observe(
+                        await executor.session.observe(
                             AgentObservation(
                                 type="solver.stop", data={"reason": startup_decision.reason}
                             )
                         )
-                        await agent_session.close(f"solver-stop:{startup_decision.reason}")
+                        await executor.session.close(
+                            f"solver-stop:{startup_decision.reason}"
+                        )
                     else:
-                        await solver_loop.maybe_replan(agent_session, force=True)
-                        async for event in agent_session.events():
-                            decision = await solver_loop.process_event(agent_session, event)
-                            sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
-                            await save_session_checkpoint(
-                                run_dir=run_dir,
-                                session=agent_session,
-                                world_revision=world.snapshot.revision,
-                                progress=progress,
-                                plan_revision=solver_loop.planned_world_revision,
-                                processed_event_ids=solver_loop.processed_event_ids,
+                        async for event in executor.session.events():
+                            decision = await executor.runtime.loop.process_event(
+                                executor.session, event
                             )
-                            for submission in submission_inbox.poll():
-                                if await submit_candidate(submission, agent_session):
-                                    completed_online = True
-                                    await agent_session.close("objective-complete")
+                            sync_agent_workspace(
+                                run_dir=planned.root, workspace=planned.workspace
+                            )
+                            await save_session_checkpoint(
+                                run_dir=planned.root,
+                                session=executor.session,
+                                world_revision=world.snapshot.revision,
+                                progress=executor.runtime.progress,
+                                processed_event_ids=(
+                                    executor.runtime.loop.processed_event_ids
+                                ),
+                            )
+                            for submission in executor.submission_inbox.poll():
+                                executor.submissions += 1
+                                if await submit_candidate(submission, executor):
+                                    executor.completed = True
+                                    await executor.session.close("objective-complete")
                                     break
-                            if completed_online:
+                            if archive is not None:
+                                archive.snapshot()
+                            if executor.completed:
                                 break
                             if decision.action.value == "stop":
-                                await agent_session.close(f"solver-stop:{decision.reason}")
+                                await executor.session.close(f"solver-stop:{decision.reason}")
                                 break
-                    agent_result = await agent_session.result()
+                    executor.result = await executor.session.result()
                     await save_session_checkpoint(
-                        run_dir=run_dir,
-                        session=agent_session,
+                        run_dir=planned.root,
+                        session=executor.session,
                         world_revision=world.snapshot.revision,
-                        progress=progress,
-                        plan_revision=solver_loop.planned_world_revision,
-                        budget_used=agent_result.metrics.as_dict(),
-                        processed_event_ids=solver_loop.processed_event_ids,
+                        progress=executor.runtime.progress,
+                        budget_used=executor.result.metrics.as_dict(),
+                        processed_event_ids=executor.runtime.loop.processed_event_ids,
                     )
                 except BaseException as stream_exc:
-                    if not completed_online:
-                        close = getattr(agent_session, "close", None)
+                    if not executor.completed:
+                        close = getattr(executor.session, "close", None)
                         if callable(close):
                             try:
                                 close_reason = (
@@ -527,25 +729,69 @@ class BenchmarkRunner:
                             except Exception as close_exc:  # noqa: BLE001 - preserve original failure
                                 trace.emit(
                                     "agent.close_error",
-                                    data={"error_type": type(close_exc).__name__,
-                                          "message": str(close_exc)},
+                                    data={
+                                        "executor_id": planned.executor_id,
+                                        "error_type": type(close_exc).__name__,
+                                        "message": str(close_exc),
+                                    },
                                 )
                     raise
             else:
-                agent_result = adapter_instance.run(run_context)
+                executor.result = adapter_instance.run(run_context)
 
-            solver_loop.finish_ingest()
+            executor.runtime.loop.finish_ingest()
 
-            if not completed_online:
-                for submission in submission_inbox.poll():
-                    if await submit_candidate(submission):
-                        completed_online = True
+            if not executor.completed:
+                for submission in executor.submission_inbox.poll():
+                    executor.submissions += 1
+                    if await submit_candidate(submission, executor):
+                        executor.completed = True
                         break
 
-            if not completed_online:
-                for submission in submission_extractor(agent_result):
-                    if await submit_candidate(submission):
+            if not executor.completed and executor.result is not None:
+                for submission in submission_extractor(executor.result):
+                    executor.submissions += 1
+                    if await submit_candidate(submission, executor):
+                        executor.completed = True
                         break
+
+            executor.status = "completed" if executor.completed else "finished"
+            trace.emit(
+                "executor.session.finished",
+                actor="harness",
+                data={
+                    "executor_id": planned.executor_id,
+                    "status": executor.status,
+                    "submissions": executor.submissions,
+                },
+            )
+
+        action_owner = run_action_owner(run_dir)
+        action_owner_acquired = False
+        try:
+            action_owner.__enter__()
+            action_owner_acquired = True
+            if plan.competing:
+                await _race_sessions(runtimes, run_executor, trace)
+                if archive is not None:
+                    archive.snapshot()
+            else:
+                await run_executor(runtimes[0])
+
+            if plan.competing:
+                session_results = [
+                    item.result for item in runtimes if item.result is not None
+                ]
+                if not session_results:
+                    raise RuntimeError("agent did not start")
+                agent_result = _merge_results(session_results)
+                fold_session_progress(
+                    progress, (item.runtime.progress for item in runtimes)
+                )
+            else:
+                agent_result = runtimes[0].result
+                if agent_result is None:
+                    raise RuntimeError("agent did not start")
 
             if evaluation is None:
                 await evaluate_final()
@@ -558,7 +804,7 @@ class BenchmarkRunner:
                     run_id=run_id,
                     world_revision=world.snapshot.revision,
                     producer_authority=benchmark_verifier_authority,
-                    registry=runtime.verifier_registry,
+                    registry=registry,
                     progress=progress,
                     trace=trace,
                     success=evaluation.success,
@@ -571,7 +817,7 @@ class BenchmarkRunner:
                     run_id=run_id,
                     world_revision=world.snapshot.revision,
                     producer_authority=benchmark_verifier_authority,
-                    registry=runtime.verifier_registry,
+                    registry=registry,
                     progress=progress,
                     trace=trace,
                     status="unavailable",
@@ -648,11 +894,16 @@ class BenchmarkRunner:
             if budget_exhausted
             else None
         )
+        # The winning session owns the run narrative; a run with no winner falls
+        # back to the first session so the artifact is deterministic.
+        report_executor = next(
+            (item for item in runtimes if item.completed), runtimes[0]
+        )
         summary = run_summary(
             world=world,
             progress=progress,
             run_dir=run_dir,
-            agent_report_path=agent_workspace / "agent.summary.md",
+            agent_report_path=report_executor.plan.workspace / "agent.summary.md",
             outcome={
                 "status": status,
                 "success": bool(evaluation and evaluation.success),
@@ -668,7 +919,6 @@ class BenchmarkRunner:
                 "case_id": session.case_id,
                 "domain": case.domain,
                 "difficulty": case.difficulty,
-                "solver_profile": solver_profile.value,
                 "session": sanitize_observability_data(session.metadata),
             },
             "agent_id": agent.id,
@@ -695,7 +945,15 @@ class BenchmarkRunner:
                 "ok": teardown_error is None,
                 "error": teardown_error,
             },
-            "world": world_result(world=world, solver_loop=solver_loop, agent_id=agent.id),
+            "world": world_result(
+                world=world,
+                solver_loop=solver_loop,
+                agent_id=agent.id,
+                agent_ids=[item.plan.session_id for item in runtimes] if plan.competing else None,
+                extra_solver_loops=(
+                    [item.runtime.loop for item in runtimes[1:]] if plan.competing else ()
+                ),
+            ),
             "network": network_result(agent),
             "progress": progress.model_dump(mode="json"),
             "metrics": {
@@ -703,5 +961,24 @@ class BenchmarkRunner:
                 **agent_result.metrics.as_dict(),
             },
         }
+        if plan.competing:
+            result["executor_sessions"] = [
+                {
+                    "id": item.plan.session_id,
+                    "executor_id": item.plan.executor_id,
+                    "index": item.plan.index,
+                    "agent_id": item.plan.agent.id,
+                    "model": item.plan.agent.pi.model if item.plan.agent.pi else None,
+                    "status": item.status,
+                    "objective_completed": item.completed,
+                    "submissions": item.submissions,
+                    "budget_used": dict(item.runtime.progress.budget_used),
+                    "metrics": item.result.metrics.as_dict() if item.result else {},
+                    "summary_present": (
+                        item.plan.workspace / "agent.summary.md"
+                    ).is_file(),
+                }
+                for item in runtimes
+            ]
         persist_run_result(run_dir=run_dir, trace=trace, result=result)
         return result

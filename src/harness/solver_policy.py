@@ -1,9 +1,12 @@
-"""Pure, bounded decisions for the interactive solver loop."""
+"""Pure, bounded stop decisions for the interactive solver loop.
 
+The loop no longer plans: the Agent owns cognition and the Harness only bounds
+it. What remains is the safety law - when a run must stop or verify - with no
+planner, no skill ranking and no replan counter.
+"""
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -11,7 +14,6 @@ from enum import StrEnum
 class SolverAction(StrEnum):
     CONTINUE = "continue"
     VERIFY = "verify"
-    REPLAN = "replan"
     STOP = "stop"
 
 
@@ -23,53 +25,39 @@ class SolverDecision:
 
 VERIFY_EVENTS = frozenset({"tool.result", "progress.updated", "world.observe"})
 DEFAULT_MAX_NO_PROGRESS = 6
-DEFAULT_MAX_REPLANS = 8
 # Successful executions without confirmed progress are bounded separately and
 # generously: they are neither progress nor a stall, so they must not trigger the
 # hard no-progress stop. This is the safety net for a loop with no action-level
 # verifier (for example a benchmark that only scores submitted flags).
 DEFAULT_MAX_UNCONFIRMED_PROGRESS = 40
-NO_PROGRESS_REPLAN_THRESHOLD = 2
 LOW_BUDGET_FRACTION = 0.05
 
 
 def decide_solver_action(
     *,
     event_type: str | None = None,
-    replan_reasons: Iterable[str] = (),
     no_progress_count: int = 0,
     unconfirmed_progress: int = 0,
-    replans_used: int = 0,
     remaining_budget_fraction: float = 1.0,
-    force_replan: bool = False,
     max_no_progress: int = DEFAULT_MAX_NO_PROGRESS,
     max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
-    max_replans: int = DEFAULT_MAX_REPLANS,
 ) -> SolverDecision:
-    """Choose one next action using persisted progress and hard safety bounds."""
-    if no_progress_count < 0 or unconfirmed_progress < 0 or replans_used < 0:
+    """Choose the next loop action using persisted progress and hard bounds."""
+    if no_progress_count < 0 or unconfirmed_progress < 0:
         raise ValueError("solver counters must be non-negative")
-    if max_no_progress < 1 or max_unconfirmed_progress < 1 or max_replans < 1:
+    if max_no_progress < 1 or max_unconfirmed_progress < 1:
         raise ValueError("solver bounds must be positive")
     if not math.isfinite(remaining_budget_fraction):
         raise ValueError("remaining budget fraction must be finite")
 
-    reasons = tuple(dict.fromkeys(reason for reason in replan_reasons if reason))
     if no_progress_count >= max_no_progress:
         return SolverDecision(SolverAction.STOP, "no_progress_limit")
     if unconfirmed_progress >= max_unconfirmed_progress:
         return SolverDecision(SolverAction.STOP, "unconfirmed_progress_limit")
     if remaining_budget_fraction <= 0:
         return SolverDecision(SolverAction.STOP, "budget_exhausted")
-    if remaining_budget_fraction <= LOW_BUDGET_FRACTION and no_progress_count >= NO_PROGRESS_REPLAN_THRESHOLD:
+    if remaining_budget_fraction <= LOW_BUDGET_FRACTION and no_progress_count > 0:
         return SolverDecision(SolverAction.STOP, "low_budget_without_progress")
-
-    should_replan = force_replan or bool(reasons) or no_progress_count >= NO_PROGRESS_REPLAN_THRESHOLD
-    if should_replan:
-        if replans_used >= max_replans:
-            return SolverDecision(SolverAction.STOP, "replan_limit")
-        reason = "forced_replan" if force_replan else (reasons[0] if reasons else "no_progress_threshold")
-        return SolverDecision(SolverAction.REPLAN, reason)
     if event_type in VERIFY_EVENTS:
         return SolverDecision(SolverAction.VERIFY, "verification_event")
     return SolverDecision(SolverAction.CONTINUE, "no_control_action_required")

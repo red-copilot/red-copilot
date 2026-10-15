@@ -22,7 +22,18 @@ MAX_AGENT_TELEMETRY_EVENT_BYTES = 4 * 1024 * 1024
 # never settles within this grace window.
 FINALIZE_GRACE_SECONDS = 180
 
-_USAGE_DIMENSIONS = ("max_tokens", "max_model_calls", "max_tool_calls", "max_cost_usd")
+# How each enforced usage dimension is read on the two accounting paths: the
+# field of a live ``UsageMetrics`` snapshot, and the key a progress ledger
+# charges it under. One ordered table, so a new dimension cannot leave the
+# monitor and the ledger naming different quantities.
+USAGE_DIMENSION_SOURCES: dict[str, tuple[str, str]] = {
+    "max_tokens": ("total_tokens", "tokens"),
+    "max_model_calls": ("model_calls", "model_calls"),
+    "max_tool_calls": ("tool_calls", "tool_calls"),
+    "max_cost_usd": ("cost_usd", "cost_usd"),
+}
+
+USAGE_DIMENSIONS = tuple(USAGE_DIMENSION_SOURCES)
 
 
 def enforced_budget_limits(spec: BudgetSpec) -> dict[str, float]:
@@ -34,28 +45,38 @@ def enforced_budget_limits(spec: BudgetSpec) -> dict[str, float]:
     deadline uses. Unset dimensions stay absent.
     """
     limits: dict[str, float] = {"wall_time": float(spec.wall_time)}
-    for name in _USAGE_DIMENSIONS:
+    for name in USAGE_DIMENSIONS:
         value = getattr(spec, name)
         if value is not None:
             limits[name] = float(value)
     return limits
 
 
-def _usage_value(metrics: UsageMetrics, dimension: str) -> float:
-    if dimension == "max_tokens":
-        return float(metrics.total_tokens)
-    if dimension == "max_model_calls":
-        return float(metrics.model_calls)
-    if dimension == "max_tool_calls":
-        return float(metrics.tool_calls)
-    return float(metrics.cost_usd)
+def usage_value(metrics: UsageMetrics, dimension: str) -> float:
+    """Charged usage for one enforced dimension."""
+    return float(getattr(metrics, USAGE_DIMENSION_SOURCES[dimension][0]))
 
 
 def usage_budget_exceeded(metrics: UsageMetrics, spec: BudgetSpec) -> str | None:
     """First declared usage dimension whose charged usage reached its ceiling."""
-    for dimension in _USAGE_DIMENSIONS:
+    for dimension in USAGE_DIMENSIONS:
         limit = getattr(spec, dimension)
-        if limit is not None and _usage_value(metrics, dimension) >= limit:
+        if limit is not None and usage_value(metrics, dimension) >= limit:
+            return dimension
+    return None
+
+
+def exceeded_usage_dimension(
+    usage: Mapping[str, float], limits: Mapping[str, float]
+) -> str | None:
+    """Same scan over a usage mapping keyed the way ledgers persist it.
+
+    Scanned in ``USAGE_DIMENSIONS`` order so every caller names the same
+    dimension when two ceilings cross at once.
+    """
+    for dimension in USAGE_DIMENSIONS:
+        limit = limits.get(dimension)
+        if limit is not None and usage.get(USAGE_DIMENSION_SOURCES[dimension][1], 0.0) >= limit:
             return dimension
     return None
 
@@ -132,6 +153,53 @@ def charge_usage_event(
     return True
 
 
+class UsageCeiling:
+    """The soft usage-ceiling edge: cross once, then open the finalize window.
+
+    Both accounting paths - the telemetry monitor and an in-process RPC
+    session charging its own events - hold one of these, so the crossing is
+    detected, stamped and traced exactly the same way in both.
+    """
+
+    def __init__(self) -> None:
+        self.dimension: str | None = None
+        self.deadline: float | None = None
+
+    def observe(self, metrics: UsageMetrics, spec: BudgetSpec, trace: TraceRecorder) -> None:
+        """Arm the grace window the first time a declared ceiling is reached.
+
+        Scans only until the window is armed: after that the crossing can no
+        longer change the outcome.
+        """
+        if self.deadline is not None:
+            return
+        dimension = usage_budget_exceeded(metrics, spec)
+        if dimension is None:
+            return
+        self.dimension = dimension
+        self.deadline = time.monotonic() + FINALIZE_GRACE_SECONDS
+        trace.emit(
+            "budget.exceeded",
+            data={
+                "budget": dimension,
+                "limit": getattr(spec, dimension),
+                "observed": usage_value(metrics, dimension),
+                "grace_seconds": FINALIZE_GRACE_SECONDS,
+            },
+        )
+
+    def remaining(self) -> float | None:
+        """Seconds left in the grace window, or ``None`` before it is armed."""
+        if self.deadline is None:
+            return None
+        return self.deadline - time.monotonic()
+
+    def elapsed(self) -> bool:
+        """True once an armed grace window has run out."""
+        remaining = self.remaining()
+        return remaining is not None and remaining <= 0
+
+
 class BudgetMonitor:
     """Tail agent/gateway telemetry and enforce declared run budgets."""
 
@@ -151,29 +219,25 @@ class BudgetMonitor:
         self.exceeded: str | None = None
         # Usage ceilings are soft: the crossing opens the finalize grace
         # window instead of stopping the supervised process on the spot.
-        self._usage_exceeded: str | None = None
-        self._usage_deadline: float | None = None
+        self.usage = UsageCeiling()
 
     @property
     def usage_exceeded(self) -> str | None:
         """Usage dimension that crossed its declared ceiling, if any."""
-        return self._usage_exceeded
-
-    def usage_deadline_reached(self) -> bool:
-        """True once the grace window after a usage crossing has elapsed."""
-        return self._usage_deadline is not None and time.monotonic() >= self._usage_deadline
-
-    def mark_usage_exceeded(self) -> None:
-        """Report the crossed dimension as the run's exceeded budget.
-
-        Called by supervision loops at the grace edge, so the result carries
-        the exhausted dimension the same way invalid telemetry does.
-        """
-        if self._usage_exceeded is not None:
-            self.exceeded = self._usage_exceeded
+        return self.usage.dimension
 
     def poll(self) -> str | None:
+        """Return the reason the supervised run must stop, if any.
+
+        Tails the telemetry file and reports every declared budget: invalid
+        telemetry fails closed, and a usage ceiling whose finalize grace window
+        has elapsed stops the run exactly like the wall-clock deadline does.
+        Supervision loops only need to act on a non-``None`` return.
+        """
         if self.exceeded:
+            return self.exceeded
+        if self.usage.elapsed():
+            self.exceeded = self.usage.dimension
             return self.exceeded
 
         try:
@@ -264,19 +328,7 @@ class BudgetMonitor:
         # Declared usage ceilings are enforced softly: the crossing is traced
         # once and opens the finalize grace window; the supervision loop stops
         # the process only if the window elapses without the run finishing.
-        exceeded_dimension = usage_budget_exceeded(self.metrics, self.budgets)
-        if exceeded_dimension is not None and self._usage_deadline is None:
-            self._usage_exceeded = exceeded_dimension
-            self._usage_deadline = time.monotonic() + FINALIZE_GRACE_SECONDS
-            self.trace.emit(
-                "budget.exceeded",
-                data={
-                    "budget": exceeded_dimension,
-                    "limit": getattr(self.budgets, exceeded_dimension),
-                    "observed": _usage_value(self.metrics, exceeded_dimension),
-                    "grace_seconds": FINALIZE_GRACE_SECONDS,
-                },
-            )
+        self.usage.observe(self.metrics, self.budgets, self.trace)
 
     @staticmethod
     def _reject_json_constant(value: str) -> None:
