@@ -86,8 +86,10 @@ harness tsec \
 `--wall-time` is a soft deadline: at that point Harness steers the Agent to write
 `agent.summary.md` (facts, ruled-out hypotheses, unfinished intents) and grants a
 `FINALIZE_GRACE_SECONDS` (180s) window before the container is killed. The
-`--max-tokens`/`--max-model-calls`/`--max-tool-calls`/`--max-cost-usd` flags are still accepted
-but no longer enforced; passing one prints a warning and records a `budget.ignored` trace event.
+`--max-tokens`/`--max-model-calls`/`--max-tool-calls`/`--max-cost-usd` flags are enforced the
+same soft way: the first crossing records a `budget.exceeded` trace event, steers finalize
+(`solver.finalize`, `reason=soft_budget_limit`) and only ends the run if the grace window
+elapses without the summary.
 
 When a TSec challenge is provisioned, `bootstrap_solver()` seeds each `benchmark.target` entity alongside an `evidence`-level `network.reachability` capability scoped to the target address so `RollingHorizonPlanner` immediately produces an initial 3-step plan (`plan.json`) across bundled multi-domain skills (`network`, `web`, `pwn`, `crypto`, `cloud`, `benchmark`).
 

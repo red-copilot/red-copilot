@@ -624,7 +624,7 @@ run id 派生、gateway token 单次性）与失败上浮路径；`ActionRecord.
 
 【现状】前缀即生产者：`agent.*` / `tool.*`（tool.call、tool.result）/ `model.*` /
 `aci.*` / `world.*` / `solver.*`（decision、plan.updated、budget、finalize、round、
-verification、stop）/ `benchmark.*` / `budget.*`（exceeded、ignored）/ `run.*` /
+verification、stop）/ `benchmark.*` / `budget.*`（exceeded）/ `run.*` /
 `gateway.*` / `pi.*`。逐事件的生产/消费位置目前散落各模块（速查表见附录 B）。
 
 ### 8.3 审计与 replay
@@ -694,7 +694,7 @@ roadmap PLN-07 / PLN-06 / EXE-02）
   逐结果上限、内容寻址去重、evidence 级、不含原始输出）。设计：
   agent-engineering.md §8；roadmap：PLN-06 follow-up。（2026-10-15 已实施，
   见 PLN-06 证据。）
-- **`BudgetSpec` 契约与执行再对齐**：现状是**过渡状态**——`max_tokens/max_model_calls/
+- **`BudgetSpec` 契约与执行再对齐**：此前是**过渡状态**——`max_tokens/max_model_calls/
   max_tool_calls/max_cost_usd` 仍被解析但只记 `budget.ignored`，仅 wall_time 软执行。
   决策：**恢复多维强制，但作为软限制走既有 finalize 路径**（摘要在前、宽限在后），
   不回到 2026-10-14 之前的硬截断——多维上限触发 `budget.exceeded` 后开启与
@@ -743,7 +743,7 @@ roadmap 条目，而非渐进加回。
 `model.request/response/usage`、`action.intent`、`world.observe/hypothesis/capability/
 artifact/failure`、`aci.feedback`、`solver.decision/plan.updated/budget/finalize/round/
 verification/stop`、`world.ingested`、`world.state.updated`、`agent.started/finished/
-cancelled/session.crashed`、`budget.exceeded/ignored`、`event.id_conflict`、
+cancelled/session.crashed`、`budget.exceeded`、`event.id_conflict`、
 `agent.telemetry_error`。
 
 ### C. run 目录布局与信任级

@@ -86,7 +86,8 @@ Harness 的每个部件都能落到标准控制回路中的一个位置：
 - **控制器 = `solver_policy.py` + `planner.py` + Pi 推理**：纯决策与副作用分离（`RUN-01`），
   决策只依据目标、世界 revision、已证/待证证据、失败与剩余预算。
 - **执行器 = `agent.py` / `session.py` / `pi_adapter.py` / `tool_adapter.py` / `gateway.py`**。
-- **约束 = `budget.py`**：回路饱和；阈值触发停机而非静默超支。
+- **约束 = `budget.py`**：回路软饱和；阈值先触发收敛引导，越限后 finalize 写摘要再终止，
+  而非静默超支或硬截断。
 - **状态持久化 = `runtime/`**：`checkpoint.py`、`progress.py`、`lifecycle.py`。
 
 ## 三、精简判据与裁剪
@@ -147,7 +148,9 @@ CLI 命令随之移除：`serve`、`submit`、`worker`、`otel-export`、`suite`
   `target_actor`（`evidence` 级可信度）自动派生 `network.reachability` 能力，确保
   `RollingHorizonPlanner` 在开局即可激活匹配的领域技能。
 - **防重复**：`ProgressLedger` 用状态签名抑制相同重规划，避免稳态振荡。
-- **饱和**：`budget.py` 在 token/调用/成本/时间上做硬约束。
+- **饱和**：`budget.py` 对 token/调用/成本/时间维度做限幅，且全部为**软饱和**：任一维度
+  越限先触发 finalize（写摘要、停止开新探测），只有在宽限窗口内仍未收敛才终止，避免
+  硬截断丢失已获得的证据。
 - **采样/时滞**：每个 session 事件后写 checkpoint，崩溃恢复前要求未决动作对账，保证
   回路不会在效果未知时继续推进。
 - **可观测反馈**：`SolverLoop` 只把带证据引用的裁决并入反馈；无引用的信号降级为 claim。
