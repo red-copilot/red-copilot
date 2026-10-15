@@ -25,6 +25,11 @@ from .base import (
 from .runner import BenchmarkRunner
 from .tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig
 
+# One managed evaluation task may run for up to eight hours. The local wall
+# clock is capped at the platform's task limit (not the historical one-hour
+# cap) so a competition run can use its whole window.
+MAX_EVALUATION_WALL_TIME_SECONDS = 8 * 3600
+
 
 def _is_sdk_error(exc: Exception, name: str) -> bool:
     return type(exc).__name__ == name
@@ -330,7 +335,9 @@ async def run_tsec_challenges(
     """Run selected TSec challenges through the generic benchmark runtime."""
 
     results: list[dict] = []
-    effective_budgets = budgets.model_copy(update={"wall_time": min(budgets.wall_time, 3600)})
+    effective_budgets = budgets.model_copy(
+        update={"wall_time": min(budgets.wall_time, MAX_EVALUATION_WALL_TIME_SECONDS)}
+    )
     runner = BenchmarkRunner(runs_root=runs_root, skills_root=skills_root)
     try:
         async with TSecClientAdapter(config) as client:

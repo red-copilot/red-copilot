@@ -434,9 +434,11 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
     assert FakeBenchmarkRunner.last_kwargs["max_replans"] == 20
 
 
-def test_run_tsec_challenges_applies_platform_wall_time_ceiling(
+def test_run_tsec_challenges_allows_the_full_evaluation_window(
     monkeypatch, tmp_path: Path
 ) -> None:
+    from harness.benchmark.tsec_adapter import MAX_EVALUATION_WALL_TIME_SECONDS
+
     monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
     monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
 
@@ -450,5 +452,20 @@ def test_run_tsec_challenges_applies_platform_wall_time_ceiling(
         )
     )
 
+    # A declared budget below the platform ceiling passes through untouched...
     assert FakeBenchmarkRunner.last_budgets is not None
-    assert FakeBenchmarkRunner.last_budgets.wall_time == 3600
+    assert FakeBenchmarkRunner.last_budgets.wall_time == 7200
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=999_999),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+        )
+    )
+
+    # ...and an oversized declaration is clamped to the 8-hour task limit.
+    assert FakeBenchmarkRunner.last_budgets.wall_time == MAX_EVALUATION_WALL_TIME_SECONDS
+    assert MAX_EVALUATION_WALL_TIME_SECONDS == 8 * 3600

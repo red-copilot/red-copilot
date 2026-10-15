@@ -196,10 +196,11 @@ def test_pi_rpc_fails_closed_when_gateway_log_disappears_after_checkpoint(
 
     session._consume_gateway_events()
 
-    assert session._budget_exceeded == "invalid_telemetry"
+    assert session._budget_exceeded is None
+    assert session._telemetry_invalid is not None
 
 
-def test_pi_rpc_fails_closed_on_gateway_missing_usage_record(tmp_path: Path) -> None:
+def test_pi_rpc_degrades_on_gateway_missing_usage_record(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
     from harness.budget import UsageMetrics
@@ -217,7 +218,8 @@ def test_pi_rpc_fails_closed_on_gateway_missing_usage_record(tmp_path: Path) -> 
         json.dumps({"type": "model.usage_missing", "data": {"stream": False}}).encode()
     )
 
-    assert session._budget_exceeded == "invalid_telemetry"
+    assert session._budget_exceeded is None
+    assert session._telemetry_invalid is not None
 
 
 def test_tool_gateway_auth_policy_and_paths(tmp_path: Path) -> None:

@@ -432,12 +432,14 @@ def test_usage_accounting_rules_match_between_oneshot_and_pi_sessions(
     )
     pi_session._metrics = UsageMetrics()
     pi_session._budget_exceeded = None
+    pi_session._telemetry_invalid = None
     pi_session._account(event)
 
     assert oneshot.usage_metrics == UsageMetrics().as_dict()
     assert oneshot.usage_telemetry_valid is False
     assert pi_session._metrics.as_dict() == UsageMetrics().as_dict()
-    assert pi_session._budget_exceeded == "invalid_telemetry"
+    assert pi_session._budget_exceeded is None
+    assert pi_session._telemetry_invalid is not None
 
 
 def test_session_phase_tracker_records_valid_transitions_in_trace(tmp_path: Path) -> None:

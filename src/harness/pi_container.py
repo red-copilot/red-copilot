@@ -132,6 +132,10 @@ class ContainerPiRpcSession:
         self._settled = False
         self._timed_out = False
         self._budget_exceeded: str | None = None
+        # Invalid usage telemetry degrades accounting (that model call is not
+        # counted) instead of terminating the session: only wall_time is
+        # enforced, and a one-shot evaluation must survive a provider hiccup.
+        self._telemetry_invalid: str | None = None
         self._event_offset = 0
         self._agent_event_offset = 0
         self._agent_event_remainder = ""
@@ -731,27 +735,14 @@ class ContainerPiRpcSession:
         if charge_usage_event(self._metrics, event.type, event.data):
             return
         missing = event.type == "model.usage_missing"
-        self._budget_exceeded = "invalid_telemetry"
-        self.adapter.trace.emit(
-            "agent.telemetry_error",
-            data={
-                "message": (
-                    "model usage telemetry was missing"
-                    if missing
-                    else "invalid or negative Pi usage telemetry"
-                )
-            },
+        self._telemetry_invalid = (
+            "model usage telemetry was missing"
+            if missing
+            else "invalid or negative Pi usage telemetry"
         )
         self.adapter.trace.emit(
-            "budget.exceeded",
-            data={
-                "budget": self._budget_exceeded,
-                "reason": (
-                    "model usage telemetry was missing"
-                    if missing
-                    else "untrusted Pi usage telemetry was invalid"
-                ),
-            },
+            "agent.telemetry_error",
+            data={"message": self._telemetry_invalid},
         )
 
     def _consume_gateway_events(self) -> None:
@@ -810,12 +801,8 @@ class ContainerPiRpcSession:
         self.adapter.trace.emit(event.type, actor="gateway", data=event.data)
 
     def _invalid_gateway_telemetry(self, reason: str) -> None:
-        self._budget_exceeded = "invalid_telemetry"
+        self._telemetry_invalid = reason
         self.adapter.trace.emit("agent.telemetry_error", data={"message": reason})
-        self.adapter.trace.emit(
-            "budget.exceeded",
-            data={"budget": self._budget_exceeded, "reason": reason},
-        )
 
     async def _kill_container(self) -> None:
         await asyncio.to_thread(

@@ -489,7 +489,7 @@ def test_pi_json_protocol_normalizes_model_and_tool_events(monkeypatch, tmp_path
     ]
 
 
-def test_pi_usage_with_malformed_counters_is_preserved_for_fail_closed_handling(
+def test_pi_usage_with_malformed_counters_degrades_without_terminating(
     monkeypatch, tmp_path: Path
 ) -> None:
     adapter = _adapter(monkeypatch, tmp_path)
@@ -520,9 +520,12 @@ def test_pi_usage_with_malformed_counters_is_preserved_for_fail_closed_handling(
     session.adapter = adapter
     session._metrics = UsageMetrics()
     session._budget_exceeded = None
+    session._telemetry_invalid = None
     session._account(AgentEvent(type="model.usage", data=normalized[-1][1]))
 
-    assert session._budget_exceeded == "invalid_telemetry"
+    # Invalid telemetry degrades accounting instead of killing the session.
+    assert session._budget_exceeded is None
+    assert session._telemetry_invalid == "invalid or negative Pi usage telemetry"
     assert session._metrics.total_tokens == 0
 
 
@@ -594,7 +597,9 @@ def test_pi_message_end_without_usage_emits_missing_usage_event(monkeypatch, tmp
     ]
 
 
-def test_pi_rpc_rejects_missing_usage_event(monkeypatch, tmp_path: Path) -> None:
+def test_pi_rpc_degrades_missing_usage_event_without_terminating(
+    monkeypatch, tmp_path: Path
+) -> None:
     from harness.budget import UsageMetrics
 
     adapter = _adapter(monkeypatch, tmp_path)
@@ -602,19 +607,22 @@ def test_pi_rpc_rejects_missing_usage_event(monkeypatch, tmp_path: Path) -> None
     session.adapter = adapter
     session._metrics = UsageMetrics()
     session._budget_exceeded = None
+    session._telemetry_invalid = None
 
     session._account(AgentEvent(type="model.usage_missing", data={"source": "pi"}))
 
-    assert session._budget_exceeded == "invalid_telemetry"
+    assert session._budget_exceeded is None
+    assert session._telemetry_invalid == "model usage telemetry was missing"
     assert session._metrics.total_tokens == 0
 
 
-def test_pi_usage_rejects_total_below_input_and_output_sum(monkeypatch, tmp_path: Path) -> None:
+def test_pi_usage_degrades_total_below_input_and_output_sum(monkeypatch, tmp_path: Path) -> None:
     adapter = _adapter(monkeypatch, tmp_path)
     session = object.__new__(ContainerPiRpcSession)
     session.adapter = adapter
     session._metrics = UsageMetrics()
     session._budget_exceeded = None
+    session._telemetry_invalid = None
 
     session._account(
         AgentEvent(
@@ -623,7 +631,8 @@ def test_pi_usage_rejects_total_below_input_and_output_sum(monkeypatch, tmp_path
         )
     )
 
-    assert session._budget_exceeded == "invalid_telemetry"
+    assert session._budget_exceeded is None
+    assert session._telemetry_invalid == "invalid or negative Pi usage telemetry"
     assert session._metrics.total_tokens == 0
 
 
@@ -1207,3 +1216,43 @@ def test_pi_tool_output_feeds_fact_extraction(monkeypatch, tmp_path: Path) -> No
     facts = extract_facts(data)
     assert {fact["type"] for fact in facts} == {"web.endpoint", "network.service"}
     assert len(facts) == 3
+
+
+def test_pi_rpc_session_survives_missing_usage_mid_stream(monkeypatch, tmp_path: Path) -> None:
+    """A provider response without usage data must not end the session.
+
+    Only wall_time is enforced; missing usage degrades accounting for that one
+    call instead of killing a one-shot evaluation run.
+    """
+    import asyncio
+
+    from harness.budget import UsageMetrics
+    from harness.trace import TraceRecorder
+
+    adapter = _adapter(monkeypatch, tmp_path)
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-tel", "task-tel")
+    adapter.trace = trace
+    session = object.__new__(ContainerPiRpcSession)
+    session.adapter = adapter
+    session._metrics = UsageMetrics()
+    session._budget_exceeded = None
+    session._telemetry_invalid = None
+
+    session._account(AgentEvent(type="model.usage_missing", data={"source": "pi"}))
+    session._account(
+        AgentEvent(
+            type="model.usage",
+            data={"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+        )
+    )
+
+    # The session kept running: later usage still accumulates.
+    assert session._metrics.total_tokens == 7
+    assert session._budget_exceeded is None
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(row["type"] == "agent.telemetry_error" for row in rows)
+    assert not any(row["type"] == "budget.exceeded" for row in rows)
+    del asyncio
