@@ -65,6 +65,19 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
+# Kali's nmap carries file capabilities (net_bind_service+net_admin+net_raw).
+# The managed sandbox grants only the default container set (no NET_ADMIN), so
+# executing the file-capability binary would fail with EPERM before nmap even
+# starts. Strip them: root plus the default NET_RAW is enough for scanning,
+# and masscan ships without file capabilities.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libcap2-bin \
+    && test -x /usr/lib/nmap/nmap \
+    && setcap -r /usr/lib/nmap/nmap \
+    && nmap --version | head -1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /work
 
 # Install the Harness itself from the build context (must run from the
