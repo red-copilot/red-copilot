@@ -872,7 +872,7 @@ def test_pi_rpc_session_sends_prompt_and_steers_before_settled(monkeypatch, tmp_
         ),
     ],
 )
-def test_pi_rpc_session_accounts_usage_without_enforcing_non_time_limits(
+def test_pi_rpc_session_accounts_usage_with_soft_budget_crossing(
     monkeypatch,
     tmp_path: Path,
     budget_name: str,
@@ -963,13 +963,120 @@ def test_pi_rpc_session_accounts_usage_without_enforcing_non_time_limits(
     events, result = asyncio.run(scenario())
 
     assert [event.type for event in events] == event_types
-    # Only the soft wall-clock deadline bounds a run: usage above a declared
-    # token/call/cost ceiling is still charged, but no budget stop is raised.
+    # Crossing a usage ceiling is soft: the crossing is traced, the stream keeps
+    # flowing through the settle, usage stays charged, and only the grace
+    # window (not the crossing itself) can end the session. (The kill in the
+    # teardown log is result_drain, the normal post-stream cleanup.)
+    trace_text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert '"budget.exceeded"' in trace_text
+    assert f'"budget":"{budget_name}"' in trace_text
     assert result.budget_exceeded is None
     assert result.timed_out is False
-    trace_text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
-    assert '"budget.exceeded"' not in trace_text
     assert getattr(result.metrics, metric_name) == metric_value
+
+
+def test_pi_rpc_session_kills_container_after_usage_grace_window(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FAKE_PROVIDER_KEY", "test-key")
+    monkeypatch.setattr("harness.pi_container.FINALIZE_GRACE_SECONDS", 0.2)
+    adapter = _adapter(monkeypatch, tmp_path)
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+    task = task.model_copy(
+        update={"budgets": task.budgets.model_copy(update={"max_tokens": 2})}
+    )
+    run_dir = tmp_path / "run-budget-grace"
+    run_dir.mkdir()
+    killed: list[str] = []
+
+    class FakeWriter:
+        def write(self, value: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def is_closing(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    class BlockingReader:
+        def __init__(self) -> None:
+            self.lines = [
+                {"type": "session", "id": "budget-grace-session"},
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "usage": {"input": 2, "output": 2, "totalTokens": 4},
+                    },
+                },
+            ]
+
+        async def readline(self) -> bytes:
+            if self.lines:
+                return (json.dumps(self.lines.pop(0)) + "\n").encode()
+            await asyncio.sleep(30)  # never settles: the deadline must fire
+            return b""
+
+    class FakeProcess:
+        stdin = FakeWriter()
+        stdout = BlockingReader()
+        returncode = None
+
+        async def wait(self) -> int:
+            self.returncode = -9
+            return self.returncode
+
+    fake_process = FakeProcess()
+    monkeypatch.setattr(
+        adapter,
+        "_docker",
+        lambda command, *, cwd, check=True: type(
+            "Completed", (), {"returncode": 0, "stdout": "", "stderr": ""}
+        )(),
+    )
+    monkeypatch.setattr(
+        "harness.pi_container.asyncio.create_subprocess_exec",
+        lambda *args, **kwargs: asyncio.sleep(0, result=fake_process),
+    )
+
+    def fake_run(command, **kwargs):
+        if command[1] == "kill":
+            killed.append(command[-1])
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr("harness.pi_container.subprocess.run", fake_run)
+
+    async def scenario():
+        session = await ContainerPiRpcSession.start(
+            adapter,
+            context=AgentRunContext(
+                task=task,
+                task_dir=Path("benchmarks/examples/hello").resolve(),
+                run_dir=run_dir,
+                environment_project=None,
+                environment_network=None,
+                seed=1,
+            ),
+        )
+        events = [event async for event in session.events()]
+        result = await session.result()
+        return events, result
+
+    events, result = asyncio.run(scenario())
+
+    assert [event.type for event in events] == [
+        "pi.session",
+        "model.response",
+        "model.usage",
+    ]
+    assert killed, "the container must be killed once the grace window elapsed"
+    assert result.budget_exceeded == "max_tokens"
+    assert result.metrics.total_tokens == 4
 
 
 def test_pi_offline_network_profile_forces_none(monkeypatch, tmp_path: Path) -> None:

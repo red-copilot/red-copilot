@@ -110,6 +110,8 @@ def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path
     session._gateway_event_offset = 0
     session._metrics = UsageMetrics()
     session._budget_exceeded = None
+    session._usage_exceeded = None
+    session._usage_deadline = None
     task = load_task(Path("benchmarks/examples/hello/task.yaml"))
     session._task = task.model_copy(
         update={"budgets": task.budgets.model_copy(update={"max_tokens": 10})}
@@ -130,9 +132,11 @@ def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path
     assert session._metrics.model_calls == 1
     assert session._metrics.total_tokens == 12
     assert session._metrics.cost_usd == 0.0001
-    # Token ceilings are declared but no longer enforced, so trusted gateway
-    # usage is still charged exactly once without stopping the run.
+    # The trusted gateway usage crossing the declared token ceiling is charged
+    # exactly once and arms the soft grace window instead of stopping the run.
     assert session._budget_exceeded is None
+    assert session._usage_exceeded == "max_tokens"
+    assert session._usage_deadline is not None
     assert checkpoint.gateway_event_offset == trusted_events.stat().st_size
 
 

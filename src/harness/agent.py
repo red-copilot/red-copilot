@@ -300,6 +300,12 @@ def _run_monitored(
             if exceeded:
                 _terminate_process(proc)
                 break
+            if monitor.usage_deadline_reached():
+                # A usage ceiling crossed earlier and its finalize grace window
+                # elapsed without the run finishing: stop and report the dimension.
+                monitor.mark_usage_exceeded()
+                _terminate_process(proc)
+                break
             if time.monotonic() - started > task.budgets.wall_time + FINALIZE_GRACE_SECONDS:
                 timed_out = True
                 trace.emit(

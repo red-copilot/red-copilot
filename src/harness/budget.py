@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,42 +16,48 @@ from .trace import TraceRecorder
 MAX_AGENT_TELEMETRY_BYTES = 64 * 1024 * 1024
 MAX_AGENT_TELEMETRY_CHUNK_BYTES = 1024 * 1024
 MAX_AGENT_TELEMETRY_EVENT_BYTES = 4 * 1024 * 1024
-# After the soft wall-clock deadline the Harness stops enforcing limits and
-# steers the Agent to summarise what it found and what it was trying to do. The
-# container is only killed if the Agent never settles within this grace window.
+# After the soft wall-clock deadline - or after a usage ceiling is crossed -
+# the Harness stops enforcing limits and steers the Agent to summarise what it
+# found and what it was trying to do. The container is only killed if the Agent
+# never settles within this grace window.
 FINALIZE_GRACE_SECONDS = 180
 
+_USAGE_DIMENSIONS = ("max_tokens", "max_model_calls", "max_tool_calls", "max_cost_usd")
 
-def enforced_budget_limits(spec: BudgetSpec) -> tuple[dict[str, float], list[str]]:
-    """Return the limits the Harness still enforces, plus ignored declarations.
 
-    Only the (soft) wall-clock deadline bounds a run. Token, model-call,
-    tool-call and cost ceilings are still parsed for backwards compatibility but
-    no longer stop a run; callers surface them so an ignored limit is visible
-    rather than silently dropped.
+def enforced_budget_limits(spec: BudgetSpec) -> dict[str, float]:
+    """Return the limits the Harness enforces for a run.
+
+    Every declared dimension is enforced softly: crossing one does not kill
+    the supervised process on the spot, it opens the shared finalize grace
+    window (steer to summarise, then stop) - the same semantics the wall-clock
+    deadline uses. Unset dimensions stay absent.
     """
-    ignored = [
-        name
-        for name in ("max_tokens", "max_model_calls", "max_tool_calls", "max_cost_usd")
-        if getattr(spec, name) is not None
-    ]
-    return {"wall_time": float(spec.wall_time)}, ignored
-
-
-def apply_budget_limits(spec: BudgetSpec, trace: TraceRecorder) -> dict[str, float]:
-    """Project a ``BudgetSpec`` onto enforced limits, surfacing ignored ones.
-
-    One place decides what a declared budget becomes at runtime, so entry
-    points cannot drift apart on which dimensions are dropped.
-    """
-    limits, ignored = enforced_budget_limits(spec)
-    if ignored:
-        trace.emit(
-            "budget.ignored",
-            actor="harness",
-            data={"ignored": ignored, "enforced": ["wall_time"]},
-        )
+    limits: dict[str, float] = {"wall_time": float(spec.wall_time)}
+    for name in _USAGE_DIMENSIONS:
+        value = getattr(spec, name)
+        if value is not None:
+            limits[name] = float(value)
     return limits
+
+
+def _usage_value(metrics: UsageMetrics, dimension: str) -> float:
+    if dimension == "max_tokens":
+        return float(metrics.total_tokens)
+    if dimension == "max_model_calls":
+        return float(metrics.model_calls)
+    if dimension == "max_tool_calls":
+        return float(metrics.tool_calls)
+    return float(metrics.cost_usd)
+
+
+def usage_budget_exceeded(metrics: UsageMetrics, spec: BudgetSpec) -> str | None:
+    """First declared usage dimension whose charged usage reached its ceiling."""
+    for dimension in _USAGE_DIMENSIONS:
+        limit = getattr(spec, dimension)
+        if limit is not None and _usage_value(metrics, dimension) >= limit:
+            return dimension
+    return None
 
 
 @dataclass
@@ -142,6 +149,28 @@ class BudgetMonitor:
         self._remainder = b""
         self._event_file_identity: tuple[int, int] | None = None
         self.exceeded: str | None = None
+        # Usage ceilings are soft: the crossing opens the finalize grace
+        # window instead of stopping the supervised process on the spot.
+        self._usage_exceeded: str | None = None
+        self._usage_deadline: float | None = None
+
+    @property
+    def usage_exceeded(self) -> str | None:
+        """Usage dimension that crossed its declared ceiling, if any."""
+        return self._usage_exceeded
+
+    def usage_deadline_reached(self) -> bool:
+        """True once the grace window after a usage crossing has elapsed."""
+        return self._usage_deadline is not None and time.monotonic() >= self._usage_deadline
+
+    def mark_usage_exceeded(self) -> None:
+        """Report the crossed dimension as the run's exceeded budget.
+
+        Called by supervision loops at the grace edge, so the result carries
+        the exhausted dimension the same way invalid telemetry does.
+        """
+        if self._usage_exceeded is not None:
+            self.exceeded = self._usage_exceeded
 
     def poll(self) -> str | None:
         if self.exceeded:
@@ -232,9 +261,22 @@ class BudgetMonitor:
                 data={"budget": self.exceeded, "reason": "untrusted usage telemetry was invalid"},
             )
             return
-        # Token/call/cost limits are no longer enforced: only the wall-clock
-        # deadline bounds a run, and it is soft (see FINALIZE_GRACE_SECONDS).
-        # Telemetry is still validated above so untrusted usage fails closed.
+        # Declared usage ceilings are enforced softly: the crossing is traced
+        # once and opens the finalize grace window; the supervision loop stops
+        # the process only if the window elapses without the run finishing.
+        exceeded_dimension = usage_budget_exceeded(self.metrics, self.budgets)
+        if exceeded_dimension is not None and self._usage_deadline is None:
+            self._usage_exceeded = exceeded_dimension
+            self._usage_deadline = time.monotonic() + FINALIZE_GRACE_SECONDS
+            self.trace.emit(
+                "budget.exceeded",
+                data={
+                    "budget": exceeded_dimension,
+                    "limit": getattr(self.budgets, exceeded_dimension),
+                    "observed": _usage_value(self.metrics, exceeded_dimension),
+                    "grace_seconds": FINALIZE_GRACE_SECONDS,
+                },
+            )
 
     @staticmethod
     def _reject_json_constant(value: str) -> None:

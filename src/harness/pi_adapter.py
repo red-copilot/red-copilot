@@ -655,6 +655,15 @@ class PiAdapter:
                             ["docker", "kill", container_name], capture_output=True, check=False
                         )
                         break
+                    if monitor.usage_deadline_reached():
+                        # A usage ceiling crossed earlier and its finalize grace
+                        # window elapsed: stop and report the dimension.
+                        monitor.mark_usage_exceeded()
+                        _terminate_process(proc)
+                        subprocess.run(
+                            ["docker", "kill", container_name], capture_output=True, check=False
+                        )
+                        break
                     if (
                         time.monotonic() - started
                         > task.budgets.wall_time + FINALIZE_GRACE_SECONDS

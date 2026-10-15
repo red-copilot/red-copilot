@@ -628,20 +628,30 @@ def test_benchmark_runner_reports_agent_budget_exhaustion(monkeypatch, tmp_path:
     assert result["termination_reason"] == "budget-exhausted"
 
 
-def test_benchmark_runner_keeps_running_past_token_and_cost_ceilings(
+def test_benchmark_runner_reports_token_blowout_as_soft_budget_exhaustion(
     monkeypatch, tmp_path: Path
 ) -> None:
-    # Token/call/cost ceilings are no longer enforced: only the soft wall-clock
-    # deadline bounds a run, so a token blowout must not end it.
+    # A declared token ceiling is enforced softly: the blowout steers
+    # finalize first (summary before stop) and the run is classified as
+    # budget-exhausted instead of silently finishing.
+    agent = SolverDetectedBudgetAgentAdapter()
     result = _run_case_with_agent(
         monkeypatch,
         tmp_path,
-        SolverDetectedBudgetAgentAdapter(),
+        agent,
         BudgetSpec(wall_time=30, max_tokens=100),
         adapter=UnsuccessfulBenchmarkAdapter(),
     )
-    assert result["status"] == "finished"
-    assert result["termination_reason"] is None
+    assert result["status"] == "budget_exceeded"
+    assert result["termination_reason"] == "budget-exhausted"
+    finalize = [
+        item
+        for item in agent.session.feedback
+        if item.type == "solver.finalize"
+    ]
+    assert len(finalize) == 1
+    assert finalize[0].data["reason"] == "soft_budget_limit"
+    assert finalize[0].data["budget"] == "max_tokens"
 
 
 def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path: Path) -> None:

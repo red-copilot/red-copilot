@@ -73,6 +73,10 @@ class ProgressLedger(BaseModel):
     # Extra wall-clock room granted after the soft deadline so a run can stop
     # exploring and write its final summary instead of being cut off.
     wall_time_grace_seconds: float = Field(default=0.0, ge=0.0)
+    # When a usage dimension first crossed its ceiling. The solver holds the
+    # budget STOP inside the grace window counted from this stamp, mirroring
+    # the adapters' kill deadline, so exhaustion cannot cut the summary short.
+    budget_exceeded_at: datetime | None = None
     tool_calls: int = 0
     model_calls: int = 0
     accepted_submissions: int = 0
@@ -323,6 +327,43 @@ class ProgressLedger(BaseModel):
         elapsed = max(0.0, (datetime.now(UTC) - self.started_at).total_seconds())
         return elapsed >= limit
 
+    def _budget_used(self, key: str) -> float | None:
+        if key == "max_model_calls":
+            return float(self.model_calls)
+        if key == "max_tool_calls":
+            return float(self.tool_calls)
+        if key == "max_tokens":
+            return self.budget_used.get("tokens")
+        if key == "max_cost_usd":
+            return self.budget_used.get("cost_usd")
+        return None
+
+    @property
+    def budget_exceeded_dimension(self) -> str | None:
+        """The enforced dimension that crossed its ceiling, if any."""
+        if self.wall_time_expired:
+            return "wall_time"
+        for key, limit in sorted(self.budget_limits.items()):
+            if key == "wall_time":
+                continue
+            used = self._budget_used(key)
+            if limit > 0 and used is not None and used >= limit:
+                return key
+        return None
+
+    @property
+    def budget_expired(self) -> bool:
+        """True once the soft wall-clock deadline or any usage ceiling passed."""
+        return self.budget_exceeded_dimension is not None
+
+    @property
+    def budget_grace_elapsed(self) -> bool:
+        """True once the post-exhaustion grace window is over."""
+        if self.budget_exceeded_at is None:
+            return False
+        elapsed = (datetime.now(UTC) - self.budget_exceeded_at).total_seconds()
+        return elapsed >= self.wall_time_grace_seconds
+
     def budget_fractions(self) -> dict[str, float]:
         """Per-dimension remaining budget fraction (``1.0`` when untouched)."""
         fractions: dict[str, float] = {}
@@ -334,15 +375,8 @@ class ProgressLedger(BaseModel):
                 effective = limit + self.wall_time_grace_seconds
                 fractions[key] = max(0.0, min(1.0, (effective - elapsed) / effective))
                 continue
-            if key == "max_model_calls":
-                used = float(self.model_calls)
-            elif key == "max_tool_calls":
-                used = float(self.tool_calls)
-            elif key == "max_tokens":
-                used = self.budget_used.get("tokens", 0.0)
-            elif key == "max_cost_usd":
-                used = self.budget_used.get("cost_usd", 0.0)
-            else:
+            used = self._budget_used(key)
+            if used is None:
                 continue
             fractions[key] = max(0.0, min(1.0, (limit - used) / limit))
         return fractions

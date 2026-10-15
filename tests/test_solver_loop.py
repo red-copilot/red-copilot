@@ -718,6 +718,46 @@ def test_solver_loop_steers_finalize_once_after_the_soft_deadline(tmp_path: Path
     assert len([item for item in session.feedback if item.type == "solver.finalize"]) == 1
 
 
+def test_solver_loop_finalize_on_usage_exhaustion_holds_stop_in_grace(tmp_path: Path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger(budget_limits={"max_tokens": 100}, wall_time_grace_seconds=180)
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-finalize", "task-finalize")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="solve the target",
+        planned_world_revision=world.snapshot.revision,
+        skills=[],
+    )
+    usage = AgentEvent(type="model.usage", data={"total_tokens": 120, "cost_usd": 0.0})
+
+    decision = asyncio.run(loop.process_event(session, usage))
+    finalize = [item for item in session.feedback if item.type == "solver.finalize"]
+    assert len(finalize) == 1
+    assert finalize[0].data["reason"] == "soft_budget_limit"
+    assert finalize[0].data["budget"] == "max_tokens"
+    assert progress.budget_exceeded_at is not None
+    # The policy stop for an exhausted budget is held while the grace window
+    # is open, so the summary steer is not immediately overridden by a stop.
+    assert decision.action is SolverAction.CONTINUE
+    assert decision.reason == "budget_grace_window"
+
+    decision = asyncio.run(loop.process_event(session, usage))
+    assert decision.action is SolverAction.CONTINUE
+    assert decision.reason == "budget_grace_window"
+    assert len([item for item in session.feedback if item.type == "solver.finalize"]) == 1
+
+    # Once the grace window has elapsed the budget stop goes through.
+    progress.budget_exceeded_at -= timedelta(seconds=181)
+    decision = asyncio.run(loop.process_event(session, usage))
+    assert decision.action is SolverAction.STOP
+    assert decision.reason == "budget_exhausted"
+
+
 def test_solver_loop_opens_a_round_when_the_graph_changes(tmp_path: Path) -> None:
     world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     progress = ProgressLedger()

@@ -261,16 +261,6 @@ def tsec(
     """Run TSec Benchmark challenges through the generic benchmark runtime."""
     spec = load_agent(agent)
     config = load_tsec_config(base_url_env=base_url_env, token_env=token_env)
-    if any(
-        value is not None
-        for value in (max_tokens, max_model_calls, max_tool_calls, max_cost_usd)
-    ):
-        typer.echo(
-            "warning: token, model-call, tool-call and cost budgets are no longer "
-            "enforced; only --wall-time bounds a run, and it is a soft deadline "
-            "followed by a finalize grace window",
-            err=True,
-        )
     budgets = BudgetSpec(
         wall_time=wall_time,
         max_tokens=max_tokens,

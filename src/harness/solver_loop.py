@@ -5,6 +5,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
@@ -424,6 +425,7 @@ class SolverLoop:
             session, event_type=event.type, world_changed=after_revision != before_revision
         )
         decision = self.decide(event_type=event.type)
+        decision = self._hold_stop_for_budget_grace(decision)
         if decision.action is SolverAction.REPLAN:
             plan = await self.maybe_replan(session)
             if plan is None:
@@ -581,26 +583,40 @@ class SolverLoop:
             )
 
     async def _maybe_steer_finalize(self, session: AgentSession) -> None:
-        """Stop the Agent exploring at the soft deadline and ask for a summary.
+        """Stop the Agent exploring at a soft limit and ask for a summary.
 
-        The run is not cut off: the wall-clock limit is soft, and the remaining
-        grace window belongs to writing down what was found (facts) and what was
-        being attempted (intents) so a timed-out run still leaves usable state.
+        The run is not cut off: the wall-clock deadline and every declared
+        usage ceiling are soft, and the remaining grace window belongs to
+        writing down what was found (facts) and what was being attempted
+        (intents) so a timed-out or budget-exhausted run still leaves usable
+        state.
         """
         if self._finalize_steered or self.progress.objective_completed:
             return
-        if not self.progress.wall_time_expired:
+        exceeded = self.progress.budget_exceeded_dimension
+        if exceeded is None:
             return
+        if exceeded != "wall_time" and self.progress.budget_exceeded_at is None:
+            # Stamp when a usage dimension first crossed so the budget STOP can
+            # be held for the grace window counted from here.
+            self.progress.budget_exceeded_at = datetime.now(UTC)
+        soft_usage = exceeded != "wall_time"
+        data: dict = {"reason": "soft_budget_limit" if soft_usage else "soft_time_limit"}
+        if soft_usage:
+            data["budget"] = exceeded
         self._finalize_steered = True
-        self.trace.emit("solver.finalize", actor="harness", data={"reason": "soft_time_limit"})
+        self.trace.emit("solver.finalize", actor="harness", data=data)
+        lead = (
+            "A run budget is exhausted." if soft_usage else "Time is up."
+        )
         await session.observe(
             AgentObservation(
                 type="solver.finalize",
                 data={
-                    "reason": "soft_time_limit",
+                    **data,
                     "summary_file": "agent.summary.md",
                     "message": (
-                        "Time is up. Stop launching new probes. Write a short report to "
+                        f"{lead} Stop launching new probes. Write a short report to "
                         "$HARNESS_SUMMARY_FILE covering: confirmed facts (with the evidence "
                         "that confirms them), unconfirmed hypotheses, what you tried and what "
                         "it ruled out, and the intents you were pursuing but did not finish. "
@@ -609,6 +625,23 @@ class SolverLoop:
                 },
             )
         )
+
+    def _hold_stop_for_budget_grace(self, decision: SolverDecision) -> SolverDecision:
+        """Keep the loop alive inside the post-exhaustion grace window.
+
+        A usage dimension that crossed its ceiling steers finalize first; the
+        policy's budget STOP goes through only once the grace window has
+        elapsed, which is the same edge the adapters kill on. Without the
+        hold, exhaustion would stop the session before the summary is written.
+        """
+        if (
+            decision.action is SolverAction.STOP
+            and decision.reason == "budget_exhausted"
+            and self.progress.budget_exceeded_at is not None
+            and not self.progress.budget_grace_elapsed
+        ):
+            return SolverDecision(SolverAction.CONTINUE, "budget_grace_window")
+        return decision
 
     def _round_state(self, snapshot: WorldSnapshot) -> tuple[frozenset[str], frozenset[str]]:
         """Established fact ids and ruled-out intent ids currently in the graph.

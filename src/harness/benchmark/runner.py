@@ -16,7 +16,7 @@ from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
 from .base import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
-from ..budget import apply_budget_limits
+from ..budget import enforced_budget_limits
 from ..runtime import bootstrap_solver
 from ..agent_workspace import create_agent_workspace, sync_agent_workspace
 from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
@@ -209,7 +209,7 @@ class BenchmarkRunner:
                 )
                 for target in session.targets
             ]
-            budget_limits = apply_budget_limits(budgets, trace)
+            budget_limits = enforced_budget_limits(budgets)
             runtime = bootstrap_solver(
                 run_dir=run_dir,
                 trace=trace,

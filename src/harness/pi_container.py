@@ -24,7 +24,13 @@ from .agent import (
     build_container_command,
 )
 from .agent_workspace import prepare_agent_task_view
-from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor, UsageMetrics, charge_usage_event
+from .budget import (
+    FINALIZE_GRACE_SECONDS,
+    BudgetMonitor,
+    UsageMetrics,
+    charge_usage_event,
+    usage_budget_exceeded,
+)
 from .models import AgentSpec, TaskSpec
 from .pi_adapter import PiAdapter
 from .secureio import open_regular_file, read_regular_text
@@ -130,6 +136,10 @@ class ContainerPiRpcSession:
         self._settled = False
         self._timed_out = False
         self._budget_exceeded: str | None = None
+        # Usage ceilings are soft: the crossing opens the finalize grace window
+        # and only the window's edge (not the crossing) ends the session.
+        self._usage_exceeded: str | None = None
+        self._usage_deadline: float | None = None
         self._event_offset = 0
         self._agent_event_offset = 0
         self._agent_event_remainder = ""
@@ -422,19 +432,36 @@ class ContainerPiRpcSession:
             for event in self._consume_agent_events():
                 yield event
             hard_deadline = task.budgets.wall_time + FINALIZE_GRACE_SECONDS
-            remaining = hard_deadline - (time.monotonic() - self._started)
-            if remaining <= 0:
-                self._timed_out = True
-                self.adapter.trace.emit(
-                    "budget.exceeded",
-                    data={
-                        "budget": "wall_time",
-                        "limit": task.budgets.wall_time,
-                        "grace_seconds": FINALIZE_GRACE_SECONDS,
-                    },
-                )
+            wall_remaining = hard_deadline - (time.monotonic() - self._started)
+            usage_remaining = (
+                self._usage_deadline - time.monotonic()
+                if self._usage_deadline is not None
+                else None
+            )
+            if (wall_remaining <= 0) or (
+                usage_remaining is not None and usage_remaining <= 0
+            ):
+                if usage_remaining is not None and usage_remaining <= wall_remaining:
+                    # The exhausted usage dimension owns this stop; its crossing
+                    # was already traced when the ceiling was reached.
+                    self._budget_exceeded = self._usage_exceeded
+                else:
+                    self._timed_out = True
+                    self.adapter.trace.emit(
+                        "budget.exceeded",
+                        data={
+                            "budget": "wall_time",
+                            "limit": task.budgets.wall_time,
+                            "grace_seconds": FINALIZE_GRACE_SECONDS,
+                        },
+                    )
                 await self._kill_container()
                 break
+            remaining = (
+                wall_remaining
+                if usage_remaining is None
+                else min(wall_remaining, usage_remaining)
+            )
             try:
                 line = startup_records.pop(0) if startup_records else await asyncio.wait_for(
                     self.process.stdout.readline(), timeout=min(remaining, 0.1)
@@ -727,6 +754,20 @@ class ContainerPiRpcSession:
 
     def _account(self, event: AgentEvent) -> None:
         if charge_usage_event(self._metrics, event.type, event.data):
+            # A declared usage ceiling crossing is soft: trace it once and arm
+            # the finalize grace window; the events loop kills only at the edge.
+            exceeded_dimension = usage_budget_exceeded(self._metrics, self._task.budgets)
+            if exceeded_dimension is not None and self._usage_deadline is None:
+                self._usage_exceeded = exceeded_dimension
+                self._usage_deadline = time.monotonic() + FINALIZE_GRACE_SECONDS
+                self.adapter.trace.emit(
+                    "budget.exceeded",
+                    data={
+                        "budget": exceeded_dimension,
+                        "limit": getattr(self._task.budgets, exceeded_dimension),
+                        "grace_seconds": FINALIZE_GRACE_SECONDS,
+                    },
+                )
             return
         missing = event.type == "model.usage_missing"
         self._budget_exceeded = "invalid_telemetry"
@@ -1109,6 +1150,12 @@ class ContainerPiAdapter(PiAdapter):
                     )
                     exceeded = monitor.poll()
                     if exceeded:
+                        _terminate_process(proc)
+                        break
+                    if monitor.usage_deadline_reached():
+                        # A usage ceiling crossed earlier and its finalize grace
+                        # window elapsed: stop and report the dimension.
+                        monitor.mark_usage_exceeded()
                         _terminate_process(proc)
                         break
                     if (

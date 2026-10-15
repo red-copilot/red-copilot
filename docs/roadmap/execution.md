@@ -85,6 +85,30 @@ ruled-out paths; `summary.json` carried 18 facts plus 17 intents. Regression cov
 `tests/test_solver_loop.py` and `tests/test_runtime_projections.py`. Validation on 2026-10-14:
 full suite passed (500 passed, 3 skipped); Ruff clean.
 
+Multi-dimension budgets are enforced again on 2026-10-15 (branch `feat/agent-engineering-midterm`),
+as soft limits riding that same finalize path rather than the pre-reduction hard cuts.
+`enforced_budget_limits` now returns every declared dimension (the `budget.ignored` event and the
+`tsec` CLI warning are gone), `usage_budget_exceeded` is the single pure crossing check, and every
+accounting path (one-shot `BudgetMonitor`, Pi RPC session accounting including trusted Gateway
+usage) arms the shared `FINALIZE_GRACE_SECONDS` window on the first crossing instead of stopping:
+the crossing is traced as `budget.exceeded` with dimension/limit/observed, supervision loops kill
+only at the window edge (mirroring wall-time + grace), and `SolverLoop` steers `solver.finalize`
+(`reason=soft_budget_limit`, `budget=<dim>`) while holding the policy's `budget_exhausted` STOP
+inside the window (`budget_grace_window`), so exhaustion cannot cut the summary short.
+`ProgressLedger` persists `budget_exceeded_at` for the grace window and exposes
+`budget_exceeded_dimension`/`budget_expired`; usage dimensions also feed the existing 50/25/10%
+convergence steers. Regression coverage: `tests/test_budget.py` (enforced dimensions, pure
+crossing check, soft monitor crossing with grace edge, under-limit quiet), `tests/test_solver_loop.py`
+(finalize on usage exhaustion, STOP held in grace, STOP after grace), `tests/test_pi_adapter.py`
+(all four dimensions cross softly and keep the stream alive through settle; container killed at
+the grace edge with `budget_exceeded=<dim>`), `tests/test_gateway.py` (trusted Gateway crossing
+arms the window exactly once), `tests/test_benchmark_streaming.py` (token blowout → finalize steer
+plus `budget_exceeded` classification). Validation: full suite 567 passed / 3 skipped
+(Docker-gated); Ruff clean; architecture and size ceilings pass (16,349 of 16,400 source lines).
+Live container budget smoke remains open with the other EXE-02 Docker gates. Maintainer review
+requested: this restores declared-budget termination semantics that the soft-deadline reduction
+had suspended.
+
 ### EXE-03 [~] P1 — Offline profiles and deterministic build
 Deliver: separate `target-only`, `model-allowed` and `fully-offline` networking; pin image dependencies, pre-install binaries and reference data; no package installation required while solving.
 Accept: no-public-egress smoke suite in a clean runner, plus network policy tests and documented model endpoint choices.

@@ -686,12 +686,14 @@ roadmap PLN-07 / PLN-06 / EXE-02）
   前沿行升级为目录条目（`requires→produces` 紧凑记法），后向链展开顺带收集
   pending 意图的未满足前置，渲染为 "Next unlocks" 段——告诉 Agent 建立什么事实
   能解锁什么能力。纯元数据投影，不越信任边界。设计：agent-engineering.md §7；
-  roadmap：PLN-07。
+  roadmap：PLN-07。（2026-10-15 已实施：`cognition.py::next_unlocks` +
+  目录渲染，见 PLN-07 证据。）
 - **回合质量与事实抽取**：`extract.py` 在 nmap/gobuster/dirb/ffuf 之外新增
   curl -v 配对、whatweb、hydra、sqlmap、nikto 五种固定格式，让 `graph_changed`
   回合建立在真实证据增长上而非 stall 兜底。保守原则不变（高区分度正则、
   逐结果上限、内容寻址去重、evidence 级、不含原始输出）。设计：
-  agent-engineering.md §8；roadmap：PLN-06 follow-up。
+  agent-engineering.md §8；roadmap：PLN-06 follow-up。（2026-10-15 已实施，
+  见 PLN-06 证据。）
 - **`BudgetSpec` 契约与执行再对齐**：现状是**过渡状态**——`max_tokens/max_model_calls/
   max_tool_calls/max_cost_usd` 仍被解析但只记 `budget.ignored`，仅 wall_time 软执行。
   决策：**恢复多维强制，但作为软限制走既有 finalize 路径**（摘要在前、宽限在后），
@@ -699,7 +701,8 @@ roadmap PLN-07 / PLN-06 / EXE-02）
   wall-time 同构的宽限窗口（`FINALIZE_GRACE_SECONDS`），窗口内求解器发
   `solver.finalize` 并扣住策略 STOP，窗口外适配器才终止进程；删除死字段会破坏
   TaskSpec 向后兼容且示例任务都在声明这些维度。`budget.ignored` 与 CLI/tsec
-  警告随之移除。roadmap：EXE-02。
+  警告随之移除。roadmap：EXE-02。（2026-10-15 已实施，见 EXE-02 证据；
+  终止语义恢复，请求维护者评审。）
 - Session resume 依赖 Pi 上游支持（当前仅 RPC 会话 id 重连），不在本轮设计内。
 
 ### 9.4 非目标重申

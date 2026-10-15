@@ -24,7 +24,7 @@ from .agent_workspace import (
     prepare_agent_task_view,
     sync_agent_workspace,
 )
-from .budget import UsageMetrics, apply_budget_limits
+from .budget import UsageMetrics, enforced_budget_limits
 from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
@@ -254,7 +254,7 @@ class Orchestrator:
             attributes={"task_id": task.id, "category": task.category},
             required_states=list(task.objective.required_states),
         )
-        budget_limits = apply_budget_limits(task.budgets, trace)
+        budget_limits = enforced_budget_limits(task.budgets)
         runtime = bootstrap_solver(
             run_dir=run_dir,
             trace=trace,
