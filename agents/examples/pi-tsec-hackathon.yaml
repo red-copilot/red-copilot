@@ -17,8 +17,13 @@ pi:
   system_prompt_file: prompts/tsec-solver.md
   env_passthrough:
     - OPENAI_API_KEY
+  # Kali's nmap binary carries file capabilities
+  # (cap_net_bind_service,cap_net_admin,cap_net_raw): every one of them must be
+  # in the container's bounding set or the exec itself fails with EPERM.
   cap_add:
     - NET_RAW
+    - NET_ADMIN
+    - NET_BIND_SERVICE
   approve_project: false
   context_files: false
   extensions: false
