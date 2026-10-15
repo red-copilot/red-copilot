@@ -7,7 +7,8 @@
 落地模块：`src/harness/cognition.py`（意图-事实投影与前沿规划）、
 `src/harness/planner.py`（滚动时域封装与启发式打分）、
 `src/harness/runtime/bootstrap.py`（按 profile 组装）、
-`src/harness/solver_loop.py`（把前沿投影写进 Agent 上下文）。
+`src/harness/solver_loop.py`（把前沿投影写进 Agent 上下文）、
+`src/harness/extract.py`（工具输出的事实抽取，见 §8）。
 
 ## 1. 现状诊断
 
@@ -110,8 +111,73 @@ SkillSpec[] (intents) ─┘                                     │
 环境依赖项；确定性 fixtures 覆盖前沿演进、后向链、信任级别、深度上限与环安全，
 在无凭据环境即可完整回归。
 
-## 7. 非目标
+## 7. 技能目录对智能体可见
+
+### 7.1 问题
+
+技能元数据（`SkillSpec` 的 `requires`/`produces`）此前只服务 Harness 侧规划：
+`frontier_context()` 与 `round_brief()` 只渲染意图 id 与描述，Agent 看不到
+
+- 每个前沿意图**声明的状态转移语义**（消费什么事实、产出什么事实）；
+- 距离可执行**只差一步的技能**：它的哪个 `requires` 尚未满足，即"再建立
+  什么事实就能解锁什么能力"。
+
+结果是 Agent 只能按 id 盲目选择意图，无法主动补前置。
+
+### 7.2 设计
+
+- 前沿行升级为目录条目：`- [goal] <skill-id> (depth=n): <描述>` 之后追加紧凑
+  选择器记法 `requires <kind>:<type>[...] -> produces <kind>:<type>[...]`，
+  有多个选择器时按声明顺序以 `,` 连接。
+- `IntentFactDAG.next_unlocks()`：后向链展开（§4 第 3 步）在沿未满足
+  `requires` 深入时本来就会**经过** pending 意图；把这些意图连同其未满足的
+  `requires` 选择器与深度收集为 `UnlockHint`，确定性排序（深度、id），渲染为
+  `### Next unlocks` 段：`- <skill-id> (depth=n): needs <kind>:<type>, ...`。
+- 接线点不变：`frontier_context()` 写入 `world.context.txt`，`round_brief()`
+  的 frontier 段同步携带选择器后缀——目录在两个 Agent 可见通道上保持一致。
+
+### 7.3 边界
+
+- 纯元数据投影：技能目录不含任何可执行内容（`SkillSpec` 本身就无命令字段），
+  Pi 自身 skills/extensions 保持关闭，不因目录可见而开启。
+- 信任边界不变：目录影响动作选择，不影响目标达成判定；`claim` 级记录依旧
+  不能满足 `minimum_trust=evidence/verified` 的前置。
+- 有界且确定：沿用 `max_chars` 截断与既有排序，同一 snapshot + skills 始终
+  渲染出同一目录。
+
+## 8. 回合质量：事实抽取扩展
+
+### 8.1 问题
+
+`graph_changed` 回合依赖事实面增长，但首轮落地只解析 nmap/gobuster/dirb/ffuf
+四种格式；实测运行里 Agent 主要使用 `curl | head`/`cat`，事实面不增长，回合
+大多以 `stall` 兜底触发（PLN-06 遗留）。
+
+### 8.2 设计
+
+扩展 `extract.py` 的确定性抽取，覆盖 Agent 实际使用的工具与 Kali 镜像中
+高信号的固定格式：
+
+| 工具 | 特征行（正则锚点） | 产出事实 |
+| --- | --- | --- |
+| `curl -v` | `> GET /path HTTP/1.1` 与紧随的 `< HTTP/1.1 200 OK` 配对 | `web.endpoint {path, status}` |
+| `whatweb` | `http://t [200 OK] Apache[2.4.41]` | `web.technology {url, components}` |
+| `hydra` | `[22][ssh] host: h   login: u   password: p` | `credential.access {service, host, login, password}` |
+| `sqlmap` | `parameter 'id' is 'AND boolean-based blind ...' injectable` | `web.vulnerability {parameter, technique}` |
+| `nikto` | `+ /admin/: Admin login page found` | `web.endpoint {path, note}` |
+
+`curl -v` 的配对语义是保守性的关键：裸文本中的 `HTTP/1.1 200`（无请求行
+上下文）、`curl -i` 的纯响应头、普通散文都不产出事实。
+
+### 8.3 原则（与首轮一致）
+
+只匹配高区分度正则；逐结果上限 `MAX_EXTRACTED_FACTS=25`；内容寻址 id 去重；
+产物是 Harness 观测的 `evidence` 级 observation（source=`harness.extract`），
+不携带原始输出；同一段输出重复出现不重复入图。
+
+## 9. 非目标
 
 - 不引入学习式检索或模型规划作为主脊；`Planner` 协议为其预留插件点。
 - 不新增世界记录类型承载"意图"，也不把阶段/权重等评测语义写入通用闭环。
 - 不把前沿升级为全局攻击 DAG：它仍是滚动时域（视界 1–3）的局部工作集。
+- 不做通用输出解析器：抽取只认固定格式，不猜测语义，也不用模型解析工具输出。

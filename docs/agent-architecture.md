@@ -679,13 +679,28 @@ roadmap EXE-05 / EXE-06 / WLD-05：
 
 ### 9.3 中期
 
-【设计】
+【设计】（2026-10-15 展开为具体设计，见 [agent-engineering.md](agent-engineering.md) §7/§8 与
+roadmap PLN-07 / PLN-06 / EXE-02）
 
-- 技能目录对智能体可见（frontier → prompt 的深化；Pi 自身 skills 保持关闭）。
-- Session resume 依赖 Pi 上游支持（当前仅 RPC 会话 id 重连）。
-- `BudgetSpec` 契约与执行再对齐：现状是**过渡状态**——`max_tokens/max_model_calls/
+- **技能目录对智能体可见**（frontier → prompt 的深化；Pi 自身 skills 保持关闭）：
+  前沿行升级为目录条目（`requires→produces` 紧凑记法），后向链展开顺带收集
+  pending 意图的未满足前置，渲染为 "Next unlocks" 段——告诉 Agent 建立什么事实
+  能解锁什么能力。纯元数据投影，不越信任边界。设计：agent-engineering.md §7；
+  roadmap：PLN-07。
+- **回合质量与事实抽取**：`extract.py` 在 nmap/gobuster/dirb/ffuf 之外新增
+  curl -v 配对、whatweb、hydra、sqlmap、nikto 五种固定格式，让 `graph_changed`
+  回合建立在真实证据增长上而非 stall 兜底。保守原则不变（高区分度正则、
+  逐结果上限、内容寻址去重、evidence 级、不含原始输出）。设计：
+  agent-engineering.md §8；roadmap：PLN-06 follow-up。
+- **`BudgetSpec` 契约与执行再对齐**：现状是**过渡状态**——`max_tokens/max_model_calls/
   max_tool_calls/max_cost_usd` 仍被解析但只记 `budget.ignored`，仅 wall_time 软执行。
-  要么恢复多维强制，要么从 TaskSpec 删除死字段。
+  决策：**恢复多维强制，但作为软限制走既有 finalize 路径**（摘要在前、宽限在后），
+  不回到 2026-10-14 之前的硬截断——多维上限触发 `budget.exceeded` 后开启与
+  wall-time 同构的宽限窗口（`FINALIZE_GRACE_SECONDS`），窗口内求解器发
+  `solver.finalize` 并扣住策略 STOP，窗口外适配器才终止进程；删除死字段会破坏
+  TaskSpec 向后兼容且示例任务都在声明这些维度。`budget.ignored` 与 CLI/tsec
+  警告随之移除。roadmap：EXE-02。
+- Session resume 依赖 Pi 上游支持（当前仅 RPC 会话 id 重连），不在本轮设计内。
 
 ### 9.4 非目标重申
 

@@ -117,3 +117,17 @@ recon formats are parsed, so a run that never invokes nmap/gobuster/ffuf still l
 rounds.
 
 **Non-goals:** required task DAG or harness-authored chain-of-thought.
+
+### PLN-07 [~] P1 — Agent-visible skill catalog
+Deliver: deepen the frontier-to-prompt projection so the Agent sees skill metadata, not just
+ids: every frontier intent line carries its declared `requires`/`produces` selectors in compact
+notation, and a "Next unlocks" section lists pending intents reached by the backward chain with
+exactly which unmet selectors keep them disabled. Pi's own skills/extensions stay off; the
+catalog is a pure metadata projection.
+Accept: deterministic fixtures cover catalog rendering in both `world.context.txt` and round
+briefs, the unlock section lists unmet selectors for depth-bounded pending intents only,
+character budgets still bound the projection, and no executable content ever enters the
+catalog.
+
+Design in [agent-engineering.md §7](../agent-engineering.md). Implementation on branch
+`feat/agent-engineering-midterm`; evidence appended below as it lands.
