@@ -654,4 +654,8 @@ def build_agent_adapter(
         from .pi_container import ContainerPiAdapter
 
         return ContainerPiAdapter(spec, allow_host=allow_host_agent, trace=trace)
+    if spec.type == "pi-host":
+        from .pi_host import HostPiAdapter
+
+        return HostPiAdapter(spec, allow_host=allow_host_agent, trace=trace)
     raise AgentError(f"unsupported agent adapter: {spec.type}")

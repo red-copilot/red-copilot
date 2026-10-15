@@ -101,6 +101,11 @@ class PiSpec(BaseModel):
     env_passthrough: list[str] = Field(default_factory=list)
     cap_add: list[str] = Field(default_factory=list)
     extra_args: list[str] = Field(default_factory=list)
+    # Hosted (platform-managed) model routing: write a Pi models.json whose
+    # provider points at the evaluation platform's model gateway instead of a
+    # public API endpoint. The key itself stays in the environment.
+    models_base_url: str | None = None
+    models_api_key_env: str | None = None
 
 
 class AgentSpec(BaseModel):
@@ -108,7 +113,7 @@ class AgentSpec(BaseModel):
 
     api_version: Literal["harness/v1"] = Field(default="harness/v1", alias="apiVersion")
     id: str = Field(min_length=1)
-    type: Literal["cli", "docker", "pi"] = "cli"
+    type: Literal["cli", "docker", "pi", "pi-host"] = "cli"
     command: list[str] = Field(default_factory=list)
     cwd: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
@@ -138,6 +143,17 @@ class AgentSpec(BaseModel):
                 raise ValueError("pi agents require a container image")
             if self.command:
                 raise ValueError("pi agents use pi.launcher_args instead of command")
+        if self.type == "pi-host":
+            if self.pi is None:
+                raise ValueError("pi-host agents require pi configuration")
+            if self.image:
+                raise ValueError("pi-host agents run Pi as a local process, not a container")
+            if self.command:
+                raise ValueError("pi-host agents use pi.launcher_args instead of command")
+            if bool(self.pi.models_base_url) != bool(self.pi.models_api_key_env):
+                raise ValueError(
+                    "pi-host agents set models_base_url and models_api_key_env together"
+                )
         if self.type not in {"docker", "pi"} and self.runtime is not None:
             raise ValueError("runtime is only valid for container agents")
         if self.type in {"docker", "pi"}:

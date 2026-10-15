@@ -1,0 +1,28 @@
+apiVersion: harness/v1
+id: pi-hosted-deepseek
+type: pi-host
+
+# Managed (hosted) evaluation agent: the whole Harness runs inside the runner
+# image the platform starts, so Pi executes as a local process with no nested
+# Docker. The model is reached through the platform gateway (no public
+# network); DEEPSEEK_API_KEY is injected as a runtime environment variable.
+pi:
+  mode: json
+  model: deepseek-chat
+  thinking: medium
+  tools:
+    - read
+    - bash
+    - edit
+    - write
+  models_base_url: http://api.deepseek.com.tsecbench.gw
+  models_api_key_env: DEEPSEEK_API_KEY
+  system_prompt_file: prompts/tsec-solver.md
+  approve_project: false
+  context_files: false
+  extensions: false
+  skills: false
+  prompt_templates: false
+  themes: false
+  mcp: false
+  offline: true

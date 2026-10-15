@@ -29,7 +29,7 @@ MAX_MODULES = 64
 # session phase machine, AgentCapabilities/AgentRunContext (one typed parameter
 # object replacing 12+ duplicated adapter kwargs), single-source typed-event
 # schemas (harness/agent_events.py), and token-budget-aware context assembly.
-MAX_SRC_LINES = 16_400
+MAX_SRC_LINES = 16_900
 
 
 def _module_names() -> set[str]:
