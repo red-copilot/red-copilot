@@ -8,8 +8,10 @@ set -eu
 : "${BENCHMARK_TOKEN:?BENCHMARK_TOKEN must be injected by the platform}"
 : "${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY must be injected by the platform}"
 
-# The card lists a 360-minute task window; leave a margin for startup and the
-# finalize grace window instead of using the full eight-hour CLI default.
+# Wall-time fits the ranking/practice set's 360-minute task window with a
+# margin for startup and the finalize grace window. The competition window is
+# eight hours: set HARNESS_WALL_TIME=28800 in the platform's runtime
+# environment variables for that run - no image change needed.
 WALL_TIME="${HARNESS_WALL_TIME:-20400}"
 
 exec harness tsec \
