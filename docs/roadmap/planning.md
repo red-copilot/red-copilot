@@ -116,6 +116,20 @@ and on a live run, where 30/30 tool results carried excerpts; that particular ru
 recon formats are parsed, so a run that never invokes nmap/gobuster/ffuf still leans on stall
 rounds.
 
+The format gap closed on 2026-10-15 on branch `feat/agent-engineering-midterm`: `extract.py` now
+also parses the tool the live runs actually used — `curl -v` request/response pairs
+(`> GET /path HTTP/1.1` ... `< HTTP/1.1 200 OK` become `web.endpoint` facts; the pairing is what
+keeps bare status lines, `curl -i` headers and prose from matching) — plus `whatweb`
+(`web.technology` with detected components), `hydra` (`credential.access` with service/host/
+login/password), `sqlmap` (`web.vulnerability` with method/parameter/technique for both the
+`'...' injectable` and `is vulnerable` forms) and `nikto` (`web.endpoint` with the finding note).
+All five stay inside the conservative envelope: distinctive anchors only, the shared 25-facts cap,
+content-addressed dedup, evidence-tier observations carrying structured content instead of raw
+output. Unit coverage in the new `tests/test_extract.py` (15 cases: one positive and at least one
+negative per format, mixed-output regression, cap enforcement); the ACI wiring is unchanged and
+still covered by `tests/test_aci.py`. Validation: `pytest tests/test_extract.py tests/test_aci.py
+tests/test_pi_adapter.py -q` (53 passed); Ruff clean.
+
 **Non-goals:** required task DAG or harness-authored chain-of-thought.
 
 ### PLN-07 [~] P1 — Agent-visible skill catalog
