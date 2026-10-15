@@ -469,3 +469,17 @@ def test_run_tsec_challenges_allows_the_full_evaluation_window(
     # ...and an oversized declaration is clamped to the 8-hour task limit.
     assert FakeBenchmarkRunner.last_budgets.wall_time == MAX_EVALUATION_WALL_TIME_SECONDS
     assert MAX_EVALUATION_WALL_TIME_SECONDS == 8 * 3600
+
+
+def test_tsec_cli_defaults_to_the_full_evaluation_window() -> None:
+    """The competition path must not depend on remembering --wall-time."""
+    import inspect
+
+    from harness.benchmark.tsec_adapter import MAX_EVALUATION_WALL_TIME_SECONDS
+    from harness.cli import tsec
+
+    defaults = {
+        parameter.name: parameter.default
+        for parameter in inspect.signature(tsec).parameters.values()
+    }
+    assert defaults["wall_time"] == MAX_EVALUATION_WALL_TIME_SECONDS == 8 * 3600

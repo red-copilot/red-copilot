@@ -78,12 +78,12 @@ harness tsec \
   --skills-root skills \
   --max-unconfirmed-progress 160 \
   --max-replans 16 \
-  --wall-time 3600 \
   --start-retries 2 \
   --retry-delay 2
 ```
 
-`--wall-time` is a soft deadline: at that point Harness steers the Agent to write
+`--wall-time` (default: the managed evaluation platform's eight-hour task window)
+is a soft deadline: at that point Harness steers the Agent to write
 `agent.summary.md` (facts, ruled-out hypotheses, unfinished intents) and grants a
 `FINALIZE_GRACE_SECONDS` (180s) window before the container is killed. The
 `--max-tokens`/`--max-model-calls`/`--max-tool-calls`/`--max-cost-usd` flags are still accepted

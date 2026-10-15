@@ -11,7 +11,7 @@ import typer
 from pydantic import ValidationError
 
 from .benchmark.base import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
-from .benchmark.tsec_adapter import run_tsec_challenges
+from .benchmark.tsec_adapter import MAX_EVALUATION_WALL_TIME_SECONDS, run_tsec_challenges
 from .benchmark.tsec_client import load_tsec_config
 from .gateway_runtime import GatewayConfig
 from .models import BudgetSpec, load_agent, load_task
@@ -271,7 +271,18 @@ def tsec(
     base_url_env: Annotated[str, typer.Option("--base-url-env")] = "BENCHMARK_BASE_URL",
     token_env: Annotated[str, typer.Option("--benchmark-token-env")] = "BENCHMARK_TOKEN",
     seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
-    wall_time: Annotated[int, typer.Option("--wall-time", min=1)] = 3600,
+    wall_time: Annotated[
+        int,
+        typer.Option(
+            "--wall-time",
+            min=1,
+            help=(
+                "Soft wall-clock bound per challenge set, in seconds. Defaults to "
+                "the managed evaluation platform's eight-hour task window; pass a "
+                "smaller value for local practice runs."
+            ),
+        ),
+    ] = MAX_EVALUATION_WALL_TIME_SECONDS,
     max_tokens: Annotated[int | None, typer.Option("--max-tokens", min=1)] = None,
     max_model_calls: Annotated[int | None, typer.Option("--max-model-calls", min=1)] = None,
     max_tool_calls: Annotated[int | None, typer.Option("--max-tool-calls", min=1)] = None,
