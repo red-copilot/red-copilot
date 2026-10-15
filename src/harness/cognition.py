@@ -92,6 +92,19 @@ class FrontierIntent:
     goal_hit: bool = False
 
 
+@dataclass(frozen=True)
+class UnlockHint:
+    """A pending intent reached by the backward chain, with what keeps it disabled.
+
+    The unmet selectors are the concrete facts the Agent would have to
+    establish (or have verified) to make the intent executable.
+    """
+
+    intent: IntentNode
+    unmet: tuple[StateSelector, ...] = ()
+    depth: int = 0
+
+
 @dataclass
 class IntentFactDAG:
     """Bipartite projection: facts enable intents; intents produce new facts."""
@@ -178,14 +191,37 @@ class IntentFactDAG:
         already computed ``goal_targets()`` pass them as ``targets`` so the
         unmet-state scan runs once.
         """
+        return self._expand(self._resolve_targets(targets))[0]
+
+    def next_unlocks(
+        self, *, targets: list[tuple[str, StateSelector]] | None = None
+    ) -> list[UnlockHint]:
+        """Pending intents the backward chain reached, with unmet prerequisites.
+
+        Same expansion as :meth:`frontier`, but collecting the still-pending
+        intents it walks through: each hint says which facts would make the
+        intent actionable. Empty in the no-target fallback, where every
+        enabled intent is already exposed.
+        """
+        return self._expand(self._resolve_targets(targets))[1]
+
+    def _resolve_targets(
+        self, targets: list[tuple[str, StateSelector]] | None
+    ) -> list[tuple[str, StateSelector]]:
+        if targets is not None:
+            return targets
+        return _unmet_goal_targets(self.snapshot) if self.snapshot is not None else []
+
+    def _expand(
+        self, targets: list[tuple[str, StateSelector]]
+    ) -> tuple[list[FrontierIntent], list[UnlockHint]]:
         enabled = self.enabled_intents()
         snapshot = self.snapshot
-        if targets is None:
-            targets = _unmet_goal_targets(snapshot) if snapshot is not None else []
         if snapshot is None or not targets:
-            return [FrontierIntent(intent=intent) for intent in _sorted_intents(enabled)]
+            return [FrontierIntent(intent=intent) for intent in _sorted_intents(enabled)], []
 
         frontier: dict[str, FrontierIntent] = {}
+        unlocks: dict[str, UnlockHint] = {}
         expanded: set[tuple[str, str, str | None, str, int]] = set()
         pending: deque[tuple[StateSelector, int]] = deque(
             (selector, 0) for _, selector in targets
@@ -203,6 +239,8 @@ class IntentFactDAG:
                     continue
                 if intent.status == "enabled":
                     _record_frontier(frontier, intent, depth=depth)
+                else:
+                    _record_unlock(unlocks, intent, snapshot, depth=depth)
                 if depth + 1 > MAX_FRONTIER_DEPTH:
                     continue
                 for requirement in intent.requires:
@@ -210,10 +248,14 @@ class IntentFactDAG:
                         pending.append((requirement, depth + 1))
 
         if not frontier:
-            # No skill covers the declared target: fall back to the legacy
-            # all-enabled set so the loop stays live instead of stalling.
-            return [FrontierIntent(intent=intent) for intent in _sorted_intents(enabled)]
-        return _sorted_frontier(frontier.values())
+            # No enabled skill covers the declared target: fall back to the
+            # legacy all-enabled set so the loop stays live instead of stalling.
+            # Unlock hints stay: they explain what the goal path is missing.
+            return (
+                [FrontierIntent(intent=intent) for intent in _sorted_intents(enabled)],
+                _sorted_unlocks(unlocks.values()),
+            )
+        return _sorted_frontier(frontier.values()), _sorted_unlocks(unlocks.values())
 
     def render_frontier(self, *, max_chars: int = 2000) -> str:
         """Render a concise, bounded projection of the goal-driven frontier."""
@@ -222,30 +264,55 @@ class IntentFactDAG:
         if targets:
             lines.append("### Open goal targets")
             for goal_id, selector in targets[:8]:
-                scope = f" scope={selector.scope}" if selector.scope else ""
-                trust = (
-                    f" min_trust={selector.minimum_trust}"
-                    if selector.minimum_trust != "claim"
-                    else ""
-                )
-                lines.append(f"- {goal_id}: {selector.kind}:{selector.type}{scope}{trust}")
+                lines.append(f"- {goal_id}: {_selector_label(selector)}")
             lines.append("")
 
-        frontier = self.frontier(targets=targets)
+        frontier, unlocks = self._expand(targets)
         lines.append(f"### Actionable frontier ({len(frontier)})")
         if frontier:
             for item in frontier:
                 role = "goal" if item.goal_hit else "prereq"
                 lines.append(
                     f"- [{role}] {item.intent.id} (depth={item.depth}): "
-                    f"{item.intent.description}"
+                    f"{item.intent.description}{_catalog_suffix(item.intent)}"
                 )
+        else:
+            lines.append("- none")
+
+        lines += ["", f"### Next unlocks ({len(unlocks)})"]
+        if unlocks:
+            for hint in unlocks[:8]:
+                needs = ", ".join(_selector_label(selector) for selector in hint.unmet)
+                lines.append(f"- {hint.intent.id} (depth={hint.depth}): needs {needs}")
         else:
             lines.append("- none")
         rendered = "\n".join(lines)
         if len(rendered) > max_chars:
             return rendered[:max_chars] + "\n... (truncated)"
         return rendered
+
+
+def _selector_label(selector: StateSelector) -> str:
+    scope = f" scope={selector.scope}" if selector.scope else ""
+    trust = (
+        f" min_trust={selector.minimum_trust}"
+        if selector.minimum_trust != "claim"
+        else ""
+    )
+    return f"{selector.kind}:{selector.type}{scope}{trust}"
+
+
+def _catalog_suffix(intent: IntentNode) -> str:
+    """Compact requires/produces notation appended to agent-visible intent lines."""
+    chunks: list[str] = []
+    if intent.requires:
+        chunks.append("requires " + ", ".join(_selector_label(s) for s in intent.requires))
+    if intent.produces:
+        chunks.append(
+            ("-> " if chunks else "") + "produces " +
+            ", ".join(_selector_label(s) for s in intent.produces)
+        )
+    return f" [{' '.join(chunks)}]" if chunks else ""
 
 
 def _sorted_intents(intents: list[IntentNode]) -> list[IntentNode]:
@@ -269,8 +336,36 @@ def _record_frontier(
     )
 
 
+def _record_unlock(
+    unlocks: dict[str, UnlockHint],
+    intent: IntentNode,
+    snapshot: WorldSnapshot,
+    *,
+    depth: int,
+) -> None:
+    unmet = tuple(r for r in intent.requires if not _selector_matches(snapshot, r))
+    existing = unlocks.get(intent.id)
+    if existing is None:
+        unlocks[intent.id] = UnlockHint(intent=intent, unmet=unmet, depth=depth)
+        return
+    merged: dict[tuple[str, str, str | None, str], StateSelector] = {
+        _selector_signature(selector): selector for selector in existing.unmet
+    }
+    for selector in unmet:
+        merged.setdefault(_selector_signature(selector), selector)
+    unlocks[intent.id] = UnlockHint(
+        intent=intent,
+        unmet=tuple(merged.values()),
+        depth=min(existing.depth, depth),
+    )
+
+
 def _sorted_frontier(items: Iterable[FrontierIntent]) -> list[FrontierIntent]:
     return sorted(items, key=lambda item: (0 if item.goal_hit else 1, item.depth, item.intent.id))
+
+
+def _sorted_unlocks(items: Iterable[UnlockHint]) -> list[UnlockHint]:
+    return sorted(items, key=lambda item: (item.depth, item.intent.id))
 
 
 def frontier_context(
@@ -397,7 +492,9 @@ def round_brief(
     lines += ["", f"### Open frontier ({len(frontier)})"]
     for item in frontier[:10]:
         role = "goal" if item.goal_hit else "prereq"
-        lines.append(f"- [{role}] {item.intent.id} (depth={item.depth})")
+        lines.append(
+            f"- [{role}] {item.intent.id} (depth={item.depth}){_catalog_suffix(item.intent)}"
+        )
     if not frontier:
         lines.append("- none")
 
@@ -489,6 +586,7 @@ __all__ = [
     "IntentFactDAG",
     "IntentNode",
     "Planner",
+    "UnlockHint",
     "frontier_context",
     "refuted_hypotheses",
     "round_brief",

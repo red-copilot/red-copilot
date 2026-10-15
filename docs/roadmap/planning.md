@@ -129,5 +129,18 @@ briefs, the unlock section lists unmet selectors for depth-bounded pending inten
 character budgets still bound the projection, and no executable content ever enters the
 catalog.
 
-Design in [agent-engineering.md §7](../agent-engineering.md). Implementation on branch
-`feat/agent-engineering-midterm`; evidence appended below as it lands.
+Design in [agent-engineering.md §7](../agent-engineering.md).
+
+Implemented on branch `feat/agent-engineering-midterm`: `IntentFactDAG.next_unlocks()`
+shares the frontier's backward-chain expansion and collects the pending intents it walks
+through as `UnlockHint`s (min depth, merged unmet selectors). `render_frontier` lines now
+carry a compact `requires <selectors> -> produces <selectors>` suffix (trust floors shown as
+`min_trust=...`), followed by a bounded `### Next unlocks` section listing each pending
+intent with exactly the facts that would make it actionable; `round_brief` frontier lines
+carry the same suffix. No-target fallback keeps unlocks empty (every enabled intent is
+already exposed). Regression coverage in `tests/test_cognition.py::TestAgentVisibleCatalog`
+(catalog suffix with trust floor, unlock section with unmet selectors, depth bound and
+ordering, empty fallback, deterministic rendering, brief carries selectors). Validation:
+`pytest tests/test_cognition.py tests/test_solver_loop.py tests/test_planner.py -q` (69
+passed), full suite 547 passed / 3 skipped (Docker-gated), Ruff clean, architecture and
+size-ceiling tests pass.

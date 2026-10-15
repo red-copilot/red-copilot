@@ -479,6 +479,98 @@ class TestRepeatedWithoutResult:
         assert "obs:tool:call_1" not in brief
 
 
+class TestAgentVisibleCatalog:
+    def _snapshot(self) -> WorldSnapshot:
+        return WorldSnapshot(
+            capabilities=_reachability(),
+            goals={"goal:test": _goal({"kind": "observation", "type": "vuln.confirmed"})},
+        )
+
+    def test_frontier_lines_carry_selector_catalog(self):
+        rendered = frontier_context(self._snapshot(), load_skills("skills/offensive"), max_chars=8000)
+        assert "### Actionable frontier" in rendered
+        # Enabled frontier intents declare their state-transition semantics,
+        # including the declared trust floor on prerequisites.
+        assert (
+            "requires capability:network.reachability min_trust=evidence -> produces "
+            "observation:network.service, entity:network.service"
+        ) in rendered
+
+    def test_render_contains_next_unlocks_section(self):
+        rendered = frontier_context(self._snapshot(), load_skills("skills/offensive"), max_chars=8000)
+        assert "### Next unlocks" in rendered
+        assert "exploit.vuln-verify (depth=0): needs observation:web.finding" in rendered
+
+    def test_next_unlocks_lists_pending_intents_with_unmet_selectors(self):
+        dag = IntentFactDAG.from_snapshot(self._snapshot(), load_skills("skills/offensive"))
+        unlocks = dag.next_unlocks()
+        by_id = {hint.intent.id: hint for hint in unlocks}
+        assert "exploit.vuln-verify" in by_id
+        assert "recon.web-crawl" in by_id
+        # Only still-pending intents are unlock hints; enabled ones are the frontier.
+        assert all(hint.intent.status == "pending" for hint in unlocks)
+        assert any(
+            selector.kind == "entity" and selector.type == "network.service"
+            for selector in by_id["recon.web-crawl"].unmet
+        )
+
+    def test_next_unlocks_depth_bounded(self):
+        goal = _goal({"kind": "observation", "type": "obs.g"})
+        skills = [
+            _skill(
+                "produce-g",
+                requires=[{"kind": "observation", "type": "obs.a"}],
+                produces=[{"kind": "observation", "type": "obs.g"}],
+            ),
+            _skill(
+                "produce-a",
+                requires=[{"kind": "observation", "type": "obs.b"}],
+                produces=[{"kind": "observation", "type": "obs.a"}],
+            ),
+            _skill(
+                "produce-b",
+                requires=[{"kind": "observation", "type": "obs.c"}],
+                produces=[{"kind": "observation", "type": "obs.b"}],
+            ),
+            _skill(
+                "produce-c",
+                requires=[{"kind": "observation", "type": "obs.d"}],
+                produces=[{"kind": "observation", "type": "obs.c"}],
+            ),
+            _skill(
+                "produce-d",
+                requires=[{"kind": "observation", "type": "obs.e"}],
+                produces=[{"kind": "observation", "type": "obs.d"}],
+            ),
+        ]
+        dag = IntentFactDAG.from_snapshot(WorldSnapshot(goals={"goal:test": goal}), skills)
+        unlocks = dag.next_unlocks()
+        assert [hint.intent.id for hint in unlocks] == [
+            "produce-g",
+            "produce-a",
+            "produce-b",
+            "produce-c",
+        ]
+        assert [hint.depth for hint in unlocks] == [0, 1, 2, 3]
+
+    def test_no_goal_targets_yield_no_unlocks(self):
+        snap = WorldSnapshot(capabilities=_reachability())
+        dag = IntentFactDAG.from_snapshot(snap, load_skills("skills/offensive"))
+        assert dag.next_unlocks() == []
+
+    def test_catalog_render_is_deterministic(self):
+        snap = self._snapshot()
+        skills = load_skills("skills/offensive")
+        assert frontier_context(snap, skills, max_chars=8000) == frontier_context(
+            snap, skills, max_chars=8000
+        )
+
+    def test_round_brief_frontier_carries_selectors(self):
+        snapshot, skills, progress = TestRuledOutAndRoundBrief()._graph()
+        brief = round_brief(snapshot, skills, progress, round_number=2)
+        assert "requires capability:network.reachability min_trust=evidence -> produces" in brief
+
+
 def test_brief_lists_agent_claims_as_unverified_leads() -> None:
     skills = load_skills("skills/offensive")
     snapshot = WorldSnapshot(
