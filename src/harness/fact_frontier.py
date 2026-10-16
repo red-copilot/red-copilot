@@ -9,9 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .planner import _selector_matches, selector_matches_focus_item
-from .skills import SkillSpec, StateSelector
-from .world.models import TRUST_RANK, WorldSnapshot
+from .world.models import KIND_COLLECTIONS\nfrom .skills import SkillSpec, StateSelector
+from .world.models import TRUST_RANK, WorldSnapshot\n\n\ndef _selector_matches(snapshot: WorldSnapshot, selector: StateSelector) -> bool:\n    collection = getattr(snapshot, KIND_COLLECTIONS[selector.kind])\n    minimum_rank = TRUST_RANK[selector.minimum_trust]\n    for item in collection.values():\n        if not item.is_valid_at():\n            continue\n        if not __import__("fnmatch").fnmatchcase(getattr(item, "type", ""), selector.type):\n            continue\n        if selector.scope is not None and not (getattr(item, "scope", None) and __import__("fnmatch").fnmatchcase(item.scope, selector.scope)):\n            continue\n        provenance = getattr(item, "provenance", None)\n        if TRUST_RANK.get(getattr(provenance, "epistemic_status", "unclassified"), 0) >= minimum_rank:\n            return True\n    return False\n\n\ndef _selector_produced_by(selector: StateSelector, produced: StateSelector) -> bool:\n    import fnmatch\n    if selector.kind != produced.kind or not fnmatch.fnmatchcase(produced.type, selector.type):\n        return False\n    if selector.scope is not None and (produced.scope is None or not fnmatch.fnmatchcase(produced.scope, selector.scope)):\n        return False\n    return TRUST_RANK.get(produced.minimum_trust, 0) >= TRUST_RANK.get(selector.minimum_trust, 0)
 
 
 @dataclass(frozen=True)
@@ -56,7 +55,7 @@ def select_next_fact(
                 skill
                 for skill in skills
                 if any(
-                    selector_matches_focus_item(selector, produced)
+                    _selector_produced_by(selector, produced)
                     and TRUST_RANK.get(produced.minimum_trust, 0)
                     >= TRUST_RANK.get(selector.minimum_trust, 0)
                     for produced in skill.produces
