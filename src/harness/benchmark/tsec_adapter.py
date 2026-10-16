@@ -113,6 +113,11 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             if self.use_hint:
                 hint_result = await self.client.get_hint(case.id)
                 hint = getattr(hint_result, "hint", None)
+                # Viewing a hint costs score, so the immediate request has to
+                # count as this challenge's one hint: a later threshold-triggered
+                # ``request_hint`` must return what was already fetched instead
+                # of paying for a second view of the same challenge.
+                self._hint_fetched.add(case.id)
         except Exception:
             await self.client.close_challenge(case.id)
             raise

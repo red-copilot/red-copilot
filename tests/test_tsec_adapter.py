@@ -835,3 +835,25 @@ def test_tsec_adapter_hint_failure_is_recorded_and_not_retried() -> None:
         assert session.metadata["hint_trigger"] == "threshold"
 
     asyncio.run(scenario())
+
+
+def test_tsec_adapter_immediate_hint_is_not_requested_again_by_the_threshold() -> None:
+    """--hint plus --hint-threshold must pay for one hint view, not two."""
+
+    async def scenario() -> None:
+        client = HintCountingClient()
+        adapter = TSecBenchmarkAdapter(client, use_hint=True)
+        cases = await adapter.discover()
+        session = await adapter.provision(cases[0])
+
+        assert client.hint_calls == 1
+        assert session.metadata["hint_trigger"] == "immediate"
+
+        assert await adapter.request_hint("WEB-001") == "look at the service"
+        assert client.hint_calls == 1
+        assert session.metadata["hint_trigger"] == "immediate"
+        assert session.metadata["hint"] == "look at the service"
+        # The cached reply is not a fresh fetch, so no failure flag is written.
+        assert "hint_error" not in session.metadata
+
+    asyncio.run(scenario())
