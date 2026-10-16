@@ -16,7 +16,7 @@ from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
-from .planner import (
+from .fact_frontier import render_next_fact\nfrom .planner import (
     HeuristicSkillPlanner,
     PlanCandidate,
     Planner,
@@ -394,7 +394,7 @@ def round_brief(
     if not ruled and not refuted:
         lines.append("- none yet")
 
-    lines += ["", f"### Open frontier ({len(frontier)})"]
+    lines += ["", render_next_fact(snapshot, skills)]\n\n    lines += ["", f"### Open frontier ({len(frontier)})"]
     for item in frontier[:10]:
         role = "goal" if item.goal_hit else "prereq"
         lines.append(f"- [{role}] {item.intent.id} (depth={item.depth})")
