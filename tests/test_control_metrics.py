@@ -42,8 +42,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # Measured before 15,814, after 15,987 (+173). Both hint sources share one
 # `solver.hint` observation absorbed through a single helper instead of two
 # duplicated blocks. Re-measured from the tree, not estimated.
+#
+# The review follow-up added no module: the resume budget rebase in
+# `orchestrator.py`, the immediate-hint dedupe in `benchmark/tsec_adapter.py`,
+# the credential digest in `extract.py` and the streak-aware fold in
+# `runtime/executors.py`. Measured before 15,987, after 16,023 (+36).
 MAX_MODULES = 57
-MAX_SRC_LINES = 15_987
+MAX_SRC_LINES = 16_023
 
 
 def _module_names() -> set[str]:
