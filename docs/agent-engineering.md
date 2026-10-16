@@ -105,7 +105,7 @@ P1 是赛前有余力才做、赛后必做的项：
 | ZCP-10 | 收尾加固（结构化摘要 + 缺失可观测 + 复用上一轮摘要） | `src/harness/solver_loop.py`、`src/harness/cli.py` | 已落地 | `result.json` 的 `agent_report` 记录摘要是否存在与缺失段落，并写 `solver.summary_incomplete`；`--seed-notes-from` 把上一轮摘要放进新会话 notes（`tests/test_executors.py`） |
 | ZCP-12 | 重启简报质量观测（词数、来源 notes、缺失段落；只观测不排序） | `src/harness/benchmark/runner.py`、`src/harness/solver_loop.py` | 已落地 | 每次重启记录 `brief_chars`/`notes_count`/`empty_sections` 到 trace 与 `result.json`（有重启才出现 `restart_briefs`，竞争会话逐会话附带）；无重启结果不含新键（`tests/test_executors.py`） |
 | ZCP-13 | 会话级收尾模板复用（重启/取消路径复用四段摘要，摘要仍非证据） | `src/harness/solver_loop.py`、`src/harness/cli.py` | 未落地（条件项） | 重启/取消路径的缺失段落可观测（`tests/test_solver_loop.py`） |
-| ZCP-14 | 知识语料扩容（pinned 取数＋索引＋许可） | `knowledge/`、`skills/offensive/`、`scripts/fetch-knowledge.sh` | 未落地 | 目录结构校验通过；运行期无网络依赖（`tests/test_knowledge_catalogue.py`） |
+| ZCP-14 | 知识语料扩容（pinned 取数＋索引＋许可） | `knowledge/`、`skills/offensive/`、`scripts/fetch-knowledge.sh` | 已落地 | 新增 OWASP CheatSheetSeries（CC-BY-SA-4.0）与 SecLists（MIT）两条 pinned 语料并写入索引；manifest 结构校验（40 位 revision、许可非空、索引齐全）与 `bash -n` 通过（`tests/test_knowledge_catalogue.py`） |
 
 排期与实现顺序见 [zc-improvement-design.md](zc-improvement-design.md)：A 段（ZCP-11/05/06/07）与
 B 段（ZCP-08/09/10）已落地，C 段（容器内 Pi 扩展）在 maintainer 复核通过前不动。

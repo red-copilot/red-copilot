@@ -21,6 +21,8 @@ CORPORA=(
   "PayloadsAllTheThings|https://github.com/swisskyrepo/PayloadsAllTheThings|3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a|MIT"
   "HowToHunt|https://github.com/KathanP19/HowToHunt|4c8c23fce6c754e9495101d3894cc7228ee7c709|see upstream"
   "nuclei-templates|https://github.com/projectdiscovery/nuclei-templates|3de629d823bb6eb00aa3769edc365b6525134fb1|MIT"
+  "CheatSheetSeries|https://github.com/OWASP/CheatSheetSeries|72865b1e3b5754246a101778dc00b37f9c233373|CC-BY-SA-4.0"
+  "SecLists|https://github.com/danielmiessler/SecLists|f1196104c5594a19d78b486c52c0794b9d947993|MIT"
 )
 
 mkdir -p "$CACHE"

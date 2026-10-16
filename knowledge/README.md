@@ -31,6 +31,8 @@ committed, and nothing in the runtime downloads them:
 - `PayloadsAllTheThings` — payload families and bypass lists.
 - `HowToHunt` — methodology notes per vulnerability class.
 - `nuclei-templates` — detection templates and their matchers.
+- `CheatSheetSeries` — OWASP cheat sheets per vulnerability class (CC-BY-SA-4.0).
+- `SecLists` — wordlists for brute force, discovery and fuzzing (MIT).
 
 See `scripts/fetch-knowledge.sh` for the pinned revisions.
 
