@@ -103,7 +103,7 @@ P1 是赛前有余力才做、赛后必做的项：
 | ZCP-08 | 失败/已排除路径看板 | `src/harness/world/context.py` | 已落地 | refuted/superseded 出现在 Ruled out（上限 10 条，截断给计数）；无记录时投影不含该段（`tests/test_world_context.py`） |
 | ZCP-09 | 会话级用量归因与 prompt/model 战绩 | `src/harness/benchmark/runner.py`、`src/harness/cli.py` | 已落地 | `executor_summary` 按 (prompt, provider, model) 聚合；单会话结果不新增键（`tests/test_executors.py`） |
 | ZCP-10 | 收尾加固（结构化摘要 + 缺失可观测 + 复用上一轮摘要） | `src/harness/solver_loop.py`、`src/harness/cli.py` | 已落地 | `result.json` 的 `agent_report` 记录摘要是否存在与缺失段落，并写 `solver.summary_incomplete`；`--seed-notes-from` 把上一轮摘要放进新会话 notes（`tests/test_executors.py`） |
-| ZCP-12 | 重启简报质量观测（词数、来源 notes、缺失段落；只观测不排序） | `src/harness/benchmark/runner.py`、`src/harness/solver_loop.py` | 未落地 | 每次重启写会计级指标；无重启时结果不含新键（`tests/test_executors.py`） |
+| ZCP-12 | 重启简报质量观测（词数、来源 notes、缺失段落；只观测不排序） | `src/harness/benchmark/runner.py`、`src/harness/solver_loop.py` | 已落地 | 每次重启记录 `brief_chars`/`notes_count`/`empty_sections` 到 trace 与 `result.json`（有重启才出现 `restart_briefs`，竞争会话逐会话附带）；无重启结果不含新键（`tests/test_executors.py`） |
 | ZCP-13 | 会话级收尾模板复用（重启/取消路径复用四段摘要，摘要仍非证据） | `src/harness/solver_loop.py`、`src/harness/cli.py` | 未落地（条件项） | 重启/取消路径的缺失段落可观测（`tests/test_solver_loop.py`） |
 | ZCP-14 | 知识语料扩容（pinned 取数＋索引＋许可） | `knowledge/`、`skills/offensive/`、`scripts/fetch-knowledge.sh` | 未落地 | 目录结构校验通过；运行期无网络依赖（`tests/test_knowledge_catalogue.py`） |
 

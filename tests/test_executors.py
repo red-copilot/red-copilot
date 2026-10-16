@@ -856,8 +856,47 @@ def test_long_session_is_restarted_with_a_carry_forward_brief(
     assert "solver.context_restart" in trace
     assert '"from_session":"session-1"' in trace
     assert '"to_session":"session-2"' in trace
+    assert '"notes_count":0' in trace
     # The retired session's usage stays in the run accounting.
     assert result["metrics"]["total_tokens"] == 14
+    # Restart-brief quality metrics are accounting-only and appear only when a
+    # restart happened.
+    metrics = result["restart_briefs"]
+    assert len(metrics) == 1
+    assert metrics[0]["index"] == 1
+    assert metrics[0]["reason"] == "tool_calls"
+    assert metrics[0]["brief_chars"] > 0
+    assert metrics[0]["notes_count"] == 0
+    assert metrics[0]["empty_sections"] == [
+        "Established facts",
+        "Ruled out",
+        "Open intents",
+    ]
+
+
+def test_restart_brief_metrics_absent_without_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import harness.benchmark.runner as runner_module
+
+    agent_adapter = RestartableAgentAdapter(events_per_session=[1])
+    monkeypatch.setattr(
+        runner_module, "build_agent_adapter", lambda *_args, **_kwargs: agent_adapter
+    )
+
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-NO-RESTART", benchmark="fake"),
+            agent=_pi_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+        )
+    )
+
+    assert len(agent_adapter.sessions) == 1
+    assert "restart_briefs" not in result
 
 
 def test_context_restart_gives_up_after_the_cap(
