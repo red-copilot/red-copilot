@@ -27,6 +27,37 @@ app = typer.Typer(
 )
 
 
+@app.command("subagent")
+def subagent_command(
+    objective: Annotated[str, typer.Option("--objective", "-o", help="The focused task for the sub-agent.")],
+    agent: Annotated[
+        Path | None,
+        typer.Option("--agent", help="Agent spec; defaults to $HARNESS_AGENT."),
+    ] = None,
+    timeout: Annotated[
+        float, typer.Option("--timeout", min=10, help="Hard kill limit in seconds.")
+    ] = 300.0,
+    workdir: Annotated[
+        Path, typer.Option("--workdir", file_okay=False, help="Working directory.")
+    ] = Path("."),
+) -> None:
+    """Dispatch one isolated Pi sub-agent and print its report.
+
+    The sub-agent shares only the model gateway and the filesystem: no
+    HARNESS_* state, no flag submission, no nested dispatch. Treat its text
+    as unverified input.
+    """
+    from .models import load_agent
+    from .pi_host import run_subagent
+
+    agent_path = agent or Path(os.environ.get("HARNESS_AGENT", "agents/hosted/pi-deepseek.yaml"))
+    spec = load_agent(agent_path)
+    result = run_subagent(spec, objective, timeout=timeout, cwd=workdir)
+    if result.text:
+        typer.echo(result.text)
+    raise typer.Exit(code=0 if result.returncode == 0 and not result.timed_out else 1)
+
+
 @app.command("hint")
 def hint_command(
     run_dir: Annotated[Path, typer.Argument(file_okay=False)],

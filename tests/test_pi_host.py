@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -177,3 +178,127 @@ def test_build_agent_adapter_dispatches_pi_host(monkeypatch, tmp_path: Path) -> 
         trace=TraceRecorder(tmp_path / "t.jsonl", "r", "t"),
     )
     assert isinstance(adapter, HostPiAdapter)
+
+
+def test_subagent_extracts_assistant_text_from_pi_jsonl() -> None:
+    from harness.pi_host import _assistant_text
+
+    stream = "\n".join(
+        [
+            json.dumps({"type": "session", "id": "s1"}),
+            json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "first reply"}],
+                    },
+                }
+            ),
+            json.dumps({"type": "tool_execution_start"}),
+            json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "toolCall"},
+                            {"type": "text", "text": "FINDINGS: offset is 136"},
+                        ],
+                    },
+                }
+            ),
+            "not json",
+        ]
+    )
+
+    assert _assistant_text(stream) == "first reply\n\nFINDINGS: offset is 136"
+
+
+def test_run_subagent_isolates_environment_and_briefs_the_task(monkeypatch, tmp_path: Path) -> None:
+
+    from harness.pi_host import SUBAGENT_SYSTEM_PROMPT, run_subagent
+
+    monkeypatch.setattr("harness.pi_host.shutil.which", lambda _: "/usr/bin/pi")
+    monkeypatch.setenv("HARNESS_WORLD_CONTEXT", "/parent/world.txt")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    captured: dict = {}
+
+    class Process:
+        returncode = 0
+        pid = -1
+
+        def communicate(self, timeout=None):
+            if captured.get("fail_timeout"):
+                raise subprocess.TimeoutExpired(cmd="pi", timeout=timeout)
+            stream = json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "FINDINGS: done"}],
+                    },
+                }
+            )
+            return stream.encode(), b""
+
+        def kill(self):
+            pass
+
+    def fake_popen(command, **kwargs):
+        captured["argv"] = command
+        captured["env"] = kwargs.get("env")
+        return Process()
+
+    monkeypatch.setattr("harness.pi_host.subprocess.Popen", fake_popen)
+    spec = _hosted_spec()
+
+    result = run_subagent(
+        spec, "triage the binary", timeout=60, cwd=tmp_path / "work"
+    )
+
+    # The positional prompt is the sub-agent briefing plus the task, and the
+    # parent's solver prompt file never leaks in.
+    prompt = captured["argv"][-1]
+    assert SUBAGENT_SYSTEM_PROMPT.split(".")[0] in prompt
+    assert "triage the binary" in prompt
+    assert "Harness solver protocol" not in prompt
+    # Parent state variables are scrubbed; the model credential survives.
+    env = captured["env"]
+    assert not any(name.startswith("HARNESS_") for name in env)
+    assert env["DEEPSEEK_API_KEY"] == "test-key"
+    assert env["PI_TELEMETRY"] == "0"
+    assert result.text == "FINDINGS: done"
+    assert result.timed_out is False
+
+
+def test_run_subagent_kills_at_timeout(monkeypatch, tmp_path: Path) -> None:
+    from harness.pi_host import run_subagent
+
+    monkeypatch.setattr("harness.pi_host.shutil.which", lambda _: "/usr/bin/pi")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "k")
+    killed: list = []
+
+    class Process:
+        returncode = -9
+        pid = -2
+
+        def communicate(self, timeout=None):
+            if not killed:
+                raise subprocess.TimeoutExpired(cmd="pi", timeout=timeout)
+            return b"", b""
+
+        def kill(self):
+            killed.append(True)
+
+    monkeypatch.setattr(
+        "harness.pi_host.subprocess.Popen", lambda *a, **k: Process()
+    )
+    monkeypatch.setattr(
+        "harness.pi_host.os.killpg", lambda pid, sig: killed.append((pid, sig))
+    )
+
+    result = run_subagent(_hosted_spec(), "stuck task", timeout=10, cwd=tmp_path)
+
+    assert result.timed_out is True
+    assert "time limit" in result.text
