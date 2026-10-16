@@ -52,18 +52,40 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         strace \
         ltrace \
         gcc \
+        g++ \
         make \
         python3 \
         python3-pip \
         python3-venv \
+        python3-pwntools \
+        smbclient \
+        impacket-scripts \
+        enum4linux \
+        snmp \
+        default-mysql-client \
+        redis-tools \
+        sqlite3 \
+        john \
+        hashcat \
+        binwalk \
+        exiftool \
+        steghide \
         nodejs \
         npm \
     && node -e 'const [M,m]=process.versions.node.split(".").map(Number); if (M < 22 || (M === 22 && m < 19)) { console.error("Pi requires Node >= 22.19"); process.exit(1) }' \
     && test -s /usr/share/wordlists/dirb/common.txt \
+    && gunzip -kf /usr/share/wordlists/rockyou.txt.gz \
     && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && pi --version \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /root/.npm
+
+# Crypto/solver Python stack: pycryptodome, sympy, gmpy2, z3 (the four
+# workhorses for CTF crypto challenges) - the sandbox has no network at
+# runtime, so they must be baked in.
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+        pycryptodome sympy gmpy2 z3-solver \
+    && python3 -c "import Crypto, sympy, gmpy2, z3; print('solver stack ok')"
 
 # Kali's nmap carries file capabilities (net_bind_service+net_admin+net_raw).
 # The managed sandbox grants only the default container set (no NET_ADMIN), so
