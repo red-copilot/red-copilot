@@ -99,6 +99,13 @@ reserved Harness, benchmark, and TSec credentials. Gateway mode injects a per-ru
 instead of the direct provider key. Agent output remains untrusted even when stored as a run
 artifact. Objective verdicts are produced by registered verifiers and reference Harness-persisted
 evidence.
+
+Secrets the engagement itself discovers stay out of the derived fact graph in plaintext:
+`harness.extract` records a `credential.access` fact with the service, host, port, login and a
+truncated digest of the observed secret, never the secret itself, because those facts are
+rendered into the Agent's context file and exported through the run summary. The raw tool output
+stays where the Agent already has it: its own workspace and event stream.
+
 Host CLI Agents are an explicit development escape hatch: they are not isolated and inherit
 the host process environment. Run only trusted commands in that mode and keep sensitive
 benchmark credentials out of their environment.
