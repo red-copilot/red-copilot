@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import typing
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from ..agent import AgentResult
+from ..budget import FINALIZE_GRACE_SECONDS
 from ..models import AgentSpec, BudgetSpec, ObjectiveSpec
 from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from .base import (
@@ -30,6 +32,9 @@ from .tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig
 # clock is capped at the platform's task limit (not the historical one-hour
 # cap) so a competition run can use its whole window.
 MAX_EVALUATION_WALL_TIME_SECONDS = 8 * 3600
+# Do not dispatch a new case when this little of the evaluation window is left:
+# it could not finish a meaningful attempt plus the finalize grace anyway.
+DISPATCH_FLOOR_SECONDS = 300
 
 
 def _is_sdk_error(exc: Exception, name: str) -> bool:
@@ -356,6 +361,8 @@ async def run_tsec_challenges(
     solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
     max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     max_replans: int = BENCHMARK_MAX_REPLANS,
+    concurrency: int = 1,
+    total_wall_time: int | None = None,
 ) -> list[dict]:
     """Run selected TSec challenges through the generic benchmark runtime."""
 
@@ -385,39 +392,79 @@ async def run_tsec_challenges(
             if not run_all and challenge_code is None:
                 selected = selected[:1]
 
-            for index, case in enumerate(selected):
-                result = await runner.run_case(
-                    adapter=adapter,
-                    case=case,
-                    agent=agent,
-                    budgets=effective_budgets,
-                    seed=seed + index,
-                    submission_extractor=_extract_submissions,
-                    allow_host_agent=allow_host_agent,
-                    solver_profile=solver_profile,
-                    max_unconfirmed_progress=max_unconfirmed_progress,
-                    max_replans=max_replans,
-                )
-                evaluation = result.get("evaluation", {})
-                session_meta = result.get("benchmark", {}).get("session", {})
-                result["benchmark"].update(
-                    {
-                        "challenge": case.id,
-                        "level": case.metadata.get("level"),
-                        "challenge_total_score": case.metadata.get("total_score", 0),
-                        "hint_used": bool(session_meta.get("hint_used")),
+            # The platform allows a small number of concurrent challenge
+            # containers; run cases through a bounded pool so a stuck case
+            # never blocks the rest of the set, and one case's failure does
+            # not abort the evaluation.
+            started_at = time.monotonic()
+            slots = asyncio.Semaphore(max(1, concurrency))
+
+            async def _run_case(index: int, case) -> dict:
+                async with slots:
+                    budgets = effective_budgets
+                    if total_wall_time is not None:
+                        remaining = total_wall_time - (time.monotonic() - started_at)
+                        if remaining <= DISPATCH_FLOOR_SECONDS + FINALIZE_GRACE_SECONDS:
+                            return {
+                                "run_id": None,
+                                "benchmark": {"challenge": case.id, "case_id": case.id},
+                                "status": "skipped",
+                                "success": False,
+                                "score": 0.0,
+                                "message": "evaluation window exhausted before dispatch",
+                            }
+                        if budgets.wall_time > int(remaining):
+                            budgets = budgets.model_copy(
+                                update={"wall_time": int(remaining)}
+                            )
+                    try:
+                        result = await runner.run_case(
+                            adapter=adapter,
+                            case=case,
+                            agent=agent,
+                            budgets=budgets,
+                            seed=seed + index,
+                            submission_extractor=_extract_submissions,
+                            allow_host_agent=allow_host_agent,
+                            solver_profile=solver_profile,
+                            max_unconfirmed_progress=max_unconfirmed_progress,
+                            max_replans=max_replans,
+                        )
+                    except Exception as exc:
+                        if _is_sdk_error(exc, "VpnCheckError"):
+                            raise
+                        return {
+                            "run_id": None,
+                            "benchmark": {"challenge": case.id, "case_id": case.id},
+                            "status": "error",
+                            "success": False,
+                            "score": 0.0,
+                            "message": f"case failed: {type(exc).__name__}",
+                        }
+                    evaluation = result.get("evaluation", {})
+                    session_meta = result.get("benchmark", {}).get("session", {})
+                    result["benchmark"].update(
+                        {
+                            "challenge": case.id,
+                            "level": case.metadata.get("level"),
+                            "challenge_total_score": case.metadata.get("total_score", 0),
+                            "hint_used": bool(session_meta.get("hint_used")),
+                        }
+                    )
+                    result["flags"] = {
+                        "expected": int(evaluation.get("expected_flags", 0)),
+                        "initial_correct": int(evaluation.get("initial_correct", 0)),
+                        "remaining_at_start": int(evaluation.get("remaining_at_start", 0)),
+                        "correct": int(evaluation.get("correct", 0)),
                     }
-                )
-                result["flags"] = {
-                    "expected": int(evaluation.get("expected_flags", 0)),
-                    "initial_correct": int(evaluation.get("initial_correct", 0)),
-                    "remaining_at_start": int(evaluation.get("remaining_at_start", 0)),
-                    "correct": int(evaluation.get("correct", 0)),
-                }
-                result["platform_cumulative_score"] = evaluation.get(
-                    "platform_cumulative_score"
-                )
-                results.append(result)
+                    result["platform_cumulative_score"] = evaluation.get(
+                        "platform_cumulative_score"
+                    )
+                    return result
+
+            results = list(
+                await asyncio.gather(*(_run_case(index, case) for index, case in enumerate(selected)))
+            )
     except Exception as exc:
         if _is_sdk_error(exc, "VpnCheckError"):
             reason = getattr(exc, "detail", None)

@@ -307,6 +307,26 @@ def tsec(
         int, typer.Option("--max-unconfirmed-progress", min=1)
     ] = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     max_replans: Annotated[int, typer.Option("--max-replans", min=1)] = BENCHMARK_MAX_REPLANS,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            min=1,
+            max=3,
+            help="Solve up to this many challenges at once (platform cap: 3).",
+        ),
+    ] = 1,
+    total_wall_time: Annotated[
+        int | None,
+        typer.Option(
+            "--total-wall-time",
+            min=1,
+            help=(
+                "Global soft window for the whole set, in seconds. New cases stop "
+                "being dispatched near the end so the finalize grace fits."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run TSec Benchmark challenges through the generic benchmark runtime."""
     spec = load_agent(agent)
@@ -345,6 +365,8 @@ def tsec(
             solver_profile=solver_profile,
             max_unconfirmed_progress=max_unconfirmed_progress,
             max_replans=max_replans,
+            concurrency=concurrency,
+            total_wall_time=total_wall_time,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))

@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 from harness.benchmark import tsec_adapter
 from harness.benchmark.base import BenchmarkCase, Submission
@@ -483,3 +484,148 @@ def test_tsec_cli_defaults_to_the_full_evaluation_window() -> None:
         for parameter in inspect.signature(tsec).parameters.values()
     }
     assert defaults["wall_time"] == MAX_EVALUATION_WALL_TIME_SECONDS == 8 * 3600
+
+
+class _ConcurrencyProbeRunner:
+    """Records how many run_case coroutines are in flight at once."""
+
+    calls: ClassVar[list[str]] = []
+    in_flight: ClassVar[int] = 0
+    max_in_flight: ClassVar[int] = 0
+    fail_cases: ClassVar[set[str]] = set()
+
+    def __init__(self, *, runs_root, skills_root=Path("skills")):
+        pass
+
+    async def run_case(self, *, case, budgets, **kwargs):
+        type(self).calls.append(case.id)
+        type(self).in_flight += 1
+        type(self).max_in_flight = max(type(self).max_in_flight, type(self).in_flight)
+        try:
+            await asyncio.sleep(0.05)
+            if case.id in type(self).fail_cases:
+                raise RuntimeError("simulated case failure")
+            return {
+                "run_id": f"run-{case.id}",
+                "benchmark": {"case_id": case.id, "session": {}},
+                "status": "finished",
+                "success": True,
+                "score": 1.0,
+                "evaluation": {},
+            }
+        finally:
+            type(self).in_flight -= 1
+
+
+class _MultiCaseClient(FakeRunnerClient):
+    async def list_challenges(self):
+        return [
+            SimpleNamespace(
+                unique_code=f"WEB-{index:03d}",
+                description=f"challenge {index}",
+                category="web",
+                flag_count=1,
+                correct_flag_count=0,
+                difficulty="easy",
+                level="L1",
+                total_score=10,
+                is_completed=False,
+            )
+            for index in range(1, 4)
+        ]
+
+    async def start_challenge(self, code):
+        return SimpleNamespace(container_addr=["10.0.0.2:8080"])
+
+    async def close_challenge(self, code):
+        return SimpleNamespace(closed=True)
+
+
+def _reset_probe() -> None:
+    _ConcurrencyProbeRunner.calls = []
+    _ConcurrencyProbeRunner.in_flight = 0
+    _ConcurrencyProbeRunner.max_in_flight = 0
+    _ConcurrencyProbeRunner.fail_cases = set()
+
+
+def test_run_tsec_challenges_solves_cases_concurrently(monkeypatch, tmp_path: Path) -> None:
+    _reset_probe()
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _MultiCaseClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _ConcurrencyProbeRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=60),
+            runs_root=tmp_path,
+            run_all=True,
+            concurrency=3,
+        )
+    )
+
+    assert len(results) == 3
+    assert _ConcurrencyProbeRunner.max_in_flight >= 2
+
+
+def test_run_tsec_challenges_serial_when_concurrency_one(monkeypatch, tmp_path: Path) -> None:
+    _reset_probe()
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _MultiCaseClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _ConcurrencyProbeRunner)
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=60),
+            runs_root=tmp_path,
+            run_all=True,
+            concurrency=1,
+        )
+    )
+
+    assert _ConcurrencyProbeRunner.max_in_flight == 1
+
+
+def test_run_tsec_challenges_continues_after_a_case_fails(monkeypatch, tmp_path: Path) -> None:
+    _reset_probe()
+    _ConcurrencyProbeRunner.fail_cases = {"WEB-001"}
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _MultiCaseClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _ConcurrencyProbeRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=60),
+            runs_root=tmp_path,
+            run_all=True,
+            concurrency=3,
+        )
+    )
+
+    by_challenge = {result["benchmark"]["challenge"]: result for result in results}
+    assert by_challenge["WEB-001"]["status"] == "error"
+    assert by_challenge["WEB-002"]["status"] == "finished"
+    assert by_challenge["WEB-003"]["status"] == "finished"
+
+
+def test_run_tsec_challenges_skips_dispatch_past_total_window(monkeypatch, tmp_path: Path) -> None:
+    _reset_probe()
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _MultiCaseClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _ConcurrencyProbeRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=60),
+            runs_root=tmp_path,
+            run_all=True,
+            concurrency=3,
+            total_wall_time=1,
+        )
+    )
+
+    assert _ConcurrencyProbeRunner.calls == []
+    assert all(result["status"] == "skipped" for result in results)

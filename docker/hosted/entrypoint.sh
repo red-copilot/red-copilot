@@ -8,11 +8,14 @@ set -eu
 : "${BENCHMARK_TOKEN:?BENCHMARK_TOKEN must be injected by the platform}"
 : "${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY must be injected by the platform}"
 
-# Wall-time fits the ranking/practice set's 360-minute task window with a
-# margin for startup and the finalize grace window. The competition window is
-# eight hours: set HARNESS_WALL_TIME=28800 in the platform's runtime
-# environment variables for that run - no image change needed.
-WALL_TIME="${HARNESS_WALL_TIME:-20400}"
+# Time budgets: HARNESS_WALL_TIME is the per-challenge soft limit (a stuck
+# case finalizes and frees its slot); HARNESS_TOTAL_WALL_TIME is the global
+# window for the whole set, which stops dispatching near the end so the
+# finalize grace fits. Defaults fit the ranking set's 360-minute window; the
+# competition expects ~10h - set HARNESS_TOTAL_WALL_TIME=34800 there.
+WALL_TIME="${HARNESS_WALL_TIME:-2700}"
+TOTAL_WALL_TIME="${HARNESS_TOTAL_WALL_TIME:-20400}"
+CONCURRENCY="${HARNESS_CONCURRENCY:-3}"
 
 exec harness tsec \
   --agent /opt/red-harness/agents/hosted/pi-deepseek.yaml \
@@ -20,4 +23,6 @@ exec harness tsec \
   --runs-root /work/tsec-runs \
   --all \
   --allow-host-agent \
-  --wall-time "$WALL_TIME"
+  --wall-time "$WALL_TIME" \
+  --total-wall-time "$TOTAL_WALL_TIME" \
+  --concurrency "$CONCURRENCY"
