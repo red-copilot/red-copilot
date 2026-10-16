@@ -90,7 +90,7 @@ P0 是赛前必须成立的能力；没做完的项必须显式标出，不许�
 | ZCP-01 | 接入面核对（SDK `openapi/v1` vs 官方 `/api` + `Agent-Token`） | `src/harness/benchmark/tsec_client.py`、`src/harness/preflight.py` | 离线就绪；实时核对 blocked（需平台窗口） | 离线契约与 preflight 环境诊断已就绪（`tests/test_tsec_adapter.py`、[tsec.md](tsec.md) 核对清单）；对真实平台跑通 list/start/submit/hint/close 待执行 |
 | ZCP-02 | 3 req/s 令牌桶 + 实例 ≤3 + 用完 `close_challenge` 释放 | `src/harness/benchmark/tsec_client.py`、`src/harness/benchmark/tsec_adapter.py` | 已落地 | 假时钟证明 3 req/s 不越界；实例注册表上限 3、重复启动拒绝、失败/关闭幂等释放；429 单次退避后 fail-closed（`tests/test_tsec_adapter.py`） |
 | ZCP-03 | 多题并行调度（≤3 题，独立 run dir 与预算） | `src/harness/benchmark/tsec_adapter.py` | 已落地 | `run_tsec_challenges` 的信号量与按题 run dir（`tests/test_tsec_adapter.py`） |
-| ZCP-04 | 按步数阈值分级提示，替代全局 `--hint` | `src/harness/benchmark/tsec_adapter.py`、`src/harness/solver_policy.py` | 未落地 | 阈值只触发一次、只影响该题、扣分影响可对账 |
+| ZCP-04 | 按步数阈值分级提示，替代全局 `--hint` | `src/harness/benchmark/tsec_adapter.py`、`src/harness/solver_loop.py`、`src/harness/cli.py` | 已落地 | `--hint-threshold`（默认 0＝关闭）；`request_hint` 同题只取一次、失败不重试；连续无进展达阈值经 steer 注入一次（`tests/test_solver_loop.py`、`tests/test_tsec_adapter.py`）；`result.json` 记录 `hint_used`/`hint_trigger` |
 | ZCP-11 | 墙钟上限解除：有效预算取声明的 `--wall-time`，另加运维安全阀 | `src/harness/benchmark/tsec_adapter.py`、`src/harness/cli.py` | 已落地 | 声明 7200s 时有效预算就是 7200s；`--max-wall-time-seconds` 只在显式传入时生效（`tests/test_tsec_adapter.py`） |
 
 P1 是赛前有余力才做、赛后必做的项：

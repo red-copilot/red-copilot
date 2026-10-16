@@ -696,6 +696,26 @@ class FailingStartSDK(FakeSDK):
         raise RuntimeError("start rejected")
 
 
+class HintCountingClient(FakeTSecClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hint_calls = 0
+
+    async def get_hint(self, unique_code: str):
+        self.hint_calls += 1
+        return await super().get_hint(unique_code)
+
+
+class FailingHintClient(FakeTSecClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hint_calls = 0
+
+    async def get_hint(self, unique_code: str):
+        self.hint_calls += 1
+        raise RuntimeError("hint service down")
+
+
 def _limited_adapter(
     sdk: FakeSDK,
 ) -> tuple[TSecClientAdapter, FakeClock, list[float]]:
@@ -777,3 +797,41 @@ def test_tsec_client_retries_429_once_then_fails_closed() -> None:
         TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
         TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
     ]
+
+
+def test_tsec_adapter_requests_hint_once_per_case() -> None:
+    async def scenario() -> None:
+        client = HintCountingClient()
+        adapter = TSecBenchmarkAdapter(client, use_hint=False)
+        cases = await adapter.discover()
+        session = await adapter.provision(cases[0])
+
+        assert session.metadata["hint_trigger"] is None
+        first = await adapter.request_hint("WEB-001")
+        second = await adapter.request_hint("WEB-001")
+
+        assert first == "look at the service"
+        assert second == first
+        assert client.hint_calls == 1
+        assert session.metadata["hint_used"] is True
+        assert session.metadata["hint_trigger"] == "threshold"
+        assert session.metadata["hint"] == "look at the service"
+
+    asyncio.run(scenario())
+
+
+def test_tsec_adapter_hint_failure_is_recorded_and_not_retried() -> None:
+    async def scenario() -> None:
+        client = FailingHintClient()
+        adapter = TSecBenchmarkAdapter(client, use_hint=False)
+        cases = await adapter.discover()
+        session = await adapter.provision(cases[0])
+
+        assert await adapter.request_hint("WEB-001") is None
+        assert await adapter.request_hint("WEB-001") is None
+        assert client.hint_calls == 1
+        assert session.metadata["hint_used"] is False
+        assert session.metadata["hint_error"] is True
+        assert session.metadata["hint_trigger"] == "threshold"
+
+    asyncio.run(scenario())

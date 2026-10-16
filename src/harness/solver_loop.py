@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -116,6 +116,8 @@ class SolverLoop:
         world_inbox: WorldInboxCursor | None = None,
         max_no_progress: int = DEFAULT_MAX_NO_PROGRESS,
         max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
+        hint_request: Callable[[], Awaitable[str | None]] | None = None,
+        hint_threshold: int = 0,
         processed_event_ids: dict[str, str] | None = None,
         world_inbox_path: Path | None = None,
         sync_agent_views: Callable[[], None] | None = None,
@@ -144,6 +146,9 @@ class SolverLoop:
         self.sync_agent_views = sync_agent_views
         self.max_no_progress = max_no_progress
         self.max_unconfirmed_progress = max_unconfirmed_progress
+        self._hint_request = hint_request
+        self.hint_threshold = hint_threshold
+        self._hint_steered = False
         self._budget_steers_fired: set[float] = set()
         self._finalize_steered = False
         self._finalize_prompted = False
@@ -423,6 +428,7 @@ class SolverLoop:
         self.progress.write(self.progress_path)
         self._sync_agent_views()
         await self._maybe_steer_repetition(session)
+        await self._maybe_steer_hint(session)
         await self._maybe_steer_budget(session)
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
@@ -539,6 +545,50 @@ class SolverLoop:
                     "consecutive": streak,
                     "level": level,
                     "message": message,
+                },
+            )
+        )
+
+    async def _maybe_steer_hint(self, session: AgentSession) -> None:
+        """Fetch the platform hint once when the run is stuck past the threshold.
+
+        The callback is the benchmark adapter's one-shot fetch, so a failed
+        lookup is recorded and never retried in a loop.
+        """
+        if (
+            self._hint_steered
+            or self._hint_request is None
+            or self.hint_threshold <= 0
+            or self.progress.objective_completed
+        ):
+            return
+        if self.progress.no_progress_count < self.hint_threshold:
+            return
+        self._hint_steered = True
+        hint: str | None = None
+        try:
+            hint = await self._hint_request()
+        except Exception:  # noqa: BLE001 - a failed hint must not stall the loop
+            hint = None
+        self.trace.emit(
+            "solver.hint",
+            actor="harness",
+            data={
+                "used": bool(hint),
+                "threshold": self.hint_threshold,
+                "no_progress_count": self.progress.no_progress_count,
+            },
+        )
+        if not hint:
+            return
+        await session.observe(
+            AgentObservation(
+                type="solver.hint",
+                data={
+                    "threshold": self.hint_threshold,
+                    "message": (
+                        "Platform hint (viewing it reduces this flag's score):\n" + hint
+                    ),
                 },
             )
         )

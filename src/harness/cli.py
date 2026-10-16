@@ -278,6 +278,17 @@ def tsec(
         bool,
         typer.Option("--hint", help="Request the platform hint; this may reduce flag score."),
     ] = False,
+    hint_threshold: Annotated[
+        int,
+        typer.Option(
+            "--hint-threshold",
+            min=0,
+            help=(
+                "Fetch the platform hint once when consecutive no-progress outcomes "
+                "reach N; 0 keeps hints off unless --hint is passed."
+            ),
+        ),
+    ] = 0,
     start_retries: Annotated[int, typer.Option("--start-retries", min=0, max=10)] = 2,
     retry_delay: Annotated[float, typer.Option("--retry-delay", min=0)] = 2.0,
     allow_host_agent: Annotated[
@@ -313,6 +324,7 @@ def tsec(
             run_all=run_all,
             seed=seed,
             use_hint=use_hint,
+            hint_threshold=hint_threshold,
             start_retries=start_retries,
             retry_delay=retry_delay,
             allow_host_agent=allow_host_agent,
