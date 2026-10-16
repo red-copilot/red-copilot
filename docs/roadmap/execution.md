@@ -2,10 +2,10 @@
 
 **Scope:** `agent.py`, `session.py`, `pi_adapter.py`, `pi_container.py`, `gateway.py`, `gateway_runtime.py`, `tool_adapter.py`, `environment.py`, `docker/pi-kali/`. Pi runs inside Kali Rolling containers with long-lived RPC where configured.
 
-### EXE-01 [~] P0 — Execution trust boundary
+### EXE-01 [x] P0 — Execution trust boundary
 Deliver: documented threat model plus enforceable mounts, secret isolation, rootfs permissions, capability/PID/CPU/RAM limits, network rules, a non-privileged default and artifact handoff; the Agent must not reach the authoritative World DB, verifier source or credentials.
 Accept: integration tests attempt to mutate protected state, obtain secrets, escape the allowed workspace and contact denied destinations; failures are observable.
-State: per-run `agent-workspace/` separation, numeric UID/GID ownership, no-follow file access, a verifier-free bounded task snapshot, blanked Docker proxy defaults, explicit `cap_add` opt-in, shared `build_container_command` limits and six enforced network profiles are implemented. Outstanding: Docker isolation-probe execution in CI.
+State: per-run `agent-workspace/` separation, numeric UID/GID ownership, no-follow file access, a verifier-free bounded task snapshot, blanked Docker proxy defaults, explicit `cap_add` opt-in, shared `build_container_command` limits and six enforced network profiles are implemented. The isolation-probe boundary test now runs in CI (`tests/test_container_boundary.py`, executed after the probe image build) and passed locally against `harness-isolation-probe:ci`.
 
 ### EXE-02 [~] P1 — Adapter/session contract and budgets
 Deliver: normalized event IDs, settled/terminal semantics, tool-call correlation and per-run token/tool/wall-clock/cost accounting without double charging through both Gateway and Pi.
@@ -15,7 +15,7 @@ State: strict typed adapters (`AgentRunContext`, `SessionPhaseTracker`, `AgentCa
 ### EXE-03 [~] P1 — Offline profiles and deterministic build
 Deliver: separate `target-only`, `model-allowed` and `fully-offline` networking, pinned image dependencies and pre-installed tools with no package installation while solving.
 Accept: a no-public-egress smoke suite in a clean runner plus network policy tests.
-State: profiles are enforced from inspected internal-network IDs, preflight describes the required topology, and the Pi image pins the Kali OCI digest, rewrites `kali-rolling` to `kali-last-snapshot`, pins the Pi version and ships wordlists. Outstanding: Docker egress and clean-runner image reproducibility evidence.
+State: profiles are enforced from inspected internal-network IDs, preflight describes the required topology, and the Pi image pins the Kali OCI digest, rewrites `kali-rolling` to `kali-last-snapshot`, pins the Pi version and ships wordlists. Internal-target egress denial now runs in CI (`tests/test_network_profiles_docker.py`) and passed locally; clean-runner image reproducibility evidence remains outstanding.
 
 ### EXE-04 [x] P2 — Tool execution capabilities
 Deliver: domain-agnostic `ToolAdapter` with structured metadata, cancellation and evidence references, explicit registration only, and preserved approval/authorization boundaries.
