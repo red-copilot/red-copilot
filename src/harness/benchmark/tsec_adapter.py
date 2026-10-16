@@ -5,6 +5,7 @@ import json
 import re
 import typing
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from ..agent import AgentResult
@@ -123,7 +124,7 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
         remaining = max(0, total - initial_correct)
         objective_parts = [
             "You are solving an authorized security benchmark.",
-            f"Challenge:\n{challenge.description}",
+            f"Challenge:\n{challenge.description or '(the platform provided no description)'}",
             (
                 f"Flag progress before this run: {initial_correct}/{total}. "
                 f"Find {remaining} remaining flag(s)."
@@ -314,6 +315,30 @@ def _extract_submissions(result: AgentResult) -> list[Submission]:
     return submissions
 
 
+@asynccontextmanager
+async def _tsec_client(config: TSecConfig):
+    """Open the SDK client, turning the entry VPN precheck into a clear error.
+
+    The sandbox log is the only observability in managed evaluation; a raw
+    VpnCheckError traceback would say nothing actionable.
+    """
+    client = TSecClientAdapter(config)
+    try:
+        await client.__aenter__()
+    except Exception as exc:
+        if _is_sdk_error(exc, "VpnCheckError"):
+            raise TSecAdapterError(
+                "benchmark network precheck failed: the sandbox cannot reach "
+                f"BENCHMARK_BASE_URL ({config.base_url}) - check the injected "
+                "environment variables"
+            ) from exc
+        raise
+    try:
+        yield client
+    finally:
+        await client.__aexit__(None, None, None)
+
+
 async def run_tsec_challenges(
     *,
     config: TSecConfig,
@@ -340,7 +365,7 @@ async def run_tsec_challenges(
     )
     runner = BenchmarkRunner(runs_root=runs_root, skills_root=skills_root)
     try:
-        async with TSecClientAdapter(config) as client:
+        async with _tsec_client(config) as client:
             adapter = TSecBenchmarkAdapter(
                 client,
                 use_hint=use_hint,
