@@ -78,8 +78,16 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # from the snapshot, summarises `tool.execution` bookkeeping and drops the
 # provenance blob from the Agent-facing lines. Measured before 17,075, after
 # 17,127 (+52). Re-measured from the tree, not estimated.
+#
+# VER-05 (Harness observation contract) added no module: the typed
+# `ObservationRecord` and the `unavailable` action status in `verification.py`,
+# the comparison baseline and replan narrowing in `action_verifier.py`, the
+# bounded observation list in `solver_loop.py`, the platform-verdict record in
+# `benchmark/runner.py`, the counter in `progress.py` and the audit tally.
+# Measured before 17,127, after 17,276 (+149). Re-measured from the tree, not
+# estimated.
 MAX_MODULES = 57
-MAX_SRC_LINES = 17_127
+MAX_SRC_LINES = 17_276
 
 
 def _module_names() -> set[str]:

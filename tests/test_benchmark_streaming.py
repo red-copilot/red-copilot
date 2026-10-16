@@ -554,11 +554,15 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
     assert result["progress"]["objective_completed"] is False
     assert result["progress"]["completion_claims"] == ["goal:CASE-MALICIOUS:objective"]
     assert result["progress"]["objective_verdict"]["status"] == "contradicted"
-    assert result["progress"]["last_verification"]["status"] == "pending"
+    # A benchmark run has no independent observation to compare an action
+    # against, so the honest verdict is "unavailable": recorded, never steered,
+    # never mistaken for progress or for a stall (VER-05).
+    assert result["progress"]["last_verification"]["status"] == "unavailable"
+    assert result["progress"]["last_verification"]["replan_required"] is False
+    assert result["progress"]["unavailable_actions"] >= 1
     assert fake_agent.session is not None
-    # Benchmark runs have no action-level verifier, so a pending verdict is the
-    # default outcome and steering on it is noise; it stays recorded in the
-    # progress ledger and the trace but is no longer injected into the session.
+    # Steering on a non-verdict is noise; it stays recorded in the progress
+    # ledger and the trace but is no longer injected into the session.
     assert not any(
         item.type == "solver.verification" for item in fake_agent.session.feedback
     )
@@ -571,7 +575,7 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
     ]
     assert any(
         item.get("type") == "action.verified"
-        and item.get("data", {}).get("status") == "pending"
+        and item.get("data", {}).get("status") == "unavailable"
         for item in verdicts
     )
     audit = audit_run(tmp_path / result["run_id"])
@@ -780,3 +784,120 @@ def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path:
         assert kwargs["submission_due_fraction"] == runner_module.BENCHMARK_SUBMISSION_DUE_FRACTION
         assert kwargs["quiet_world_steers"] is True
         assert kwargs["verdict_steers_only"] is True
+
+
+class RejectingBenchmarkAdapter(FakeBenchmarkAdapter):
+    """The platform refuses the candidate: the one real mid-run signal there is."""
+
+    async def submit(self, _session, submission):
+        self.submissions.append(submission.value)
+        return SubmissionResult(
+            accepted=False,
+            score_delta=0,
+            completed=False,
+            metadata={"correct_flag_count": 0, "total_flag_count": 1},
+        )
+
+
+class ObservationSession(FakeSession):
+    """Runs a tool call, submits a candidate, then keeps working."""
+
+    async def events(self):
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="action.intent",
+            data={
+                "description": "probe the admin endpoint",
+                "expected_observations": ["admin endpoint reachable"],
+            },
+        )
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="tool.call",
+            data={"tool": "bash", "tool_call_id": "call-obs", "args_family": "bash:curl"},
+        )
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="tool.result",
+            data={
+                "tool": "bash",
+                "tool_call_id": "call-obs",
+                "duration_ms": 10,
+                "is_error": False,
+                "exit_code": 0,
+            },
+        )
+        (self.run_dir / "submission.inbox.jsonl").write_text(
+            json.dumps({"type": "flag", "value": "flag{guess}"}) + "\n",
+            encoding="utf-8",
+        )
+        self.checkpoint_calls += 1
+        yield AgentEvent(type="progress.updated", data={"step": 2, "made_progress": True})
+        # Keep working after the rejected candidate: the next action is the one
+        # the platform verdict can speak for.
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="tool.call",
+            data={"tool": "bash", "tool_call_id": "call-obs-2", "args_family": "bash:curl"},
+        )
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="tool.result",
+            data={
+                "tool": "bash",
+                "tool_call_id": "call-obs-2",
+                "duration_ms": 20,
+                "is_error": False,
+                "exit_code": 0,
+            },
+        )
+
+
+class ObservationAgentAdapter(FakeAgentAdapter):
+    async def start_session(self, context, **_kwargs):
+        self.session = ObservationSession(context.run_dir)
+        return self.session
+
+
+def test_platform_verdict_is_the_comparison_baseline_for_the_next_action(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """VER-05: the Harness compares against what it saw, not what the Agent said."""
+    import harness.benchmark.runner as runner_module
+
+    fake_agent = ObservationAgentAdapter()
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: fake_agent,
+    )
+
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=RejectingBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-OBS", benchmark="fake"),
+            agent=AgentSpec.model_validate(
+                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
+            ),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+            allow_host_agent=True,
+        )
+    )
+
+    verification = result["progress"]["last_verification"]
+    assert verification is not None
+    assert verification["status"] == "pending"
+    assert verification["replan_required"] is False
+    assert "observation_recorded" in verification["replan_reasons"]
+    observation = verification["observation"]
+    assert observation["producer"] == "benchmark_evaluator"
+    assert observation["kind"] == "benchmark.submission.verdict"
+    assert "rejected" in observation["summary"]
+    assert verification["actual_observation"] == observation["summary"]
+    # A non-verdict is recorded, never steered.
+    assert fake_agent.session is not None
+    assert not any(
+        item.type == "solver.verification" for item in fake_agent.session.feedback
+    )

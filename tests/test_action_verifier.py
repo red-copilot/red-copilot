@@ -46,7 +46,8 @@ def _authorized(registry: VerifierRegistry, verdict: ActionVerdict):
     return registry.authorize_action(authority, verdict)
 
 
-def test_action_verifier_matching_agent_text_is_pending() -> None:
+def test_action_verifier_without_a_harness_observation_is_unavailable() -> None:
+    """Agent text is not a comparison baseline - only a Harness observation is."""
     progress = ProgressLedger(
         expected_observation="admin endpoint exists",
         actual_observation="the admin endpoint exists at /admin",
@@ -55,8 +56,11 @@ def test_action_verifier_matching_agent_text_is_pending() -> None:
 
     result = ActionVerifier().verify(progress, run_id="run-1")
 
-    assert result.status == "pending"
-    assert result.replan_required is True
+    assert result.status == "unavailable"
+    assert "observation_unavailable" in result.replan_reasons
+    assert result.observation is None
+    # A recorded non-verdict must not spend an Agent turn asking to replan.
+    assert result.replan_required is False
 
 
 def test_action_verifier_keeps_failed_execution_separate_from_effect_status() -> None:
@@ -73,17 +77,56 @@ def test_action_verifier_keeps_failed_execution_separate_from_effect_status() ->
     assert "action_failed" in result.replan_reasons
 
 
-def test_action_verifier_marks_missing_actual_inconclusive() -> None:
+def test_action_verifier_compares_against_a_harness_observation() -> None:
+    from harness.verification import ObservationRecord
+
+    observation = ObservationRecord(
+        observation_id="obs-1",
+        run_id="run-1",
+        producer="benchmark_evaluator",
+        captured_at=datetime.now(UTC),
+        world_revision=2,
+        kind="submission.verdict",
+        summary="platform rejected candidate flag{guess}",
+    )
     progress = ProgressLedger(
         expected_observation="port 443 is open",
         last_action={"status": "succeeded", "tool_call_id": "call-1"},
     )
 
-    result = ActionVerifier().verify(progress, run_id="run-1")
+    result = ActionVerifier().verify(
+        progress, run_id="run-1", current_world_revision=2, observations=[observation]
+    )
 
     assert result.status == "pending"
-    assert result.replan_required is True
-    assert "expected_observation_missing" in result.replan_reasons
+    assert result.observation is not None
+    assert result.actual_observation == "platform rejected candidate flag{guess}"
+    assert "observation_recorded" in result.replan_reasons
+    assert result.replan_required is False
+
+
+def test_a_harness_observation_from_another_run_is_ignored() -> None:
+    from harness.verification import ObservationRecord
+
+    observation = ObservationRecord(
+        observation_id="obs-other",
+        run_id="run-other",
+        producer="harness_probe",
+        captured_at=datetime.now(UTC),
+        world_revision=2,
+        kind="probe.response",
+        summary="200 OK",
+    )
+    progress = ProgressLedger(
+        expected_observation="port 443 is open",
+        last_action={"status": "succeeded", "tool_call_id": "call-1"},
+    )
+
+    result = ActionVerifier().verify(
+        progress, run_id="run-1", current_world_revision=2, observations=[observation]
+    )
+
+    assert result.status == "unavailable"
 
 
 def test_action_verifier_skips_without_expected_observation() -> None:
@@ -99,7 +142,8 @@ def test_agent_negative_text_is_not_trusted_verdict() -> None:
     )
     result = ActionVerifier().verify(progress, run_id="run-1")
     assert result is not None
-    assert result.status == "pending"
+    assert result.status == "unavailable"
+    assert result.replan_required is False
 
 
 def test_trusted_verifier_can_confirm_matching_tool_call() -> None:
@@ -120,7 +164,7 @@ def test_trusted_verifier_can_confirm_matching_tool_call() -> None:
     assert result.evidence[0].evidence_id == "probe-result-1"
 
 
-def test_trusted_verdict_rejects_mismatched_action_id() -> None:
+def test_trusted_verdict_for_another_action_cannot_verify() -> None:
     registry = VerifierRegistry()
     progress = ProgressLedger(
         expected_observation="service reachable",
@@ -134,7 +178,8 @@ def test_trusted_verdict_rejects_mismatched_action_id() -> None:
         trusted_verdict=_authorized(registry, _verdict(action_id="other")),
     )
     assert result is not None
-    assert result.status == "pending"
+    assert result.status == "unavailable"
+    assert result.replan_required is False
 
 
 def test_agent_authored_source_string_cannot_enter_trusted_channel() -> None:
@@ -154,7 +199,8 @@ def test_agent_authored_source_string_cannot_enter_trusted_channel() -> None:
         },
     )
     assert result is not None
-    assert result.status == "pending"
+    assert result.status == "unavailable"
+    assert "observation_unavailable" in result.replan_reasons
 
 
 def test_action_verification_without_action_id_is_rejected() -> None:

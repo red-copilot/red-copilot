@@ -9,6 +9,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from ..session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
 from ..solver_loop import missing_summary_sections
 from .base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
+from ..verification import ObservationRecord
 from ..budget import FINALIZE_GRACE_SECONDS, UsageMetrics, enforced_budget_limits
 from ..progress import SLOW_TOOL_CALLS, ProgressLedger, empty_steer_counts
 from ..runtime import SolverRuntime, bootstrap_solver
@@ -862,6 +864,35 @@ class BenchmarkRunner:
             data["value_sha256"] = submission_digest
             submission_results.append(data)
             trace.emit("benchmark.submission.result", data=data)
+            # The platform verdict is the one thing in a benchmark run that the
+            # Harness observes for itself. Recording it gives every session a
+            # comparison baseline for its next action verdict instead of the
+            # Agent's own expected-observation text (VER-05).
+            for observing in runtimes:
+                note_verdict = getattr(observing.runtime.loop, "note_observation", None)
+                if not callable(note_verdict):
+                    continue
+                try:
+                    note_verdict(
+                            ObservationRecord(
+                                observation_id=f"submission:{submission_digest[:16]}",
+                                run_id=trace.run_id,
+                                producer="benchmark_evaluator",
+                                captured_at=datetime.now(UTC),
+                                world_revision=world.snapshot.revision,
+                                kind="benchmark.submission.verdict",
+                                summary=(
+                                    "platform "
+                                    f"{'accepted' if submitted.accepted else 'rejected'} "
+                                    f"a {submission.type} candidate "
+                                    f"(score delta {submitted.score_delta}, "
+                                    f"completed={submitted.completed})"
+                                ),
+                            )
+                        )
+                except (TypeError, ValueError):
+                    # Telemetry for the next verdict, never a control path.
+                    continue
             submission_completed = False
             if submitted.completed:
                 # The submission response is an intermediate signal. Stop only

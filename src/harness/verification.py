@@ -7,10 +7,17 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 EvidenceProducer = Literal["tool_adapter", "task_verifier", "benchmark_evaluator"]
+# A Harness observation is something the Harness itself saw - the platform
+# verdict on a submission, or a probe it ran - as opposed to what the Agent
+# reported. Only these may stand in for the Agent's expected observation.
+ObservationProducer = Literal["harness_probe", "benchmark_evaluator"]
 VerdictProducer = Literal[
     "tool_adapter", "task_verifier", "benchmark_evaluator", "harness_verifier"
 ]
-ActionStatus = Literal["verified", "contradicted", "pending"]
+# "unavailable" is the honest verdict when the Harness has no independent
+# observation to compare against: the 2026-10-16 sweep produced 656 of them as
+# "pending", which read as "still being decided" and steered pointless replans.
+ActionStatus = Literal["verified", "contradicted", "pending", "unavailable"]
 ExecutionStatus = Literal["succeeded", "failed", "unknown"]
 ObjectiveStatus = Literal["verified", "contradicted", "inconclusive", "unavailable"]
 
@@ -39,6 +46,35 @@ class EvidenceRef(BaseModel):
         return self
 
 
+class ObservationRecord(BaseModel):
+    """What the Harness itself saw, as opposed to what the Agent claimed.
+
+    This is the only thing an action verdict may be compared against. An Agent
+    string - its ``expected_observation`` - is not a baseline, which is why the
+    2026-10-16 runs produced 656 pending verdicts with reason
+    ``expected_observation_missing``: nothing on the Harness side ever produced
+    the other half of the comparison.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["harness/observation/v1"] = "harness/observation/v1"
+    observation_id: str = Field(min_length=1, max_length=256)
+    run_id: str = Field(min_length=1, max_length=256)
+    producer: ObservationProducer
+    captured_at: datetime
+    world_revision: int = Field(ge=0)
+    kind: str = Field(min_length=1, max_length=128)
+    summary: str = Field(min_length=1, max_length=4096)
+    artifact_hash: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> Self:
+        if self.captured_at.tzinfo is None or self.captured_at.utcoffset() is None:
+            raise ValueError("captured_at must be timezone-aware")
+        return self
+
+
 class ActionVerdict(BaseModel):
     """Action outcome with execution and observed-effect status kept separate."""
 
@@ -54,6 +90,7 @@ class ActionVerdict(BaseModel):
     status: ActionStatus
     expected_observation: str | None = None
     actual_observation: str | None = None
+    observation: ObservationRecord | None = None
     evidence: tuple[EvidenceRef, ...] = ()
     replan_required: bool = False
     replan_reasons: tuple[str, ...] = ()
@@ -70,6 +107,8 @@ class ActionVerdict(BaseModel):
             raise ValueError("failed execution cannot verify an observed effect")
         if self.status == "verified" and not self.evidence:
             raise ValueError("verified action verdict requires evidence")
+        if self.status == "unavailable" and self.evidence:
+            raise ValueError("an unavailable verdict cannot carry evidence")
         evidence_ids: set[str] = set()
         for ref in self.evidence:
             if ref.evidence_id in evidence_ids:

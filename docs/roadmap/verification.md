@@ -22,7 +22,7 @@ Deliver: one verifier protocol for local tasks and benchmark adapters, sandboxed
 Accept: shared contract tests for success, failure, unavailable verifier, timeout and inconsistent evaluator responses; fail closed when verification is unavailable.
 State: implemented; both runner paths record an `unavailable` verdict with a safe error class and perform normal teardown.
 
-### VER-05 [ ] P1 — Harness observation contract
+### VER-05 [~] P1 — Harness observation contract
 Deliver: a typed `ObservationRecord` (producer, capture time, world revision, artifact hash)
 produced only by Harness-owned sources - the platform verdict and Harness-side probes - with the
 Agent's `expected_observation` no longer acting as the comparison baseline: no observation
@@ -30,7 +30,21 @@ records `unavailable` and never steers, a recorded observation is compared.
 Accept: unit tests for "no observation, no steer", a matched observation, and a forged producer
 being rejected; the VER-01/02 authority model and the claim < evidence < verified ladder are
 unchanged.
-State: pending. Evidence: 656 of 656 verdicts were `pending` with
+State: implemented. `ObservationRecord` is a typed, frozen record (producer limited to
+`harness_probe` / `benchmark_evaluator`, capture time, world revision, kind, summary, artifact
+hash); `ActionVerifier.verify` takes the run's observations and compares against the newest one at
+or before the current revision instead of the Agent's text. No observation yields the new
+`unavailable` status with reason `observation_unavailable`, `replan_required=False` and no steer;
+an observation yields `pending` + `observation_recorded` with the observation attached. Pending and
+unavailable verdicts no longer ask for a replan - only a contradicted effect, a failed execution or
+stale trusted evidence do. The benchmark runner records the platform's submission verdict as the
+run's first observation source, so the next action verdict has a real baseline, and the ledger and
+audit tally the new status. Evidence: `tests/test_action_verifier.py` (baseline from an
+observation, foreign-run observation ignored, agent text alone unavailable),
+`tests/test_benchmark_streaming.py` (a rejected candidate becomes the baseline for the next
+action), `tests/test_audit.py`. Trust model unchanged: VER-01/02 still gate `verified`, and an
+observation is not evidence. Outstanding: Harness-side probes beyond the platform verdict (EXE-08
+phase one) and the live re-run. Evidence: 656 of 656 verdicts were `pending` with
 `world_revision_changed` / `expected_observation_missing`, i.e. the Harness compared an Agent
 string against a world it could not see.
 

@@ -23,7 +23,11 @@ from .solver_policy import (
     decide_solver_action,
 )
 from .trace import TraceRecorder
-from .verification import AuthorizedActionVerdict, VerifierRegistry
+from .verification import (
+    AuthorizedActionVerdict,
+    ObservationRecord,
+    VerifierRegistry,
+)
 from .world import (
     Observation,
     Provenance,
@@ -33,6 +37,9 @@ from .world import (
 from .world.live import WorldInboxCursor
 
 MAX_PROCESSED_EVENT_IDS = 50_000
+# Harness observations are kept bounded: they exist to answer "what did the
+# Harness itself see" for the next action verdict, not to mirror the trace.
+MAX_OBSERVATION_RECORDS = 32
 
 # A single blocking command is the largest avoidable cost observed in the
 # 2026-10-16 sweep: 19 calls ran past 180s and the longest held 927s of an
@@ -196,6 +203,7 @@ class SolverLoop:
         self._finalize_prompted = False
         self._submission_due_steered = False
         self._tool_slow_steered = False
+        self._observations: list[ObservationRecord] = []
         self.stats = SolverLoopStats()
         self._processed_event_ids: dict[str, str] = dict(processed_event_ids or {})
 
@@ -447,6 +455,7 @@ class SolverLoop:
                 current_world_revision=after_revision,
                 evidence_world_revision=before_revision,
                 trusted_verdict=trusted_verdict,
+                observations=tuple(self._observations),
             )
             if verification is None:
                 self.progress.skipped_verifications += 1
@@ -501,10 +510,16 @@ class SolverLoop:
                         actor="harness",
                         data=verification.model_dump(mode="json"),
                     )
-                    # A benchmark with no action-level verifier produces a
-                    # pending verdict for nearly every execution; only a real
-                    # verdict is worth an Agent turn.
-                    if not (self.verdict_steers_only and verification.status == "pending"):
+                    # Only a real verdict is worth an Agent turn. A benchmark
+                    # with no action-level verifier produced a pending verdict
+                    # for nearly every execution in the 2026-10-16 sweep (656 of
+                    # 656), all of which the Agent could do nothing with; the
+                    # same now holds for the honest "unavailable" verdict.
+                    steer_verdict = not self.verdict_steers_only or verification.status in {
+                        "verified",
+                        "contradicted",
+                    }
+                    if steer_verdict:
                         self._count_steer("verification")
                         await session.observe(
                             AgentObservation(
@@ -532,6 +547,17 @@ class SolverLoop:
             )
         self._emit_decision(decision, event_type=event.type, event_id=event.event_id)
         return decision
+
+    def note_observation(self, observation: ObservationRecord) -> None:
+        """Record something the Harness itself saw for the next verdict.
+
+        Callers are Harness-owned integration points only - the benchmark
+        submission verdict today, Harness-side probes later. An Agent-authored
+        claim never reaches this list, which is what keeps the comparison
+        baseline independent of the Agent's own text.
+        """
+        self._observations.append(observation)
+        del self._observations[:-MAX_OBSERVATION_RECORDS]
 
     def _count_steer(self, bucket: str) -> None:
         """Record one delivered Agent observation.

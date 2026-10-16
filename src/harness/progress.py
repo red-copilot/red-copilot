@@ -102,6 +102,9 @@ class ProgressLedger(BaseModel):
     goal_advanced: int = 0
     contradicted_actions: int = 0
     pending_actions: int = 0
+    # Verdicts the Harness could not decide because it had no independent
+    # observation: recorded, never steered, never mistaken for a stall.
+    unavailable_actions: int = 0
     skipped_verifications: int = 0
     last_action: dict[str, Any] | None = None
     active_actions: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -382,6 +385,8 @@ class ProgressLedger(BaseModel):
             self.unconfirmed_progress += 1
         elif status == "pending":
             self.pending_actions += 1
+        elif status == "unavailable":
+            self.unavailable_actions += 1
 
     def record_submission(self, *, accepted: bool, completed: bool) -> None:
         del completed  # Final evaluation, not submission feedback, owns completion.
