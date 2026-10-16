@@ -65,8 +65,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # summary fields in `benchmark/tsec_adapter.py` and the `harness report` block
 # in `cli.py`. Measured before 16,658, after 16,968 (+310). Re-measured from
 # the tree, not estimated.
+#
+# RUN-06 (in-run pacing) added no module either: `agent_budget_lines` plus the
+# duration formatter in `progress.py`, the budget lines in the focus block of
+# `world/context.py`, the slow-call trace and one-shot steer in
+# `solver_loop.py`, and the bash-timeout clamp in the opt-in Pi extension
+# asset. Measured before 16,968, after 17,075 (+107). Re-measured from the
+# tree, not estimated.
 MAX_MODULES = 57
-MAX_SRC_LINES = 16_968
+MAX_SRC_LINES = 17_075
 
 
 def _module_names() -> set[str]:

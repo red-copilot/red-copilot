@@ -34,6 +34,13 @@ from .world.live import WorldInboxCursor
 
 MAX_PROCESSED_EVENT_IDS = 50_000
 
+# A single blocking command is the largest avoidable cost observed in the
+# 2026-10-16 sweep: 19 calls ran past 180s and the longest held 927s of an
+# 1800s window. The Agent picks its own per-command timeout, so the Harness
+# states the ceiling in the context and marks every call that exceeds it; the
+# hard clamp lives in the opt-in Pi extension.
+SLOW_TOOL_CALL_MS = 180_000
+
 # The finalize steer asks for a report with these four sections. The Agent's
 # summary is untrusted text, so the Harness only *reports* what is missing; it
 # never fails a run because a heading is absent. The generic English markers are
@@ -188,6 +195,7 @@ class SolverLoop:
         self._finalize_steered = False
         self._finalize_prompted = False
         self._submission_due_steered = False
+        self._tool_slow_steered = False
         self.stats = SolverLoopStats()
         self._processed_event_ids: dict[str, str] = dict(processed_event_ids or {})
 
@@ -276,7 +284,10 @@ class SolverLoop:
 
         self.progress.record_event(event)
         self.progress.write(self.progress_path)
-        self._sync_agent_views()
+        # Rewrite the projection every event, not only on world changes: the
+        # remaining window is part of it now, and a clock that only ticks when
+        # the World happens to change would be worse than no clock at all.
+        self._write_context()
         before_revision = self.world.revision
         if event.type in {"tool.call", "tool.result"}:
             tool_call_id = event.data.get("tool_call_id")
@@ -301,6 +312,7 @@ class SolverLoop:
                 )
                 if event.type == "tool.result":
                     self._record_tool_metrics(event)
+                    await self._note_slow_tool(session, event)
 
         if event.type == "model.usage":
             self._record_context_metrics(event)
@@ -570,6 +582,51 @@ class SolverLoop:
                 prompt += value
         if prompt:
             self.stats.context_tokens_final = prompt
+
+    async def _note_slow_tool(self, session: AgentSession, event: AgentEvent) -> None:
+        """Surface a command that held the window instead of failing silently.
+
+        The trace records every over-threshold call; the Agent is told once per
+        run, because the 2026-10-16 data shows the loop can spend its whole
+        budget inside one blocking command without anyone saying so.
+        """
+        duration = event.data.get("duration_ms")
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or duration < SLOW_TOOL_CALL_MS
+        ):
+            return
+        self.trace.emit(
+            "tool.slow",
+            actor="harness",
+            data={
+                "tool": event.data.get("tool"),
+                "tool_call_id": event.data.get("tool_call_id"),
+                "duration_ms": duration,
+                "threshold_ms": SLOW_TOOL_CALL_MS,
+            },
+        )
+        if self._tool_slow_steered:
+            return
+        self._tool_slow_steered = True
+        seconds = duration // 1000
+        await session.observe(
+            AgentObservation(
+                type="solver.tool_slow",
+                data={
+                    "duration_ms": duration,
+                    "threshold_ms": SLOW_TOOL_CALL_MS,
+                    "message": (
+                        f"One command blocked for {seconds}s, past the "
+                        f"{SLOW_TOOL_CALL_MS // 1000}s threshold this run is paced by. "
+                        "Bound the next one: pass an explicit timeout, cap the word "
+                        "list and request rate, and read partial results instead of "
+                        "waiting for a full sweep."
+                    ),
+                },
+            )
+        )
 
     def metrics_snapshot(self) -> dict:
         """Run-level metric fields shared with ``result.json`` and the sweep summary."""
@@ -970,6 +1027,7 @@ class SolverLoop:
             snapshot,
             query=self.context_query,
             focus=focus,
+            budget=self.progress.agent_budget_lines(),
         )
         (self.run_dir / "world.context.txt").write_text(rendered, encoding="utf-8")
         self._sync_agent_views()

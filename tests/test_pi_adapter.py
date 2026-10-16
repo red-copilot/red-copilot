@@ -97,6 +97,12 @@ def test_prepare_agent_dir_installs_the_harness_extension_when_opted_in(
     text = asset.read_text(encoding="utf-8")
     assert 'pi.on("tool_result"' in text
     assert 'pi.on("session_before_compact"' in text
+    # The third hook bounds one command: the 2026-10-16 sweep lost 927s of an
+    # 1800s window to a single call the Agent had asked to run unbounded.
+    assert 'pi.on("tool_call"' in text
+    assert "MAX_TOOL_TIMEOUT_MS = 180000" in text
+    assert "event.input.timeout = MAX_TOOL_TIMEOUT_MS" in text
+    assert "isToolCallEventType" in text
 
     disabled = _adapter(monkeypatch, tmp_path)
     other_run = tmp_path / "disabled"

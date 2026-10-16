@@ -52,10 +52,11 @@ For VPN-backed benchmark targets on Linux workers, `network: host` is supported.
 
 `pi.harness_extension: true` installs the Harness-authored `harness-context.ts` into the
 run's Pi agent directory and stops passing `--no-extensions`, so Pi loads exactly that one
-file. The extension has two hooks: oversized `tool_result` output is spilled into the Agent
-workspace with a 600-character preview kept in context, and `session_before_compact`
+file. The extension has three hooks: oversized `tool_result` output is spilled into the Agent
+workspace with a 600-character preview kept in context, `session_before_compact`
 produces a summary carrying the Harness retention checklist (any failure falls back to
-Pi's default compaction). Default is false; when false, behaviour is unchanged. Keep
+Pi's default compaction), and `tool_call` clamps the requested per-command timeout to
+180s so one blocking command cannot hold the run window. Default is false; when false, behaviour is unchanged. Keep
 `extensions: false` unless an evaluation explicitly accepts other extension sources: the
 competition profile only enables the Harness-authored file. The execution boundary for the
 extension is documented in [security/execution-boundary.md](security/execution-boundary.md).

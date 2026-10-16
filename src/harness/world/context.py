@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -135,6 +136,7 @@ class WorldContextBuilder:
         *,
         query: str | None = None,
         focus: FocusSet | None = None,
+        budget: Sequence[str] | None = None,
     ) -> str:
         """Render the Agent context, optionally prefixed by a bounded focus block.
 
@@ -146,9 +148,11 @@ class WorldContextBuilder:
         body = self._render_body(snapshot, query=query)
         if focus is None or not self.focus_enabled:
             return body
-        return self._render_focus(focus) + "\n" + body
+        return self._render_focus(focus, budget_lines=budget) + "\n" + body
 
-    def _render_focus(self, focus: FocusSet) -> str:
+    def _render_focus(
+        self, focus: FocusSet, *, budget_lines: Sequence[str] | None = None
+    ) -> str:
         budget = max(1, self.focus_max_chars)
         marker = "[focus truncated to character budget]"
         lines: list[str] = []
@@ -179,6 +183,10 @@ class WorldContextBuilder:
 
         add("## Focus")
         add(f"reference: {_clip(focus.reference, 300) or 'none'}")
+        # Budget sits with the reference because it qualifies every next move:
+        # a run at 10% wall clock should consolidate, not widen.
+        for line in budget_lines or ():
+            add(f"budget: {_clip(line, 200)}")
         add(f"subgoal: {_clip(focus.subgoal, 300) if focus.subgoal else 'none'}")
         add_section("Established facts", focus.established)
         add_section("Open unknowns", focus.unknowns)

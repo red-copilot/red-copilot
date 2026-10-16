@@ -735,3 +735,48 @@ def test_report_tolerates_a_result_without_metrics(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "run metrics:" not in result.stdout
+
+
+def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path: Path) -> None:
+    """Pin the defaults the failure shape of 2026-10-16 depends on.
+
+    Fifteen losing runs submitted nothing and spent turns on feedback they could
+    not act on; the benchmark path has to keep asking for a submission at the
+    soft limit and stop echoing zero-information steers.
+    """
+    import harness.benchmark.runner as runner_module
+
+    captured: list[dict] = []
+    real_bootstrap = runner_module.bootstrap_solver
+
+    def spy(*args, **kwargs):
+        captured.append(kwargs)
+        return real_bootstrap(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "bootstrap_solver", spy)
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: FakeAgentAdapter(),
+    )
+
+    asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-SWITCHES", benchmark="fake"),
+            agent=AgentSpec.model_validate(
+                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
+            ),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+            allow_host_agent=True,
+        )
+    )
+
+    assert captured, "the benchmark run must compose a solver runtime"
+    for kwargs in captured:
+        assert kwargs["finalize_requests_submission"] is True
+        assert kwargs["submission_due_fraction"] == runner_module.BENCHMARK_SUBMISSION_DUE_FRACTION
+        assert kwargs["quiet_world_steers"] is True
+        assert kwargs["verdict_steers_only"] is True

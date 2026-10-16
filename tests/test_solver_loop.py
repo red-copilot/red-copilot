@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -888,3 +889,91 @@ def test_metrics_snapshot_counts_the_finalize_steer_once(tmp_path: Path) -> None
 
     assert len([item for item in session.feedback if item.type == "solver.finalize"]) == 1
     assert loop.metrics_snapshot()["steer_counts"]["finalize"] == 1
+
+
+def test_written_context_carries_the_remaining_window(tmp_path: Path) -> None:
+    loop, _progress, session = _metrics_loop(
+        tmp_path,
+        progress_kwargs={"budget_limits": {"wall_time": 600, "max_tokens": 1000}},
+    )
+
+    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
+
+    context = (tmp_path / "world.context.txt").read_text(encoding="utf-8")
+    assert "## Focus" in context
+    assert "budget: wall_time 100% left" in context
+    # A dimension appears only once it has been charged; the wall clock is
+    # always visible because it is the window every decision is paced by.
+    assert "max_tokens" not in context
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(type="model.usage", data={"total_tokens": 250, "cost_usd": 0.0}),
+        )
+    )
+
+    context = (tmp_path / "world.context.txt").read_text(encoding="utf-8")
+    assert "budget: max_tokens 75% left" in context
+
+
+def test_a_blocking_command_is_traced_and_surfaced_once(tmp_path: Path) -> None:
+    """One 927s call ate half a window in the 2026-10-16 sweep, silently."""
+    loop, _progress, session = _metrics_loop(tmp_path)
+    slow = AgentEvent(
+        type="tool.result",
+        data={
+            "tool": "bash",
+            "tool_call_id": "call-blocking",
+            "duration_ms": 814_000,
+            "is_error": False,
+            "exit_code": 0,
+        },
+    )
+
+    asyncio.run(loop.process_event(session, slow))
+    asyncio.run(loop.process_event(session, slow))
+
+    trace_types = [
+        json.loads(line)["type"]
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert trace_types.count("tool.slow") == 2
+    slow_steers = [item for item in session.feedback if item.type == "solver.tool_slow"]
+    assert len(slow_steers) == 1
+    assert "814s" in slow_steers[0].data["message"]
+    assert loop.metrics_snapshot()["tool_time_ms"] == 1_628_000
+
+
+def test_a_bounded_command_is_not_flagged(tmp_path: Path) -> None:
+    loop, _progress, session = _metrics_loop(tmp_path)
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="tool.result",
+                data={
+                    "tool": "bash",
+                    "tool_call_id": "call-bounded",
+                    "duration_ms": 4_000,
+                    "is_error": False,
+                    "exit_code": 0,
+                },
+            ),
+        )
+    )
+
+    trace = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert "tool.slow" not in trace
+    assert [item for item in session.feedback if item.type == "solver.tool_slow"] == []
+
+
+def test_closure_switches_default_off_for_task_runs(tmp_path: Path) -> None:
+    """A local task run must not inherit the benchmark closure behaviour."""
+    loop, _progress, _session = _metrics_loop(tmp_path)
+
+    assert loop.finalize_requests_submission is False
+    assert loop.submission_due_fraction is None
+    assert loop.quiet_world_steers is False
+    assert loop.verdict_steers_only is False

@@ -2,19 +2,28 @@
  * Harness Pi context extension (opt-in; only loaded when pi.harness_extension is true).
  *
  * Capability ceiling: this extension only (1) spills oversized tool output into the
- * Agent workspace, keeping a bounded preview in context, and (2) supplies a compaction
- * summary that preserves the Harness retention checklist. It adds no network
- * capability, cannot sign verdicts, never reads credentials or the run root, and every
- * file it writes is Agent-side output, not evidence.
+ * Agent workspace, keeping a bounded preview in context, (2) supplies a compaction
+ * summary that preserves the Harness retention checklist, and (3) clamps the requested
+ * per-command timeout so one blocking command cannot spend the run window. It adds no
+ * network capability, cannot sign verdicts, never reads credentials or the run root, and
+ * every file it writes is Agent-side output, not evidence.
  */
 import { mkdir, writeFile } from "node:fs/promises";
-import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
+import {
+	convertToLlm,
+	isToolCallEventType,
+	serializeConversation,
+} from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { uuidv7 } from "@earendil-works/pi-ai";
 
 const MAX_INLINE_CHARS = 32000;
 const PREVIEW_CHARS = 600;
 const SPILL_DIR = "/run/harness/artifacts/tool-spill";
+// The Agent chooses its own per-command timeout. The 2026-10-16 sweep showed what
+// that costs when nothing bounds it: 19 commands ran past 180s and the longest held
+// 927s of an 1800s window. The clamp only ever lowers a request, never raises one.
+const MAX_TOOL_TIMEOUT_MS = 180000;
 
 let spillSequence = 0;
 
@@ -38,6 +47,18 @@ function isTextBlock(block: { type?: string; text?: string }): block is TextBloc
 }
 
 export default function harnessContext(pi: ExtensionAPI) {
+	pi.on("tool_call", (event) => {
+		if (!isToolCallEventType("bash", event)) return;
+		const requested = event.input.timeout;
+		if (
+			typeof requested !== "number" ||
+			!Number.isFinite(requested) ||
+			requested > MAX_TOOL_TIMEOUT_MS
+		) {
+			event.input.timeout = MAX_TOOL_TIMEOUT_MS;
+		}
+	});
+
 	pi.on("tool_result", async (event) => {
 		const textBlocks = event.content.filter(isTextBlock);
 		const textChars = textBlocks

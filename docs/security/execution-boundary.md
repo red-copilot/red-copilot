@@ -55,9 +55,12 @@ With `pi.harness_extension: true`, the Harness writes its own TypeScript extensi
 `run_dir/pi-agent/extensions/harness-context.ts` (visible in the container as
 `/run/harness/pi-agent/extensions/harness-context.ts`) and stops passing `--no-extensions`, so
 Pi loads exactly that Harness-authored file at startup. The extension runs with Agent
-privileges and has exactly two handlers: a `tool_result` spill that writes oversized output
-into the Agent workspace while keeping a bounded preview in context, and a
-`session_before_compact` summary carrying the Harness retention checklist. It adds no network
+privileges and has exactly three handlers: a `tool_result` spill that writes oversized output
+into the Agent workspace while keeping a bounded preview in context, a
+`session_before_compact` summary carrying the Harness retention checklist, and a `tool_call`
+clamp that lowers the requested bash timeout to 180s. The clamp only narrows what the Agent
+asks for: it grants nothing, and the Harness-side `tool.slow` event records every call that
+still runs long. It adds no network
 capability, cannot sign verdicts, never reads credentials or the run root, and everything it
 writes is Agent-side output, not evidence. The default is off; when off, behaviour is
 unchanged. Other extension sources stay disabled unless `pi.extensions: true` is set

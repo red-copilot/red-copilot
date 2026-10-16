@@ -56,6 +56,18 @@ def empty_steer_counts() -> dict[str, int]:
     return dict.fromkeys(STEER_BUCKET_NAMES, 0)
 
 
+def _format_seconds(seconds: float) -> str:
+    """Compact duration for the Agent-facing budget line (e.g. ``11m12s``)."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    minutes, rest = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m{rest:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
 class ProgressHypothesis(BaseModel):
     id: str
     statement: str | None = None
@@ -470,6 +482,34 @@ class ProgressLedger(BaseModel):
             return False
         elapsed = (datetime.now(UTC) - self.budget_exceeded_at).total_seconds()
         return elapsed >= self.wall_time_grace_seconds
+
+    def agent_budget_lines(self) -> list[str]:
+        """Deterministic, Agent-facing statement of what is left.
+
+        The 2026-10-16 sweep sent 39 budget steers, all of them only once the
+        budget was nearly gone, and `world.context.txt` carried no budget
+        section at all; the Agent had no way to answer "how much time is left"
+        except by burning a turn on it.
+        """
+        if not self.budget_limits:
+            return ["no declared budget; the operator owns the wall clock"]
+        lines: list[str] = []
+        for dimension, fraction in sorted(
+            self.budget_fractions().items(),
+            key=lambda item: (item[0] != "wall_time", item[0]),
+        ):
+            if dimension == "wall_time":
+                limit = self.budget_limits.get("wall_time", 0.0)
+                effective = limit + self.wall_time_grace_seconds
+                elapsed = max(0.0, (datetime.now(UTC) - self.started_at).total_seconds())
+                lines.append(
+                    f"wall_time {fraction:.0%} left "
+                    f"({_format_seconds(max(0.0, effective - elapsed))} of "
+                    f"{_format_seconds(effective)})"
+                )
+            else:
+                lines.append(f"{dimension} {fraction:.0%} left")
+        return lines
 
     def budget_fractions(self) -> dict[str, float]:
         """Per-dimension remaining budget fraction (``1.0`` when untouched)."""
