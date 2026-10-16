@@ -97,7 +97,7 @@ P1 是赛前有余力才做、赛后必做的项：
 
 | ID | 交付 | 落点 | 状态 | 验收 |
 | --- | --- | --- | --- | --- |
-| ZCP-05 | 上下文重启与接力简报（阶段一已落地）；容器内钩子为阶段二，需 maintainer 复核 | `src/harness/solver_loop.py`、`src/harness/benchmark/runner.py`、`src/harness/progress.py` | 阶段一已落地 | 自上次重启起工具调用 300 次、或又用掉 `max_tool_calls` 的 60% 时触发重启，最多 2 次（刚跨过的阈值不会在下一次事件重触发，`tests/test_solver_loop.py`）；简报含已确立事实/已排除路径/开放意图/指针；旧会话产物归档为 `restart-N` 副本（`tests/test_executors.py`） |
+| ZCP-05 | 上下文重启与接力简报（阶段一已落地）；容器内钩子为阶段二，默认关闭、maintainer 已复核 | `src/harness/solver_loop.py`、`src/harness/benchmark/runner.py`、`src/harness/progress.py`、`src/harness/pi_assets/harness-context.ts` | 阶段一、二均已落地 | 阶段一：工具调用 300 次或再用掉 60% 工具调用预算时重启，最多 2 次；简报含已确立事实/已排除路径/开放意图/指针；旧会话归档为 `restart-N`（`tests/test_solver_loop.py`、`tests/test_executors.py`）。阶段二：`pi.harness_extension` 显式开启才安装 Harness 扩展并停传 `--no-extensions`；扩展仅 `tool_result` 落盘（32k/600 预览）与 `session_before_compact` 保留清单两个钩子，失败回退默认压缩（`tests/test_pi_adapter.py`；边界见 [security/execution-boundary.md](security/execution-boundary.md)）；Pi 模型实测 blocked（本机无模型凭据） |
 | ZCP-06 | 重复动作打断（消费已有的 `args_family`，连续同族注入干预） | `src/harness/progress.py`、`src/harness/solver_loop.py` | 已落地 | 同族连续 3 次触发一次干预、6 次升级为收敛级；确认进展清零计数；不同命令族不误伤（`tests/test_solver_loop.py`） |
 | ZCP-07 | 知识库填充（技能手册 + 自研索引 + 上游语料按需挂载） | `skills/offensive/`、`knowledge/README.md` | 已落地 | 7 个技能含全部必需小节且 ≥50 行；索引链接可解析；上游语料只经 `scripts/fetch-knowledge.sh` 按 pinned revision 拉取（`tests/test_knowledge_catalogue.py`） |
 | ZCP-08 | 失败/已排除路径看板 | `src/harness/world/context.py` | 已落地 | refuted/superseded 出现在 Ruled out（上限 10 条，截断给计数）；无记录时投影不含该段（`tests/test_world_context.py`） |

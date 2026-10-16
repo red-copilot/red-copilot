@@ -17,7 +17,7 @@ from harness.session import AgentEvent
 from harness.trace import TraceRecorder
 
 
-def _pi_spec(mode: str = "rpc") -> AgentSpec:
+def _pi_spec(mode: str = "rpc", *, harness_extension: bool = False) -> AgentSpec:
     return AgentSpec.model_validate(
         {
             "apiVersion": "harness/v1",
@@ -30,16 +30,23 @@ def _pi_spec(mode: str = "rpc") -> AgentSpec:
                 "model": "fake-model",
                 "mode": mode,
                 "thinking": "medium",
+                "harness_extension": harness_extension,
                 "env_passthrough": ["FAKE_PROVIDER_KEY"],
             },
         }
     )
 
 
-def _adapter(monkeypatch, tmp_path: Path, mode: str = "rpc") -> ContainerPiAdapter:
+def _adapter(
+    monkeypatch,
+    tmp_path: Path,
+    mode: str = "rpc",
+    *,
+    harness_extension: bool = False,
+) -> ContainerPiAdapter:
     monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
     return ContainerPiAdapter(
-        _pi_spec(mode),
+        _pi_spec(mode, harness_extension=harness_extension),
         allow_host=False,
         trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
     )
@@ -64,6 +71,40 @@ def test_pi_command_uses_rpc_mode_and_safe_defaults(monkeypatch, tmp_path: Path)
     assert "$HARNESS_FEEDBACK_FILE" in prompt
     assert "rejected candidate" in prompt
     assert "reread $HARNESS_WORLD_CONTEXT" in prompt
+
+
+def test_pi_command_omits_no_extensions_only_for_the_harness_extension(
+    monkeypatch, tmp_path: Path
+) -> None:
+    adapter = _adapter(monkeypatch, tmp_path, harness_extension=True)
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+    command = adapter._command(task, gateway_enabled=False)
+
+    assert "--no-extensions" not in command
+    assert "--no-skills" in command
+    assert "--no-context-files" in command
+
+
+def test_prepare_agent_dir_installs_the_harness_extension_when_opted_in(
+    monkeypatch, tmp_path: Path
+) -> None:
+    enabled = _adapter(monkeypatch, tmp_path, harness_extension=True)
+    run_dir = tmp_path / "enabled"
+    run_dir.mkdir()
+    enabled._prepare_agent_dir(run_dir=run_dir, gateway_url=None, gateway_token=None)
+
+    asset = run_dir / "pi-agent" / "extensions" / "harness-context.ts"
+    text = asset.read_text(encoding="utf-8")
+    assert 'pi.on("tool_result"' in text
+    assert 'pi.on("session_before_compact"' in text
+
+    disabled = _adapter(monkeypatch, tmp_path)
+    other_run = tmp_path / "disabled"
+    other_run.mkdir()
+    disabled._prepare_agent_dir(run_dir=other_run, gateway_url=None, gateway_token=None)
+    assert not (other_run / "pi-agent" / "extensions").exists()
+
+
 def test_pi_container_command_is_restricted_and_passes_direct_secret(
     monkeypatch, tmp_path: Path
 ) -> None:

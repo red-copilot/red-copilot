@@ -27,8 +27,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # brief renderer, the window-relative restart trigger in `progress.py`, and the
 # whole-word summary-section marker check). Re-measured from the tree rather
 # than estimated.
+#
+# The competition-window round added no module either. Measured before 15,508,
+# after 15,764 (+256: the TSec token bucket, instance registry and single 429
+# retry in `benchmark/tsec_client.py`; the hint steer in `solver_loop.py` with
+# its adapter/bootstrap/runner/CLI wiring; and the opt-in Harness Pi extension
+# install path in `pi_adapter.py`). Re-measured from the tree, not estimated.
 MAX_MODULES = 56
-MAX_SRC_LINES = 15_508
+MAX_SRC_LINES = 15_764
 
 
 def _module_names() -> set[str]:

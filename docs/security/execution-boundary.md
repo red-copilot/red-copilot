@@ -39,6 +39,20 @@ Nothing authoritative may live there: it must never contain `world.db`, `world.e
 read back only for archival, never as evidence or instruction. The run root itself stays
 unmounted from every session container.
 
+### Opt-in Harness Pi extension
+
+With `pi.harness_extension: true`, the Harness writes its own TypeScript extension to
+`run_dir/pi-agent/extensions/harness-context.ts` (visible in the container as
+`/run/harness/pi-agent/extensions/harness-context.ts`) and stops passing `--no-extensions`, so
+Pi loads exactly that Harness-authored file at startup. The extension runs with Agent
+privileges and has exactly two handlers: a `tool_result` spill that writes oversized output
+into the Agent workspace while keeping a bounded preview in context, and a
+`session_before_compact` summary carrying the Harness retention checklist. It adds no network
+capability, cannot sign verdicts, never reads credentials or the run root, and everything it
+writes is Agent-side output, not evidence. The default is off; when off, behaviour is
+unchanged. Other extension sources stay disabled unless `pi.extensions: true` is set
+explicitly, which the competition profile does not do.
+
 ## Process and network boundary
 
 Docker Agents run as the workspace's mapped numeric identity (UID/GID 65532 when Harness
