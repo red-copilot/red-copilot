@@ -95,4 +95,18 @@ COPY prompts /opt/red-harness/prompts
 COPY skills /opt/red-harness/skills
 COPY docker/hosted/entrypoint.sh /opt/red-harness/entrypoint.sh
 
+# Fail the build when a hosted agent references a file the image does not
+# carry (a missing system prompt only surfaced two uploads into the sandbox).
+RUN python3 - <<'EOF'
+from pathlib import Path
+import yaml
+
+for spec_path in Path("/opt/red-harness/agents").rglob("*.yaml"):
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    reference = (spec.get("pi") or {}).get("system_prompt_file")
+    if reference and not Path(reference).is_file():
+        raise SystemExit(f"{spec_path}: system prompt file missing in image: {reference}")
+print("hosted agent assets ok")
+EOF
+
 ENTRYPOINT ["/opt/red-harness/entrypoint.sh"]
