@@ -8,3 +8,7 @@ dist/
 build/
 *.ovpn
 .env
+
+# local image exports never belong in the repository
+agent.tar.gz
+agent*/
