@@ -347,6 +347,22 @@ def test_fold_session_progress_sums_session_counters_and_budget() -> None:
     assert run_progress.rejected_submissions == 1
 
 
+def test_fold_session_progress_keeps_the_worst_stall_not_the_sum() -> None:
+    """No single session stalled for the summed length, so the run reports the max."""
+    run_progress = ProgressLedger(active_goal="goal:1")
+    first = ProgressLedger()
+    first.no_progress_count = 4
+    first.unconfirmed_progress = 7
+    second = ProgressLedger()
+    second.no_progress_count = 5
+    second.unconfirmed_progress = 2
+
+    fold_session_progress(run_progress, (first, second))
+
+    assert run_progress.no_progress_count == 5
+    assert run_progress.unconfirmed_progress == 7
+
+
 def test_competing_sessions_share_one_provision_and_dedupe_submissions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
