@@ -428,6 +428,36 @@ class Orchestrator:
                         if decision.action.value == "stop":
                             await agent_session.close(f"solver-stop:{decision.reason}")
                             break
+                        # The local run path cannot restart the Agent session,
+                        # so a long context degrades to steering the brief in
+                        # place instead of silently ignoring the threshold.
+                        restart_reason = progress.context_restart_due()
+                        if restart_reason is not None:
+                            _, brief = solver_loop.write_carry_forward_brief(restart_reason)
+                            progress.record_context_restart()
+                            trace.emit(
+                                "solver.context_restart",
+                                actor="harness",
+                                data={
+                                    "reason": restart_reason,
+                                    "from_session": None,
+                                    "to_session": None,
+                                    "brief_chars": len(brief),
+                                    "degraded": True,
+                                },
+                            )
+                            await agent_session.observe(
+                                AgentObservation(
+                                    type="solver.context_restart",
+                                    data={
+                                        "reason": restart_reason,
+                                        "brief_file": "carry-forward.md",
+                                        "brief_chars": len(brief),
+                                        "degraded": True,
+                                        "message": brief,
+                                    },
+                                )
+                            )
                     result = await agent_session.result()
                     await save_session_checkpoint(
                         run_dir=run_dir,

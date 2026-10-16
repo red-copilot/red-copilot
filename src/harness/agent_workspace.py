@@ -9,11 +9,13 @@ import stat
 import tempfile
 from pathlib import Path
 
-from .secureio import open_beneath
+from .secureio import open_beneath, read_regular_text
 
 _HARNESS_VIEWS = ("world.context.txt", "progress.json")
 _CONTAINER_UID = 65532
 _CONTAINER_GID = 65532
+PRIOR_SUMMARY_NAME = "prior-summary.md"
+MAX_PRIOR_SUMMARY_BYTES = 256 * 1024
 
 
 def create_agent_workspace(run_dir: Path) -> Path:
@@ -23,6 +25,37 @@ def create_agent_workspace(run_dir: Path) -> Path:
     # rounds and sessions. The Harness never parses them.
     (workspace / "notes").mkdir(mode=0o700, exist_ok=True)
     return workspace
+
+
+def seed_notes_from_summary(*, workspace: Path, previous_run_dir: Path) -> Path:
+    """Carry a previous run's report into this run's notes as a read-only seed.
+
+    The note is agent-owned material, not authoritative state: it is written
+    into the writable notes directory so the Agent can read it at session
+    start, and the Harness never reads it back as evidence.
+    """
+    source = Path(previous_run_dir) / "agent.summary.md"
+    notes = workspace / "notes"
+    notes.mkdir(mode=0o700, exist_ok=True)
+    try:
+        text = read_regular_text(source, max_bytes=MAX_PRIOR_SUMMARY_BYTES)
+    except FileNotFoundError as exc:
+        raise ValueError(f"seed notes require an existing summary: {source}") from exc
+    target = notes / PRIOR_SUMMARY_NAME
+    if target.is_symlink():
+        raise ValueError("prior summary target cannot be a symlink")
+    descriptor, temp_name = tempfile.mkstemp(prefix=f".{PRIOR_SUMMARY_NAME}.", dir=notes)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, target)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    return target
 
 
 def validate_agent_task_inputs(*, task_dir: Path, verifier_entrypoint: str) -> None:

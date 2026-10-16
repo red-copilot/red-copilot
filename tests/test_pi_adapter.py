@@ -617,9 +617,12 @@ def test_pi_rpc_uses_verified_target_network_id(monkeypatch, tmp_path: Path) -> 
 
     asyncio.run(start_session())
 
-    create = docker_commands[0]
+    create = next(command for command in docker_commands if "--network" in command)
     assert create[create.index("--network") + 1] == "b" * 64
-    assert len(docker_commands) == 1
+    # A fresh session first inspects for a container left by a previous session
+    # in the same run directory (context restart), then creates its own.
+    assert len(docker_commands) == 2
+    assert docker_commands[0][1] == "inspect"
 def test_pi_rpc_normalizes_a_coarse_command_family() -> None:
     from harness.pi_adapter import _command_family
 

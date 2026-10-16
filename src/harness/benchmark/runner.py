@@ -4,10 +4,11 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import math
+import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from pydantic import ValidationError
 from ..agent import AgentResult, AgentRunContext, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
+from ..solver_loop import missing_summary_sections
 from .base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
 from ..budget import FINALIZE_GRACE_SECONDS, UsageMetrics, enforced_budget_limits
@@ -29,7 +31,7 @@ from ..runtime.executors import (
     prepare_executor_directories,
     prepare_shared_findings,
 )
-from ..agent_workspace import sync_agent_workspace
+from ..agent_workspace import seed_notes_from_summary, sync_agent_workspace
 from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
 from ..runtime.evidence import persist_objective_verdict
 from ..runtime.lifecycle import RunLifecycle, resolve_run_status
@@ -41,6 +43,7 @@ from ..world import (
     Goal,
     Observation,
     SQLiteWorldRepository,
+    WorldRepository,
 )
 from .base import BenchmarkAdapter, BenchmarkCase, BenchmarkSession, EvaluationResult, Submission
 from .protocol import SubmissionInbox
@@ -98,13 +101,172 @@ class _ExecutorRuntime:
     status: str = "pending"
     completed: bool = False
     submissions: int = 0
+    summary_missing_sections: list[str] = field(default_factory=list)
+    retired_results: list[AgentResult] = field(default_factory=list)
+    restarts: int = 0
+
+
+def _summary_key(key: tuple[str | None, str | None, str | None]) -> tuple[str, str, str]:
+    prompt, provider, model = key
+    return (
+        "" if prompt is None else prompt,
+        "" if provider is None else provider,
+        "" if model is None else model,
+    )
+
+
+def _executor_summary(runtimes: Sequence[_ExecutorRuntime]) -> list[dict[str, Any]]:
+    """Aggregate competing sessions by prompt, provider and model.
+
+    This is the post-run counterpart of launching several sessions: it answers
+    "which prompt and model actually solved things" without re-reading the
+    per-session artifacts by hand. Only competing runs emit it.
+    """
+    grouped: dict[tuple[str | None, str | None, str | None], dict[str, Any]] = {}
+    for item in runtimes:
+        pi = item.plan.agent.pi
+        key = (
+            pi.system_prompt_file if pi else None,
+            pi.provider if pi else None,
+            pi.model if pi else None,
+        )
+        entry = grouped.setdefault(
+            key,
+            {
+                "prompt": key[0],
+                "provider": key[1],
+                "model": key[2],
+                "sessions": 0,
+                "submissions": 0,
+                "completed_sessions": 0,
+                "budget_used": {},
+                "total_tokens": 0,
+            },
+        )
+        entry["sessions"] += 1
+        entry["submissions"] += item.submissions
+        entry["completed_sessions"] += 1 if item.completed else 0
+        for dimension, value in item.runtime.progress.budget_used.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                entry["budget_used"][dimension] = (
+                    entry["budget_used"].get(dimension, 0) + value
+                )
+        metrics = item.result.metrics.as_dict() if item.result else {}
+        tokens = metrics.get("total_tokens")
+        if isinstance(tokens, int) and not isinstance(tokens, bool):
+            entry["total_tokens"] += tokens
+    return [grouped[key] for key in sorted(grouped, key=_summary_key)]
+
+
+async def _session_identity(session: Any) -> str | None:
+    """Best-effort Agent session id for the restart trace."""
+    get_checkpoint = getattr(session, "checkpoint", None)
+    if not callable(get_checkpoint):
+        return None
+    try:
+        cursor = await get_checkpoint()
+    except Exception:  # noqa: BLE001 - identity is telemetry, not control
+        return None
+    identity = getattr(cursor, "session_id", None)
+    return identity if isinstance(identity, str) and identity else None
+
+
+def _archive_session_transcript(*, workspace: Path, attempt: int) -> None:
+    """Keep the retired session's raw transcript next to the new one."""
+    for name, archived in (
+        ("agent.stdout.log", f"agent.stdout.restart-{attempt}.log"),
+        ("events.jsonl", f"events.restart-{attempt}.jsonl"),
+    ):
+        source = workspace / name
+        if not source.is_file():
+            continue
+        shutil.copyfile(source, workspace / archived)
+
+
+async def _restart_session(
+    *,
+    executor: _ExecutorRuntime,
+    run_context: AgentRunContext,
+    adapter_instance: Any,
+    reason: str,
+    trace: TraceRecorder,
+) -> bool:
+    """Reset the Agent session and hand it the carry-forward brief.
+
+    The workspace, notes and container mounts are untouched: only the model's
+    transcript is discarded. Returns ``False`` when the restart could not be
+    completed, which tells the caller to end the session instead of looping.
+    """
+    loop = executor.runtime.loop
+    progress = executor.runtime.progress
+    _, brief = loop.write_carry_forward_brief(reason)
+    previous = executor.session
+    from_session = await _session_identity(previous)
+    attempt = executor.restarts + 1
+    degraded: dict[str, Any] = {
+        "reason": reason,
+        "from_session": from_session,
+        "to_session": None,
+        "brief_chars": len(brief),
+        "degraded": True,
+    }
+    try:
+        await previous.close(f"context-restart:{reason}")
+        retired = await previous.result()
+    except Exception as exc:  # noqa: BLE001 - keep the run, lose only the reset
+        trace.emit(
+            "solver.context_restart",
+            actor="harness",
+            data={**degraded, "error_type": type(exc).__name__, "stage": "close"},
+        )
+        return False
+    executor.retired_results.append(retired)
+    progress.record_context_restart()
+    _archive_session_transcript(workspace=executor.plan.workspace, attempt=attempt)
+    try:
+        executor.session = await adapter_instance.start_session(run_context)
+    except Exception as exc:  # noqa: BLE001
+        trace.emit(
+            "solver.context_restart",
+            actor="harness",
+            data={**degraded, "error_type": type(exc).__name__, "stage": "start"},
+        )
+        return False
+    executor.restarts = attempt
+    trace.emit(
+        "solver.context_restart",
+        actor="harness",
+        data={
+            "reason": reason,
+            "from_session": from_session,
+            "to_session": await _session_identity(executor.session),
+            "brief_chars": len(brief),
+            "degraded": False,
+            "restart": attempt,
+        },
+    )
+    # The brief rides in as the first observation, so it reaches the resumed
+    # process together with the objective instead of mid-turn.
+    await executor.session.observe(
+        AgentObservation(
+            type="solver.context_restart",
+            data={
+                "reason": reason,
+                "brief_file": "carry-forward.md",
+                "brief_chars": len(brief),
+                "message": brief,
+            },
+        )
+    )
+    return True
 
 
 def _merge_results(results: Sequence[AgentResult]) -> AgentResult:
     """Fold competing session results into one run-level result.
 
     Usage is summed; the first session-specific stop reason names the run's
-    exhaustion. Raw stdout/stderr stay in the per-session artifacts.
+    exhaustion. Raw stdout/stderr stay in the per-session artifacts. Session
+    restarts reuse it so the retired transcripts stay in the accounting.
     """
     totals: dict[str, int | float] = {
         "input_tokens": 0,
@@ -212,6 +374,71 @@ class BenchmarkRunner:
     ) -> None:
         self.runs_root = Path(runs_root)
 
+    async def _consume_session(
+        self,
+        *,
+        executor: _ExecutorRuntime,
+        planned: ExecutorSessionPlan,
+        run_context: AgentRunContext,
+        adapter_instance: Any,
+        trace: TraceRecorder,
+        world: WorldRepository,
+        archive: FindingsArchive | None,
+        submit_candidate: Callable[
+            [Submission, _ExecutorRuntime | None], Awaitable[bool]
+        ],
+    ) -> bool:
+        """Consume one Agent session stream.
+
+        Returns ``True`` when the session was reset for a fresh context, which
+        tells the caller to keep driving the (already replaced) session.
+        """
+        session = executor.session
+        async for event in session.events():
+            decision = await executor.runtime.loop.process_event(session, event)
+            sync_agent_workspace(run_dir=planned.root, workspace=planned.workspace)
+            await save_session_checkpoint(
+                run_dir=planned.root,
+                session=session,
+                world_revision=world.snapshot.revision,
+                progress=executor.runtime.progress,
+                processed_event_ids=executor.runtime.loop.processed_event_ids,
+            )
+            for submission in executor.submission_inbox.poll():
+                executor.submissions += 1
+                if await submit_candidate(submission, executor):
+                    executor.completed = True
+                    await session.close("objective-complete")
+                    break
+            if archive is not None:
+                archive.snapshot()
+            if executor.completed:
+                return False
+            restart_reason = executor.runtime.progress.context_restart_due()
+            if restart_reason is not None:
+                restarted = await _restart_session(
+                    executor=executor,
+                    run_context=run_context,
+                    adapter_instance=adapter_instance,
+                    reason=restart_reason,
+                    trace=trace,
+                )
+                if not restarted:
+                    await executor.session.close("context-restart-failed")
+                    return False
+                await save_session_checkpoint(
+                    run_dir=planned.root,
+                    session=executor.session,
+                    world_revision=world.snapshot.revision,
+                    progress=executor.runtime.progress,
+                    processed_event_ids=executor.runtime.loop.processed_event_ids,
+                )
+                return True
+            if decision.action.value == "stop":
+                await session.close(f"solver-stop:{decision.reason}")
+                return False
+        return False
+
     async def run_case(
         self,
         *,
@@ -223,6 +450,7 @@ class BenchmarkRunner:
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
         max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
+        seed_notes_from: Path | None = None,
     ) -> dict:
         if agent.type in {"docker", "pi"} and agent.network == "environment":
             raise ValueError(
@@ -234,6 +462,12 @@ class BenchmarkRunner:
         run_dir.mkdir(parents=True, exist_ok=False)
         plan = plan_executor_sessions(agent=agent, budgets=budgets, run_dir=run_dir)
         prepare_executor_directories(plan)
+        if seed_notes_from is not None:
+            for planned_session in plan.sessions:
+                seed_notes_from_summary(
+                    workspace=planned_session.workspace,
+                    previous_run_dir=seed_notes_from,
+                )
         shared_findings = prepare_shared_findings(plan)
         archive = FindingsArchive(run_dir=run_dir) if plan.competing else None
         trace = TraceRecorder(run_dir / "trace.jsonl", run_id, case.id)
@@ -677,36 +911,24 @@ class BenchmarkRunner:
                             f"solver-stop:{startup_decision.reason}"
                         )
                     else:
-                        async for event in executor.session.events():
-                            decision = await executor.runtime.loop.process_event(
-                                executor.session, event
+                        while True:
+                            restarted = await self._consume_session(
+                                executor=executor,
+                                planned=planned,
+                                run_context=run_context,
+                                adapter_instance=adapter_instance,
+                                trace=trace,
+                                world=world,
+                                archive=archive,
+                                submit_candidate=submit_candidate,
                             )
-                            sync_agent_workspace(
-                                run_dir=planned.root, workspace=planned.workspace
-                            )
-                            await save_session_checkpoint(
-                                run_dir=planned.root,
-                                session=executor.session,
-                                world_revision=world.snapshot.revision,
-                                progress=executor.runtime.progress,
-                                processed_event_ids=(
-                                    executor.runtime.loop.processed_event_ids
-                                ),
-                            )
-                            for submission in executor.submission_inbox.poll():
-                                executor.submissions += 1
-                                if await submit_candidate(submission, executor):
-                                    executor.completed = True
-                                    await executor.session.close("objective-complete")
-                                    break
-                            if archive is not None:
-                                archive.snapshot()
-                            if executor.completed:
-                                break
-                            if decision.action.value == "stop":
-                                await executor.session.close(f"solver-stop:{decision.reason}")
+                            if not restarted:
                                 break
                     executor.result = await executor.session.result()
+                    if executor.retired_results:
+                        executor.result = _merge_results(
+                            [*executor.retired_results, executor.result]
+                        )
                     await save_session_checkpoint(
                         run_dir=planned.root,
                         session=executor.session,
@@ -740,6 +962,26 @@ class BenchmarkRunner:
                 executor.result = adapter_instance.run(run_context)
 
             executor.runtime.loop.finish_ingest()
+
+            # The Agent's final report is untrusted text: the Harness records
+            # which of the four requested sections are missing so a thin
+            # hand-off is visible in the run result instead of silently lost.
+            summary_path = planned.workspace / "agent.summary.md"
+            executor.summary_missing_sections = missing_summary_sections(summary_path)
+            if executor.summary_missing_sections:
+                trace.emit(
+                    "solver.summary_incomplete",
+                    actor="harness",
+                    data={
+                        "executor_id": planned.executor_id,
+                        "reason": (
+                            "summary_missing"
+                            if not summary_path.is_file()
+                            else "sections_missing"
+                        ),
+                        "sections_missing": executor.summary_missing_sections,
+                    },
+                )
 
             if not executor.completed:
                 for submission in executor.submission_inbox.poll():
@@ -927,6 +1169,12 @@ class BenchmarkRunner:
                 termination_reason
             ),
             "summary": summary,
+            "agent_report": {
+                "present": (
+                    report_executor.plan.workspace / "agent.summary.md"
+                ).is_file(),
+                "sections_missing": list(report_executor.summary_missing_sections),
+            },
             "success": bool(evaluation and evaluation.success),
             "score": evaluation.score if evaluation is not None else 0.0,
             "message": (
@@ -969,6 +1217,12 @@ class BenchmarkRunner:
                     "index": item.plan.index,
                     "agent_id": item.plan.agent.id,
                     "model": item.plan.agent.pi.model if item.plan.agent.pi else None,
+                    "provider": item.plan.agent.pi.provider if item.plan.agent.pi else None,
+                    "prompt": (
+                        item.plan.agent.pi.system_prompt_file
+                        if item.plan.agent.pi
+                        else None
+                    ),
                     "status": item.status,
                     "objective_completed": item.completed,
                     "submissions": item.submissions,
@@ -977,8 +1231,10 @@ class BenchmarkRunner:
                     "summary_present": (
                         item.plan.workspace / "agent.summary.md"
                     ).is_file(),
+                    "summary_sections_missing": list(item.summary_missing_sections),
                 }
                 for item in runtimes
             ]
+            result["executor_summary"] = _executor_summary(runtimes)
         persist_run_result(run_dir=run_dir, trace=trace, result=result)
         return result

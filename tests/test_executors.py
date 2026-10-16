@@ -166,10 +166,11 @@ def _run_competing(
     behaviours: dict[str, tuple[list[str], bool]],
     executors: list[dict],
     adapter: FakeBenchmarkAdapter | None = None,
+    default: tuple[list[str], bool] | None = None,
 ) -> tuple[dict, FakeBenchmarkAdapter, ScriptedAgentAdapter]:
     import harness.benchmark.runner as runner_module
 
-    agent_adapter = ScriptedAgentAdapter(behaviours)
+    agent_adapter = ScriptedAgentAdapter(behaviours, default=default)
     monkeypatch.setattr(
         runner_module, "build_agent_adapter", lambda *_args, **_kwargs: agent_adapter
     )
@@ -556,3 +557,337 @@ def test_task_environment_omits_the_shared_findings_channel_without_a_share() ->
         network_profile="benchmark-only",
     )
     assert "HARNESS_SHARED_FINDINGS" not in plain
+
+
+def test_competing_sessions_report_per_prompt_attribution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    executors = [
+        {"id": "primary", "system_prompt_file": "prompts/zc-solver.md"},
+        {"id": "challenger", "model": "other-model", "provider": "openai"},
+    ]
+    result, _benchmark, _adapter = _run_competing(
+        monkeypatch,
+        tmp_path,
+        behaviours={
+            "01-primary": (["flag{primary}"], False),
+            "02-challenger": (["flag{challenger}"], False),
+        },
+        executors=executors,
+    )
+
+    sessions = {item["executor_id"]: item for item in result["executor_sessions"]}
+    assert sessions["primary"]["prompt"] == "prompts/zc-solver.md"
+    assert sessions["primary"]["provider"] == "openai"
+    assert sessions["primary"]["model"] == "test-model"
+    assert sessions["challenger"]["prompt"] is None
+    assert sessions["challenger"]["model"] == "other-model"
+
+    summary = {entry["model"]: entry for entry in result["executor_summary"]}
+    assert summary["test-model"]["sessions"] == 1
+    assert summary["test-model"]["prompt"] == "prompts/zc-solver.md"
+    assert summary["other-model"]["sessions"] == 1
+    assert summary["other-model"]["model"] == "other-model"
+    assert len(result["executor_summary"]) == 2
+
+
+def test_single_session_run_carries_no_executor_attribution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, _benchmark, _adapter = _run_competing(
+        monkeypatch,
+        tmp_path,
+        behaviours={},
+        executors=[],
+        default=(["flag{solo}"], False),
+    )
+
+    assert "executor_sessions" not in result
+    assert "executor_summary" not in result
+
+
+class SummaryAgentAdapter:
+    """Session double that writes (or omits) the final report."""
+
+    def __init__(self, summary: str | None) -> None:
+        self.summary = summary
+        self.session: ScriptedSession | None = None
+
+    async def start_session(self, context):
+        workspace = Path(context.run_dir)
+        workspace.mkdir(parents=True, exist_ok=True)
+        if self.summary is not None:
+            (workspace / "agent.summary.md").write_text(self.summary, encoding="utf-8")
+        self.session = ScriptedSession(workspace, submissions=[], wait=False)
+        return self.session
+
+
+def _run_single_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, summary: str | None
+) -> dict:
+    import harness.benchmark.runner as runner_module
+
+    agent_adapter = SummaryAgentAdapter(summary)
+    monkeypatch.setattr(
+        runner_module, "build_agent_adapter", lambda *_args, **_kwargs: agent_adapter
+    )
+    return asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-SUMMARY", benchmark="fake"),
+            agent=_pi_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+        )
+    )
+
+
+def test_agent_report_records_missing_sections(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result = _run_single_summary(
+        monkeypatch,
+        tmp_path,
+        "## Confirmed facts\nflag{ok}\n\n## Unfinished intents\nnone\n",
+    )
+
+    report = result["agent_report"]
+    assert report["present"] is True
+    assert report["sections_missing"] == ["unconfirmed", "ruled out"]
+    trace = (tmp_path / result["run_id"] / "trace.jsonl").read_text(encoding="utf-8")
+    assert "solver.summary_incomplete" in trace
+    assert '"reason":"sections_missing"' in trace
+
+
+def test_agent_report_records_a_missing_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result = _run_single_summary(monkeypatch, tmp_path, None)
+
+    report = result["agent_report"]
+    assert report["present"] is False
+    assert report["sections_missing"] == [
+        "confirmed",
+        "unconfirmed",
+        "ruled out",
+        "unfinished",
+    ]
+    trace = (tmp_path / result["run_id"] / "trace.jsonl").read_text(encoding="utf-8")
+    assert '"reason":"summary_missing"' in trace
+
+
+def test_agent_report_does_not_read_an_unconfirmed_heading_as_confirmed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result = _run_single_summary(
+        monkeypatch,
+        tmp_path,
+        "## Unconfirmed hypotheses\nmay reach the admin panel\n",
+    )
+
+    report = result["agent_report"]
+    assert report["present"] is True
+    # "confirmed" is a substring of "unconfirmed"; the missing-check must still
+    # report the confirmed-facts section as absent.
+    assert report["sections_missing"] == ["confirmed", "ruled out", "unfinished"]
+
+
+def test_seed_notes_carry_the_previous_summary_into_every_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import harness.benchmark.runner as runner_module
+
+    previous = tmp_path / "previous-run"
+    previous.mkdir()
+    (previous / "agent.summary.md").write_text(
+        "## Confirmed facts\nflag{prior}\n", encoding="utf-8"
+    )
+    agent_adapter = ScriptedAgentAdapter(
+        behaviours={
+            "01-primary": ([], False),
+            "02-challenger": ([], False),
+        }
+    )
+    monkeypatch.setattr(
+        runner_module, "build_agent_adapter", lambda *_args, **_kwargs: agent_adapter
+    )
+
+    asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-SEED", benchmark="fake"),
+            agent=_pi_agent(
+                [{"id": "primary"}, {"id": "challenger", "model": "other-model"}]
+            ),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+            seed_notes_from=previous,
+        )
+    )
+
+    seeded = sorted(
+        (tmp_path).glob(f"fake_CASE-SEED_*/{EXECUTOR_DIRNAME}/*/agent-workspace/notes/*.md")
+    )
+    assert len(seeded) == 2
+    for path in seeded:
+        assert path.name == "prior-summary.md"
+        assert "flag{prior}" in path.read_text(encoding="utf-8")
+
+
+def test_seed_notes_requires_a_previous_summary(tmp_path: Path) -> None:
+    from harness.agent_workspace import seed_notes_from_summary
+
+    previous = tmp_path / "previous-run"
+    previous.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ValueError, match="seed notes require an existing summary"):
+        seed_notes_from_summary(workspace=workspace, previous_run_dir=previous)
+
+
+class RestartableAgentAdapter:
+    """Session double that can be restarted, like the container Pi adapter."""
+
+    def __init__(self, *, events_per_session: list[int]) -> None:
+        self.events_per_session = events_per_session
+        self.sessions: list[RestartableSession] = []
+
+    async def start_session(self, context):
+        workspace = Path(context.run_dir)
+        workspace.mkdir(parents=True, exist_ok=True)
+        index = len(self.sessions)
+        events = self.events_per_session[
+            min(index, len(self.events_per_session) - 1)
+        ]
+        session = RestartableSession(
+            workspace=workspace,
+            identity=f"session-{index + 1}",
+            events=events,
+        )
+        self.sessions.append(session)
+        return session
+
+
+class RestartableSession:
+    def __init__(self, *, workspace: Path, identity: str, events: int) -> None:
+        self.workspace = workspace
+        self.identity = identity
+        self.events_to_emit = events
+        self.feedback: list = []
+        self.closed_reason: str | None = None
+
+    async def events(self):
+        for index in range(self.events_to_emit):
+            yield AgentEvent(
+                type="tool.call",
+                event_id=f"{self.identity}-{index}",
+                data={
+                    "tool": "bash",
+                    "tool_call_id": f"{self.identity}-call-{index}",
+                    "args_family": f"bash:cmd-{self.identity}-{index}",
+                },
+            )
+
+    async def checkpoint(self) -> AgentCheckpoint:
+        return AgentCheckpoint(
+            id=f"checkpoint-{self.identity}",
+            event_offset=self.events_to_emit,
+            feedback_offset=0,
+            session_id=self.identity,
+        )
+
+    async def observe(self, observation) -> None:
+        self.feedback.append(observation)
+
+    async def close(self, reason: str) -> None:
+        self.closed_reason = reason
+
+    async def result(self) -> AgentResult:
+        return AgentResult(
+            returncode=0,
+            timed_out=False,
+            budget_exceeded=None,
+            stdout="",
+            stderr="",
+            metrics=UsageMetrics(model_calls=1, total_tokens=7),
+        )
+
+
+def test_long_session_is_restarted_with_a_carry_forward_brief(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import harness.benchmark.runner as runner_module
+    import harness.progress as progress_module
+
+    monkeypatch.setattr(progress_module, "CONTEXT_RESTART_TOOL_CALLS", 3)
+    agent_adapter = RestartableAgentAdapter(events_per_session=[3, 1])
+    monkeypatch.setattr(
+        runner_module, "build_agent_adapter", lambda *_args, **_kwargs: agent_adapter
+    )
+
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-RESTART", benchmark="fake"),
+            agent=_pi_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+        )
+    )
+
+    # Two sessions ran: the first was retired at the threshold.
+    assert len(agent_adapter.sessions) == 2
+    first, second = agent_adapter.sessions
+    assert first.closed_reason == "context-restart:tool_calls"
+    briefs = [item for item in second.feedback if item.type == "solver.context_restart"]
+    assert len(briefs) == 1
+    assert "# Carry-forward brief" in briefs[0].data["message"]
+    assert briefs[0].data["reason"] == "tool_calls"
+
+    root = tmp_path / result["run_id"]
+    brief_file = root / "carry-forward.md"
+    assert brief_file.is_file()
+    assert "# Carry-forward brief" in brief_file.read_text(encoding="utf-8")
+    trace = (root / "trace.jsonl").read_text(encoding="utf-8")
+    assert "solver.context_restart" in trace
+    assert '"from_session":"session-1"' in trace
+    assert '"to_session":"session-2"' in trace
+    # The retired session's usage stays in the run accounting.
+    assert result["metrics"]["total_tokens"] == 14
+
+
+def test_context_restart_gives_up_after_the_cap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import harness.benchmark.runner as runner_module
+    import harness.progress as progress_module
+
+    monkeypatch.setattr(progress_module, "CONTEXT_RESTART_TOOL_CALLS", 2)
+    monkeypatch.setattr(progress_module, "MAX_CONTEXT_RESTARTS", 2)
+    agent_adapter = RestartableAgentAdapter(events_per_session=[2, 2, 2])
+    monkeypatch.setattr(
+        runner_module, "build_agent_adapter", lambda *_args, **_kwargs: agent_adapter
+    )
+
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-RESTART-CAP", benchmark="fake"),
+            agent=_pi_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+        )
+    )
+
+    assert len(agent_adapter.sessions) == 3
+    progress = json.loads(
+        (tmp_path / result["run_id"] / "agent-workspace" / "progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert progress["context_restarts"] == 2

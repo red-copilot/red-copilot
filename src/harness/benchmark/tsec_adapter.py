@@ -326,8 +326,16 @@ async def run_tsec_challenges(
     allow_host_agent: bool = False,
     max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     parallel: int = 1,
+    max_wall_time_seconds: int | None = None,
+    seed_notes_from: str | Path | None = None,
 ) -> list[dict]:
-    """Run selected TSec challenges through the generic benchmark runtime."""
+    """Run selected TSec challenges through the generic benchmark runtime.
+
+    The declared wall clock is honoured as-is: the platform's own concurrency
+    cap is a property of the challenge schedule, not of the run budget, so
+    silently shortening the window only cost the Agent time it was told it had.
+    ``max_wall_time_seconds`` stays available as an operator-side safety valve.
+    """
 
     if parallel < 1:
         raise TSecAdapterError("parallel must be at least 1")
@@ -335,7 +343,13 @@ async def run_tsec_challenges(
         raise TSecAdapterError(
             f"the platform allows at most {MAX_PARALLEL_CHALLENGES} running instances"
         )
-    effective_budgets = budgets.model_copy(update={"wall_time": min(budgets.wall_time, 3600)})
+    if max_wall_time_seconds is not None and max_wall_time_seconds < 1:
+        raise TSecAdapterError("max_wall_time_seconds must be at least 1")
+    effective_budgets = budgets
+    if max_wall_time_seconds is not None and budgets.wall_time > max_wall_time_seconds:
+        effective_budgets = budgets.model_copy(
+            update={"wall_time": max_wall_time_seconds}
+        )
     runner = BenchmarkRunner(runs_root=runs_root)
     try:
         async with TSecClientAdapter(config) as client:
@@ -373,6 +387,9 @@ async def run_tsec_challenges(
                         submission_extractor=_extract_submissions,
                         allow_host_agent=allow_host_agent,
                         max_unconfirmed_progress=max_unconfirmed_progress,
+                        seed_notes_from=(
+                            Path(seed_notes_from) if seed_notes_from else None
+                        ),
                     )
                 return result
 

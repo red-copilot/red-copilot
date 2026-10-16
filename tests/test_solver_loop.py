@@ -410,3 +410,122 @@ def test_solver_loop_finalize_on_usage_exhaustion_holds_stop_in_grace(tmp_path: 
     decision = asyncio.run(loop.process_event(session, usage))
     assert decision.action is SolverAction.STOP
     assert decision.reason == "budget_exhausted"
+
+
+def _repetition_loop(tmp_path: Path) -> tuple[SolverLoop, ProgressLedger, FakeSession]:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger()
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-test", "task-test")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="find the flag",
+        planned_world_revision=world.snapshot.revision,
+    )
+    return loop, progress, session
+
+
+def _tool_call(call_id: str, family: str, index: int) -> AgentEvent:
+    return AgentEvent(
+        type="tool.call",
+        event_id=f"evt-{index}",
+        data={
+            "tool": "bash",
+            "tool_call_id": call_id,
+            "args_family": family,
+            "args_fingerprint": f"fingerprint-{index}",
+        },
+    )
+
+
+def test_solver_loop_intervenes_once_per_repeated_command_family(tmp_path: Path) -> None:
+    loop, progress, session = _repetition_loop(tmp_path)
+
+    for index in range(3):
+        asyncio.run(loop.process_event(session, _tool_call(f"call-{index}", "bash:curl", index)))
+
+    steers = [item for item in session.feedback if item.type == "solver.repetition_steer"]
+    assert len(steers) == 1
+    assert steers[0].data["family"] == "bash:curl"
+    assert steers[0].data["level"] == 1
+    assert progress.steered_tool_families["bash:curl"] == 1
+
+    # A fourth call in the same family does not re-nudge at level 1.
+    asyncio.run(loop.process_event(session, _tool_call("call-3", "bash:curl", 3)))
+    assert len([item for item in session.feedback if item.type == "solver.repetition_steer"]) == 1
+
+
+def test_solver_loop_escalates_a_family_that_keeps_repeating(tmp_path: Path) -> None:
+    loop, progress, session = _repetition_loop(tmp_path)
+
+    for index in range(6):
+        asyncio.run(loop.process_event(session, _tool_call(f"call-{index}", "bash:nmap", index)))
+
+    steers = [item for item in session.feedback if item.type == "solver.repetition_steer"]
+    levels = [item.data["level"] for item in steers]
+    assert levels == [1, 2]
+    assert progress.steered_tool_families["bash:nmap"] == 2
+
+    # Level 2 also fires at most once per family.
+    asyncio.run(loop.process_event(session, _tool_call("call-6", "bash:nmap", 6)))
+    assert len([item for item in session.feedback if item.type == "solver.repetition_steer"]) == 2
+
+
+def test_solver_loop_ignores_family_rotation_and_confirmed_progress(tmp_path: Path) -> None:
+    loop, progress, session = _repetition_loop(tmp_path)
+
+    for index, family in enumerate(("bash:curl", "bash:nmap", "bash:curl", "bash:nmap")):
+        asyncio.run(loop.process_event(session, _tool_call(f"call-{index}", family, index)))
+
+    assert progress.tool_family_streak == 1
+    assert [item for item in session.feedback if item.type == "solver.repetition_steer"] == []
+
+    # Confirmed progress clears the streak before the next call.
+    asyncio.run(loop.process_event(session, _tool_call("call-4", "bash:curl", 4)))
+    asyncio.run(loop.process_event(session, _tool_call("call-5", "bash:curl", 5)))
+    assert progress.tool_family_streak == 2
+    progress.record_submission(accepted=True, completed=False)
+
+    assert progress.tool_family_streak == 0
+    assert progress.last_tool_family is None
+    asyncio.run(loop.process_event(session, _tool_call("call-6", "bash:curl", 6)))
+    assert [item for item in session.feedback if item.type == "solver.repetition_steer"] == []
+
+
+def test_context_restart_waits_for_new_work_after_a_restart() -> None:
+    import harness.progress as progress_module
+
+    limit = 10.0
+    window = int(limit * progress_module.CONTEXT_RESTART_BUDGET_FRACTION)
+    progress = ProgressLedger(budget_limits={"max_tool_calls": limit})
+
+    for index in range(window):
+        progress.record_event(_tool_call(f"call-{index}", "bash:curl", index))
+    assert progress.context_restart_due() == "tool_call_budget"
+
+    progress.record_context_restart()
+
+    # The threshold that was just crossed must not re-fire on the next event;
+    # the second restart needs a whole new budget window of calls.
+    assert progress.context_restart_due() is None
+    for index in range(window, 2 * window):
+        progress.record_event(_tool_call(f"call-{index}", f"bash:cmd{index}", index))
+    assert progress.context_restart_due() == "tool_call_budget"
+
+
+def test_context_restart_uses_the_tool_call_count_trigger() -> None:
+    import harness.progress as progress_module
+
+    threshold = progress_module.CONTEXT_RESTART_TOOL_CALLS
+    progress = ProgressLedger(budget_limits={"wall_time": 3600.0})
+
+    for index in range(threshold - 1):
+        progress.record_event(_tool_call(f"call-{index}", f"bash:cmd{index}", index))
+    assert progress.context_restart_due() is None
+
+    progress.record_event(_tool_call("call-last", "bash:cmd-last", threshold))
+    assert progress.context_restart_due() == "tool_calls"

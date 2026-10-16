@@ -19,8 +19,16 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # session scheduler, shared findings channel and budget shares) on top of that
 # cut, which is the deliberate +1 module; the line ceiling is re-measured from
 # the tree rather than estimated.
+#
+# The ZCP improvement round added no module: repetition interruption, session
+# restarts with a carry-forward brief, the ruled-out projection, executor
+# attribution and the summary-section check all live in existing modules.
+# Measured before 14,770 lines, after 15,508 (+738: the restart path and the
+# brief renderer, the window-relative restart trigger in `progress.py`, and the
+# whole-word summary-section marker check). Re-measured from the tree rather
+# than estimated.
 MAX_MODULES = 56
-MAX_SRC_LINES = 14_770
+MAX_SRC_LINES = 15_508
 
 
 def _module_names() -> set[str]:

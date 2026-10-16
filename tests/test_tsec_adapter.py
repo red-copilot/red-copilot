@@ -425,7 +425,7 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
     assert FakeBenchmarkRunner.last_kwargs["max_unconfirmed_progress"] == 200
 
 
-def test_run_tsec_challenges_applies_platform_wall_time_ceiling(
+def test_run_tsec_challenges_honours_the_declared_wall_clock(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
@@ -442,7 +442,49 @@ def test_run_tsec_challenges_applies_platform_wall_time_ceiling(
     )
 
     assert FakeBenchmarkRunner.last_budgets is not None
-    assert FakeBenchmarkRunner.last_budgets.wall_time == 3600
+    assert FakeBenchmarkRunner.last_budgets.wall_time == 7200
+
+
+def test_run_tsec_challenges_applies_the_operator_wall_time_cap(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=7200),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+            max_wall_time_seconds=1800,
+        )
+    )
+
+    assert FakeBenchmarkRunner.last_budgets is not None
+    assert FakeBenchmarkRunner.last_budgets.wall_time == 1800
+
+
+def test_run_tsec_challenges_keeps_a_shorter_declared_wall_clock(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=600),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+            max_wall_time_seconds=1800,
+        )
+    )
+
+    assert FakeBenchmarkRunner.last_budgets is not None
+    assert FakeBenchmarkRunner.last_budgets.wall_time == 600
 
 
 def _challenge(code: str) -> SimpleNamespace:

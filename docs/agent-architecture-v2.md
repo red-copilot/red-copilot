@@ -76,6 +76,11 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 | 新增 | `AgentSpec.executors: list[ExecutorSpec]`（同题多会话竞争） |
 | 新增 | CLI `--knowledge-root DIR`（可重复，覆盖 YAML）、`harness tsec --parallel N`（默认 1，上限 3） |
 | 新增 | env `HARNESS_NOTES_DIR`、`HARNESS_KNOWLEDGE_DIRS`；工作区 `notes/` |
+| 新增 | CLI `harness tsec --max-wall-time-seconds N`（运维安全阀，默认不设：声明的 `--wall-time` 就是有效赛窗） |
+| 新增 | CLI `harness tsec --seed-notes-from DIR`：把上一轮 `agent.summary.md` 作为只读接力材料写进新会话 notes |
+| 新增 | 长会话重启：自上次重启起工具调用 300 次或又用掉 `max_tool_calls` 的 60% 时触发，最多 2 次；接力简报写在会话根的 `carry-forward.md`，事件为 `solver.context_restart` |
+| 新增 | 结果契约：`agent_report.present` / `agent_report.sections_missing`；竞争运行的 `executor_sessions[].prompt`、`provider`、`summary_sections_missing` 与顶层 `executor_summary` |
+| 新增 | trace 事件 `solver.repetition_steer`、`solver.context_restart`、`solver.summary_incomplete` |
 
 ## 6. 消融基线
 

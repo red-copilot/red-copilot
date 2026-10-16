@@ -104,6 +104,8 @@ class ContainerPiRpcSession:
             "world.state.updated",
             "solver.budget",
             "solver.finalize",
+            "solver.repetition_steer",
+            "solver.context_restart",
         }
     )
 
@@ -197,6 +199,11 @@ class ContainerPiRpcSession:
         run_dir = self.run_dir
         if context.resume_session_id:
             await self._guard_existing_resume_container(task_dir)
+        else:
+            # A fresh session still has to clear the container from the previous
+            # session in this run directory: a context restart keeps the run
+            # directory and only replaces the model transcript.
+            await self._clear_previous_container(task_dir)
         environment_network = context.environment_network
         gateway_url = context.gateway_url
         gateway_token = context.gateway_token
@@ -374,6 +381,30 @@ class ContainerPiRpcSession:
                 "prior Pi container is still running; stop it and reconcile any in-flight "
                 "action before resuming"
             )
+        await asyncio.to_thread(
+            self.adapter._docker,
+            ["docker", "rm", "-f", self.container_name],
+            cwd=task_dir,
+            check=False,
+        )
+
+    async def _clear_previous_container(self, task_dir: Path) -> None:
+        """Remove a stopped container left by the previous session in this run."""
+        inspect = await asyncio.to_thread(
+            self.adapter._docker,
+            ["docker", "inspect", "--format", "{{.State.Running}}", self.container_name],
+            cwd=task_dir,
+            check=False,
+        )
+        if inspect.returncode != 0:
+            if (
+                "no such object" not in inspect.stderr.lower()
+                and "no such container" not in inspect.stderr.lower()
+            ):
+                raise AgentError(f"cannot inspect prior Pi container: {inspect.stderr.strip()}")
+            return
+        if inspect.stdout.strip().lower() not in {"true", "false"}:
+            return
         await asyncio.to_thread(
             self.adapter._docker,
             ["docker", "rm", "-f", self.container_name],

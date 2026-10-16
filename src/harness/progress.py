@@ -13,6 +13,22 @@ from .budget import USAGE_DIMENSION_SOURCES, exceeded_usage_dimension
 from .session import AgentEvent
 from .verification import AuthorizedObjectiveVerdict, VerifierRegistry
 
+# Consecutive calls in one command family before the Harness intervenes, and
+# the streak at which it stops nudging and asks for convergence instead.
+REPETITION_STEER_STREAK = 3
+REPETITION_ESCALATE_STREAK = 6
+# Repetition bookkeeping is bounded so a long run cannot grow it without limit.
+MAX_TRACKED_TOOL_FAMILIES = 200
+
+# A long single session degrades: the transcript grows, noise crowds out the
+# signal, and the Agent starts re-deriving what it already knew. These are the
+# defaults at which the Harness resets the session and re-injects a brief. The
+# tool-call triggers are counted from the previous restart, so each reset needs
+# a fresh stretch of work before the next one is considered.
+CONTEXT_RESTART_TOOL_CALLS = 300
+CONTEXT_RESTART_BUDGET_FRACTION = 0.6
+MAX_CONTEXT_RESTARTS = 2
+
 
 class ProgressHypothesis(BaseModel):
     id: str
@@ -61,6 +77,19 @@ class ProgressLedger(BaseModel):
     unconfirmed_progress: int = 0
     failed_skill_counts: dict[str, int] = Field(default_factory=dict)
     reconciled_actions: dict[str, str] = Field(default_factory=dict)
+    # Repetition control: how many tool calls in a row share one command family,
+    # which families already drew an intervention, and the per-family totals.
+    # A family that keeps repeating without confirmed progress is the signature
+    # of a loop being ground down rather than a line of attack being widened.
+    tool_family_streak: int = 0
+    last_tool_family: str | None = None
+    tool_family_totals: dict[str, int] = Field(default_factory=dict)
+    steered_tool_families: dict[str, int] = Field(default_factory=dict)
+    # Session restarts performed after the context grew long: the counter and
+    # the tool-call mark let the next threshold be measured from the restart
+    # instead of the run start.
+    context_restarts: int = 0
+    tool_calls_at_last_restart: int = 0
     # Correlates legacy events that predate tool_call_id, so replay uses the
     # same generated action identity after a checkpoint reload.
     tool_event_correlations: dict[str, str] = Field(default_factory=dict)
@@ -106,6 +135,7 @@ class ProgressLedger(BaseModel):
             family = event.data.get("args_family")
             if isinstance(family, str) and family:
                 action["args_family"] = family
+            self._record_tool_family(family)
             self.last_action = action
             call_id = action["tool_call_id"]
             if isinstance(call_id, str) and call_id:
@@ -165,6 +195,74 @@ class ProgressLedger(BaseModel):
                 value = usage.get(source)
                 if isinstance(value, (int, float)) and value >= 0:
                     self.budget_used[field] = self.budget_used.get(field, 0.0) + float(value)
+
+    def _record_tool_family(self, family: str | None) -> None:
+        """Track consecutive tool calls that share one command family."""
+        if not isinstance(family, str) or not family:
+            self.tool_family_streak = 0
+            self.last_tool_family = None
+            return
+        if family == self.last_tool_family:
+            self.tool_family_streak += 1
+        else:
+            self.last_tool_family = family
+            self.tool_family_streak = 1
+        self.tool_family_totals[family] = self.tool_family_totals.get(family, 0) + 1
+        while len(self.tool_family_totals) > MAX_TRACKED_TOOL_FAMILIES:
+            self.tool_family_totals.pop(next(iter(self.tool_family_totals)))
+
+    def repetition_action(self) -> tuple[str, int, int] | None:
+        """Return the pending intervention for the current family, if any.
+
+        The tuple is ``(family, streak, level)`` where level 1 is a targeted
+        nudge and level 2 asks the Agent to converge and write its summary.
+        Each level fires at most once per family per run.
+        """
+        family = self.last_tool_family
+        if not family:
+            return None
+        emitted = self.steered_tool_families.get(family, 0)
+        if self.tool_family_streak >= REPETITION_ESCALATE_STREAK and emitted < 2:
+            return family, self.tool_family_streak, 2
+        if self.tool_family_streak >= REPETITION_STEER_STREAK and emitted < 1:
+            return family, self.tool_family_streak, 1
+        return None
+
+    def note_repetition_steer(self, family: str, *, level: int) -> None:
+        self.steered_tool_families[family] = max(
+            self.steered_tool_families.get(family, 0), level
+        )
+        while len(self.steered_tool_families) > MAX_TRACKED_TOOL_FAMILIES:
+            self.steered_tool_families.pop(next(iter(self.steered_tool_families)))
+
+    def reset_repetition(self) -> None:
+        """Clear the streak after confirmed progress; steered families stay."""
+        self.tool_family_streak = 0
+        self.last_tool_family = None
+        self.tool_family_totals.clear()
+
+    def context_restart_due(self) -> str | None:
+        """Return why the session context should be reset, or ``None``.
+
+        Both triggers are counted from the previous restart, so a restart
+        cannot re-fire on the threshold it just crossed. Only while the
+        objective is still open: a finished objective has nothing left to
+        re-inject.
+        """
+        if self.objective_completed or self.context_restarts >= MAX_CONTEXT_RESTARTS:
+            return None
+        calls_since_restart = self.tool_calls - self.tool_calls_at_last_restart
+        if calls_since_restart >= CONTEXT_RESTART_TOOL_CALLS:
+            return "tool_calls"
+        limit = self.budget_limits.get("max_tool_calls", 0.0)
+        if limit > 0 and calls_since_restart >= limit * CONTEXT_RESTART_BUDGET_FRACTION:
+            return "tool_call_budget"
+        return None
+
+    def record_context_restart(self) -> None:
+        self.context_restarts += 1
+        self.tool_calls_at_last_restart = self.tool_calls
+        self.reset_repetition()
 
     def record_intent(self, intent: Any) -> None:
         data = intent.model_dump(mode="json") if hasattr(intent, "model_dump") else dict(intent)
@@ -234,6 +332,7 @@ class ProgressLedger(BaseModel):
             self.evidence_confirmed += 1
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
+            self.reset_repetition()
         elif status == "contradicted":
             self.contradicted_actions += 1
             if (self.last_action or {}).get("status") != "failed":
@@ -249,6 +348,7 @@ class ProgressLedger(BaseModel):
             self.accepted_submissions += 1
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
+            self.reset_repetition()
         else:
             self.rejected_submissions += 1
             self.failure_count += 1
@@ -271,6 +371,7 @@ class ProgressLedger(BaseModel):
             raise ValueError(f"unknown trusted progress kind: {kind}")
         self.no_progress_count = 0
         self.unconfirmed_progress = 0
+        self.reset_repetition()
 
     def record_objective_verdict(
         self,
@@ -285,6 +386,7 @@ class ProgressLedger(BaseModel):
         if self.objective_completed:
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
+            self.reset_repetition()
 
     @property
     def remaining_budget_fraction(self) -> float:

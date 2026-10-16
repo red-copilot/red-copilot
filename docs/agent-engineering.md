@@ -84,24 +84,33 @@ SDK 与 MCP 两条面都还没在本机对真实平台跑通，任何"已对齐"
 
 P0 是赛前必须成立的能力；没做完的项必须显式标出，不许当成已完成。
 
-| ID | 交付 | 状态 | 验收 |
-| --- | --- | --- | --- |
-| PLN-04 | 同题多 executor 竞争调度 | 已落地 | `tests/test_executors.py`：一次 provision、重复候选只提交一次、首个成功取消其余会话 |
-| ZCP-01 | 接入面核对（SDK `openapi/v1` vs 官方 `/api` + `Agent-Token`） | 未落地 | 对真实平台跑通 list/start/submit/hint/close 并记录端点与认证头 |
-| ZCP-02 | 3 req/s 令牌桶 + 实例 ≤3 + 用完 `close_challenge` 释放 | 未落地 | 离线计数测试证明不越界不触发 429；实例数不超上限 |
-| ZCP-03 | 多题并行调度（≤3 题，独立 run dir 与预算） | 已落地 | `run_tsec_challenges` 的信号量与按题 run dir（`tests/test_tsec_adapter.py`） |
-| ZCP-04 | 按步数阈值分级提示，替代全局 `--hint` | 未落地 | 阈值只触发一次、只影响该题、扣分影响可对账 |
+| ID | 交付 | 落点 | 状态 | 验收 |
+| --- | --- | --- | --- | --- |
+| PLN-04 | 同题多 executor 竞争调度 | `src/harness/runtime/executors.py`、`src/harness/benchmark/runner.py` | 已落地 | `tests/test_executors.py`：一次 provision、重复候选只提交一次、首个成功取消其余会话 |
+| ZCP-01 | 接入面核对（SDK `openapi/v1` vs 官方 `/api` + `Agent-Token`） | `src/harness/benchmark/tsec_client.py`、`src/harness/preflight.py` | 未落地 | 对真实平台跑通 list/start/submit/hint/close 并记录端点与认证头 |
+| ZCP-02 | 3 req/s 令牌桶 + 实例 ≤3 + 用完 `close_challenge` 释放 | `src/harness/benchmark/tsec_client.py`、`src/harness/benchmark/tsec_adapter.py` | 未落地 | 离线计数测试证明不越界不触发 429；实例数不超上限 |
+| ZCP-03 | 多题并行调度（≤3 题，独立 run dir 与预算） | `src/harness/benchmark/tsec_adapter.py` | 已落地 | `run_tsec_challenges` 的信号量与按题 run dir（`tests/test_tsec_adapter.py`） |
+| ZCP-04 | 按步数阈值分级提示，替代全局 `--hint` | `src/harness/benchmark/tsec_adapter.py`、`src/harness/solver_policy.py` | 未落地 | 阈值只触发一次、只影响该题、扣分影响可对账 |
+| ZCP-11 | 墙钟上限解除：有效预算取声明的 `--wall-time`，另加运维安全阀 | `src/harness/benchmark/tsec_adapter.py`、`src/harness/cli.py` | 已落地 | 声明 7200s 时有效预算就是 7200s；`--max-wall-time-seconds` 只在显式传入时生效（`tests/test_tsec_adapter.py`） |
 
 P1 是赛前有余力才做、赛后必做的项：
 
-| ID | 交付 | 状态 | 验收 |
-| --- | --- | --- | --- |
-| ZCP-05 | 会话级上下文压缩与记忆回注（笔记外置 + 重开会话） | 未落地 | 模拟超长会话后仍保留已确立事实、已排除路径与开放前沿 |
-| ZCP-06 | 重复动作打断（连续同命令族 N 次直接注入干预） | 未落地 | 脚本化重复 `curl` 被拦截并解除循环 |
-| ZCP-07 | 知识库填充（payload 手册、方法论、writeup 摘要） | 未落地 | `knowledge/` 有可 `ls` / `cat` 的只读内容，且不换取网权限 |
+| ID | 交付 | 落点 | 状态 | 验收 |
+| --- | --- | --- | --- | --- |
+| ZCP-05 | 上下文重启与接力简报（阶段一已落地）；容器内钩子为阶段二，需 maintainer 复核 | `src/harness/solver_loop.py`、`src/harness/benchmark/runner.py`、`src/harness/progress.py` | 阶段一已落地 | 自上次重启起工具调用 300 次、或又用掉 `max_tool_calls` 的 60% 时触发重启，最多 2 次（刚跨过的阈值不会在下一次事件重触发，`tests/test_solver_loop.py`）；简报含已确立事实/已排除路径/开放意图/指针；旧会话产物归档为 `restart-N` 副本（`tests/test_executors.py`） |
+| ZCP-06 | 重复动作打断（消费已有的 `args_family`，连续同族注入干预） | `src/harness/progress.py`、`src/harness/solver_loop.py` | 已落地 | 同族连续 3 次触发一次干预、6 次升级为收敛级；确认进展清零计数；不同命令族不误伤（`tests/test_solver_loop.py`） |
+| ZCP-07 | 知识库填充（技能手册 + 自研索引 + 上游语料按需挂载） | `skills/offensive/`、`knowledge/README.md` | 已落地 | 7 个技能含全部必需小节且 ≥50 行；索引链接可解析；上游语料只经 `scripts/fetch-knowledge.sh` 按 pinned revision 拉取（`tests/test_knowledge_catalogue.py`） |
+| ZCP-08 | 失败/已排除路径看板 | `src/harness/world/context.py` | 已落地 | refuted/superseded 出现在 Ruled out（上限 10 条，截断给计数）；无记录时投影不含该段（`tests/test_world_context.py`） |
+| ZCP-09 | 会话级用量归因与 prompt/model 战绩 | `src/harness/benchmark/runner.py`、`src/harness/cli.py` | 已落地 | `executor_summary` 按 (prompt, provider, model) 聚合；单会话结果不新增键（`tests/test_executors.py`） |
+| ZCP-10 | 收尾加固（结构化摘要 + 缺失可观测 + 复用上一轮摘要） | `src/harness/solver_loop.py`、`src/harness/cli.py` | 已落地 | `result.json` 的 `agent_report` 记录摘要是否存在与缺失段落，并写 `solver.summary_incomplete`；`--seed-notes-from` 把上一轮摘要放进新会话 notes（`tests/test_executors.py`） |
+| ZCP-12 | 重启简报质量观测（词数、来源 notes、缺失段落；只观测不排序） | `src/harness/benchmark/runner.py`、`src/harness/solver_loop.py` | 未落地 | 每次重启写会计级指标；无重启时结果不含新键（`tests/test_executors.py`） |
+| ZCP-13 | 会话级收尾模板复用（重启/取消路径复用四段摘要，摘要仍非证据） | `src/harness/solver_loop.py`、`src/harness/cli.py` | 未落地（条件项） | 重启/取消路径的缺失段落可观测（`tests/test_solver_loop.py`） |
+| ZCP-14 | 知识语料扩容（pinned 取数＋索引＋许可） | `knowledge/`、`skills/offensive/`、`scripts/fetch-knowledge.sh` | 未落地 | 目录结构校验通过；运行期无网络依赖（`tests/test_knowledge_catalogue.py`） |
 
-排期建议：Day 1 先做 ZCP-01/02（不核对接入面就没有后续的一切），再做 ZCP-04；
-Day 2 视时间做 ZCP-05/06，知识库靠 Agent 现场写笔记兜底。
+排期与实现顺序见 [zc-improvement-design.md](zc-improvement-design.md)：A 段（ZCP-11/05/06/07）与
+B 段（ZCP-08/09/10）已落地，C 段（容器内 Pi 扩展）在 maintainer 复核通过前不动。
+赛制接入面仍按 ZCP-01/02 先行——不核对接入面就没有后续的一切。
+≤5 工作日窗口的排期、依赖与验收口径见 [zc-improvement-plan.md](zc-improvement-plan.md)；ZCP-13 是 D3 门后启动的条件项。
 
 ## 6. 信任边界与验收
 
@@ -114,6 +123,8 @@ Day 2 视时间做 ZCP-05/06，知识库靠 Agent 现场写笔记兜底。
   无开环子系统回归、import 方向、模块与行数上限）不计入效果验收。
 
 相关文档：[agent-architecture-v2.md](agent-architecture-v2.md)、
+[zc-improvement-design.md](zc-improvement-design.md)、
+[zc-improvement-plan.md](zc-improvement-plan.md)、
 [zc-architecture-comparison.md](zc-architecture-comparison.md)、[tsec.md](tsec.md)、
 [security/execution-boundary.md](security/execution-boundary.md)、
 [roadmap/planning.md](roadmap/planning.md)。

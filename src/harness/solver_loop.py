@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,8 +22,6 @@ from .solver_policy import (
     decide_solver_action,
 )
 from .trace import TraceRecorder
-
-MAX_PROCESSED_EVENT_IDS = 50_000
 from .verification import AuthorizedActionVerdict, VerifierRegistry
 from .world import (
     Observation,
@@ -31,6 +30,52 @@ from .world import (
     WorldRepository,
 )
 from .world.live import WorldInboxCursor
+
+MAX_PROCESSED_EVENT_IDS = 50_000
+
+# The finalize steer asks for a report with these four sections. The Agent's
+# summary is untrusted text, so the Harness only *reports* what is missing; it
+# never fails a run because a heading is absent. The generic English markers are
+# matched as whole words: "confirmed" is a substring of "unconfirmed", so a
+# plain membership test would count one section's heading for another.
+SUMMARY_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("confirmed", ("已确认事实", "confirmed fact", "confirmed")),
+    ("unconfirmed", ("未确认假设", "unconfirmed", "hypothes")),
+    ("ruled out", ("已尝试并排除", "ruled out", "tried and")),
+    ("unfinished", ("未完成意图", "unfinished", "open intent")),
+)
+MAX_SUMMARY_BYTES = 256 * 1024
+
+# The carry-forward brief replaces a long transcript with the short version of
+# the same state. It is deliberately small: it must fit in any context.
+CONTEXT_BRIEF_MAX_CHARS = 8000
+CONTEXT_BRIEF_FACTS = 12
+CONTEXT_BRIEF_RULED_OUT = 8
+CONTEXT_BRIEF_FAILURES = 5
+
+
+def _mentions_summary_marker(text: str, marker: str) -> bool:
+    """True when a marker appears as its own word rather than inside a longer one."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(marker)}", text) is not None
+
+
+def missing_summary_sections(summary_path: Path) -> list[str]:
+    """Return the report sections the Agent did not write.
+
+    A missing or unreadable summary reports every section as missing; the
+    caller decides whether that is worth a trace event.
+    """
+    try:
+        if summary_path.stat().st_size > MAX_SUMMARY_BYTES:
+            return [name for name, _ in SUMMARY_SECTIONS]
+        text = summary_path.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return [name for name, _ in SUMMARY_SECTIONS]
+    missing: list[str] = []
+    for name, markers in SUMMARY_SECTIONS:
+        if not any(_mentions_summary_marker(text, marker.lower()) for marker in markers):
+            missing.append(name)
+    return missing
 
 
 @dataclass
@@ -75,6 +120,7 @@ class SolverLoop:
         world_inbox_path: Path | None = None,
         sync_agent_views: Callable[[], None] | None = None,
         summary_path: Path | None = None,
+        notes_dir: Path | None = None,
     ) -> None:
         self.world = world
         self.progress = progress
@@ -94,6 +140,7 @@ class SolverLoop:
         )
         self.progress_path = run_dir / "progress.json"
         self.summary_path = summary_path or (run_dir / "agent.summary.md")
+        self.notes_dir = notes_dir
         self.sync_agent_views = sync_agent_views
         self.max_no_progress = max_no_progress
         self.max_unconfirmed_progress = max_unconfirmed_progress
@@ -375,6 +422,7 @@ class SolverLoop:
 
         self.progress.write(self.progress_path)
         self._sync_agent_views()
+        await self._maybe_steer_repetition(session)
         await self._maybe_steer_budget(session)
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
@@ -445,6 +493,56 @@ class SolverLoop:
                 )
             )
 
+    async def _maybe_steer_repetition(self, session: AgentSession) -> None:
+        """Intervene once when one command family is being ground down.
+
+        The family comes from the adapter's coarse tool identity, so "the same
+        loop with a different wordlist" counts as one family. Level 1 nudges the
+        Agent to change its hypothesis; level 2 asks it to converge and record
+        what the path ruled out. Neither level kills the session.
+        """
+        if self.progress.objective_completed:
+            return
+        action = self.progress.repetition_action()
+        if action is None:
+            return
+        family, streak, level = action
+        self.progress.note_repetition_steer(family, level=level)
+        self.trace.emit(
+            "solver.repetition_steer",
+            actor="harness",
+            data={
+                "family": family,
+                "consecutive": streak,
+                "level": level,
+                "escalated": level > 1,
+            },
+        )
+        if level > 1:
+            message = (
+                f"{streak} calls in a row share the command family {family} without "
+                "confirmed progress. Stop repeating it: consolidate what is already "
+                "verified, record what this path ruled out, then either widen or "
+                "write your summary."
+            )
+        else:
+            message = (
+                f"{streak} calls in a row share the command family {family} without "
+                "confirmed progress. Change the hypothesis or the input class before "
+                "calling it again; the same command with new arguments is the same path."
+            )
+        await session.observe(
+            AgentObservation(
+                type="solver.repetition_steer",
+                data={
+                    "family": family,
+                    "consecutive": streak,
+                    "level": level,
+                    "message": message,
+                },
+            )
+        )
+
     async def _maybe_steer_finalize(self, session: AgentSession) -> None:
         """Stop the Agent exploring at a soft limit and ask for a summary.
 
@@ -480,10 +578,10 @@ class SolverLoop:
                     "summary_file": "agent.summary.md",
                     "message": (
                         f"{lead} Stop launching new probes. Write a short report to "
-                        "$HARNESS_SUMMARY_FILE covering: confirmed facts (with the evidence "
-                        "that confirms them), unconfirmed hypotheses, what you tried and what "
-                        "it ruled out, and the intents you were pursuing but did not finish. "
-                        "Then stop."
+                        "$HARNESS_SUMMARY_FILE with exactly these four sections: "
+                        "(1) confirmed facts - each with the evidence that confirms it; "
+                        "(2) unconfirmed hypotheses; (3) what you tried and ruled out; "
+                        "(4) unfinished intents. Then stop."
                     ),
                 },
             )
@@ -534,8 +632,8 @@ class SolverLoop:
                     "summary_file": "agent.summary.md",
                     "message": (
                         "Your round ended without a summary. Write $HARNESS_SUMMARY_FILE now: "
-                        "confirmed facts with their evidence, unconfirmed hypotheses, what you "
-                        "tried and ruled out, and unfinished intents. Then stop."
+                        "(1) confirmed facts with their evidence, (2) unconfirmed hypotheses, "
+                        "(3) what you tried and ruled out, (4) unfinished intents. Then stop."
                     ),
                 },
             )
@@ -584,6 +682,92 @@ class SolverLoop:
         )
         (self.run_dir / "world.context.txt").write_text(rendered, encoding="utf-8")
         self._sync_agent_views()
+
+    def carry_forward_brief(self, reason: str) -> str:
+        """Summarise the run into the state a fresh session must inherit.
+
+        The brief is the short version of the transcript that is about to be
+        discarded: what is established, what is ruled out, what is still open
+        and where the durable notes live. It is bounded so it fits any context.
+        """
+        snapshot = self.world.snapshot
+        lines = [
+            "# Carry-forward brief",
+            f"reason: {reason}",
+            f"world revision: {snapshot.revision}",
+            f"tool calls so far: {self.progress.tool_calls}",
+            "",
+            "## Established facts",
+        ]
+        facts: list[str] = list(self.progress.confirmed_facts)
+        for observation in sorted(snapshot.observations.values(), key=lambda item: item.id):
+            trust = getattr(observation.provenance, "epistemic_status", "unclassified")
+            if trust not in {"evidence", "verified"}:
+                continue
+            summary = observation.content.get("summary")
+            text = str(summary) if isinstance(summary, str) and summary else observation.id
+            if text not in facts:
+                facts.append(text)
+        lines.extend(f"- {fact}" for fact in facts[:CONTEXT_BRIEF_FACTS])
+        if not facts:
+            lines.append("- none recorded")
+
+        lines.extend(["", "## Ruled out"])
+        ruled_out = [
+            item
+            for item in sorted(snapshot.hypotheses.values(), key=lambda item: item.id)
+            if item.status in {"refuted", "superseded"}
+        ]
+        lines.extend(
+            f"- [{item.status}] {item.statement}" for item in ruled_out[:CONTEXT_BRIEF_RULED_OUT]
+        )
+        failures = sorted(snapshot.failures.values(), key=lambda item: item.id)
+        lines.extend(
+            f"- [failure] {item.message}" for item in failures[-CONTEXT_BRIEF_FAILURES:]
+        )
+        if not ruled_out and not failures:
+            lines.append("- none recorded")
+
+        lines.extend(["", "## Open intents"])
+        intents: list[str] = []
+        if self.progress.current_subgoal:
+            intents.append(f"subgoal: {self.progress.current_subgoal}")
+        intent = self.progress.action_intent or {}
+        description = intent.get("description")
+        if isinstance(description, str) and description:
+            intents.append(f"last declared intent: {description}")
+        for hypothesis in sorted(snapshot.hypotheses.values(), key=lambda item: item.id):
+            if hypothesis.status in {"open", "supported"}:
+                intents.append(f"[{hypothesis.status}] {hypothesis.statement}")
+        lines.extend(f"- {item}" for item in intents[:CONTEXT_BRIEF_FACTS])
+        if not intents:
+            lines.append("- none recorded")
+
+        lines.extend(
+            [
+                "",
+                "## Pointers",
+                f"- notes: {self.notes_dir if self.notes_dir is not None else 'notes directory'}",
+                "- durable state: world.context.txt (Harness-rendered fact view)",
+                "- write your final report to the summary file before you stop",
+                "",
+                (
+                    "Continue from this state: do not re-derive what is listed above, and do "
+                    "not re-walk a ruled-out path unless you have new evidence."
+                ),
+            ]
+        )
+        brief = "\n".join(lines) + "\n"
+        if len(brief) > CONTEXT_BRIEF_MAX_CHARS:
+            brief = brief[:CONTEXT_BRIEF_MAX_CHARS].rstrip() + "\n[brief truncated]\n"
+        return brief
+
+    def write_carry_forward_brief(self, reason: str) -> tuple[Path, str]:
+        """Write the brief into the run directory and return it with its path."""
+        brief = self.carry_forward_brief(reason)
+        path = self.run_dir / "carry-forward.md"
+        path.write_text(brief, encoding="utf-8")
+        return path, brief
 
     def _sync_agent_views(self) -> None:
         if self.sync_agent_views is not None:

@@ -244,6 +244,30 @@ def tsec(
     max_model_calls: Annotated[int | None, typer.Option("--max-model-calls", min=1)] = None,
     max_tool_calls: Annotated[int | None, typer.Option("--max-tool-calls", min=1)] = None,
     max_cost_usd: Annotated[float | None, typer.Option("--max-cost-usd", min=0)] = None,
+    max_wall_time_seconds: Annotated[
+        int | None,
+        typer.Option(
+            "--max-wall-time-seconds",
+            min=1,
+            help=(
+                "Optional operator cap on the declared wall clock. Unset by default: "
+                "the run budget is honoured as declared."
+            ),
+        ),
+    ] = None,
+    seed_notes_from: Annotated[
+        Path | None,
+        typer.Option(
+            "--seed-notes-from",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help=(
+                "Previous run directory whose agent.summary.md seeds this run's notes "
+                "as read-only carry-over."
+            ),
+        ),
+    ] = None,
     use_hint: Annotated[
         bool,
         typer.Option("--hint", help="Request the platform hint; this may reduce flag score."),
@@ -288,6 +312,8 @@ def tsec(
             allow_host_agent=allow_host_agent,
             max_unconfirmed_progress=max_unconfirmed_progress,
             parallel=parallel,
+            max_wall_time_seconds=max_wall_time_seconds,
+            seed_notes_from=seed_notes_from,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
@@ -362,6 +388,26 @@ def report(
     if not result_path.is_file():
         typer.echo(f"missing {result_path}", err=True)
         raise typer.Exit(code=2)
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    attribution = result.get("executor_summary")
+    if isinstance(attribution, list) and attribution:
+        typer.echo("executor attribution (prompt / provider / model):")
+        for entry in attribution:
+            if not isinstance(entry, dict):
+                continue
+            typer.echo(
+                "- {prompt} / {provider} / {model}: sessions={sessions} "
+                "submissions={submissions} completed={completed_sessions} "
+                "tokens={total_tokens}".format(
+                    prompt=entry.get("prompt") or "-",
+                    provider=entry.get("provider") or "-",
+                    model=entry.get("model") or "-",
+                    sessions=entry.get("sessions", 0),
+                    submissions=entry.get("submissions", 0),
+                    completed_sessions=entry.get("completed_sessions", 0),
+                    total_tokens=entry.get("total_tokens", 0),
+                )
+            )
     typer.echo(result_path.read_text(encoding="utf-8"))
 
 

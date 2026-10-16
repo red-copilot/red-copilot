@@ -128,6 +128,7 @@ def bootstrap_solver(
         summary_path=(agent_workspace / "agent.summary.md")
         if agent_workspace is not None
         else None,
+        notes_dir=(agent_workspace / "notes") if agent_workspace is not None else None,
         sync_agent_views=sync_workspace,
         max_no_progress=max_no_progress,
         max_unconfirmed_progress=max_unconfirmed_progress,
