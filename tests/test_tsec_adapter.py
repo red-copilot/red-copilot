@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 from harness.benchmark import tsec_adapter
-from harness.benchmark.base import BenchmarkCase, Submission
+from harness.benchmark.base import (
+    AdapterSessionState,
+    BenchmarkCase,
+    BenchmarkSession,
+    Submission,
+)
 from harness.benchmark.tsec_adapter import (
     TSecBenchmarkAdapter,
     extract_flags,
@@ -735,3 +740,100 @@ def test_run_tsec_challenges_stops_when_a_pass_scores_nothing(
     # A pass with zero successes stops the loop even with passes remaining.
     assert _RetryFlipClient.discover_calls == 1
     assert len(results) == 2
+
+
+class _FlakyCloseClient(FakeRunnerClient):
+    """close_challenge fails N times before succeeding."""
+
+    failures: ClassVar[int] = 0
+    calls: ClassVar[int] = 0
+    raise_invalid_state: ClassVar[bool] = False
+
+    async def close_challenge(self, code):
+        type(self).calls += 1
+        if type(self).raise_invalid_state:
+            raise InvalidState()
+        if type(self).calls <= type(self).failures:
+            raise TSecConnError()
+        return SimpleNamespace(closed=True)
+
+
+class InvalidState(Exception):
+    pass
+
+
+class TSecConnError(Exception):
+    pass
+
+
+def _teardown_adapter(client) -> tuple[TSecBenchmarkAdapter, BenchmarkSession]:
+    from harness.models import ObjectiveSpec
+
+    adapter = TSecBenchmarkAdapter(client)
+    session = BenchmarkSession(
+        id="sess-1",
+        benchmark="tsec",
+        case_id="WEB-001",
+        objective=ObjectiveSpec(description="d"),
+        targets=[],
+        metadata={},
+    )
+    adapter._sessions[session.id] = AdapterSessionState(
+        case=BenchmarkCase(
+            id="WEB-001",
+            benchmark="tsec",
+            domain="web",
+            difficulty="easy",
+            metadata={"is_completed": False},
+        ),
+        closed=False,
+    )
+    return adapter, session
+
+
+def test_teardown_retries_connection_errors_and_succeeds(monkeypatch) -> None:
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", _fake_sleep)
+    _FlakyCloseClient.failures = 2
+    _FlakyCloseClient.calls = 0
+    _FlakyCloseClient.raise_invalid_state = False
+    adapter, session = _teardown_adapter(_FlakyCloseClient())
+
+    asyncio.run(adapter.teardown(session))
+
+    assert _FlakyCloseClient.calls == 3
+    assert adapter._sessions[session.id].closed is True
+
+
+def test_teardown_never_raises_after_exhausted_retries(monkeypatch, capsys) -> None:
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", _no_sleep)
+    _FlakyCloseClient.failures = 99
+    _FlakyCloseClient.calls = 0
+    adapter, session = _teardown_adapter(_FlakyCloseClient())
+
+    asyncio.run(adapter.teardown(session))  # must not raise
+
+    assert _FlakyCloseClient.calls == 3
+    assert adapter._sessions[session.id].closed is False
+    assert "failed after retries" in capsys.readouterr().err
+
+
+def test_teardown_treats_invalid_state_as_closed(monkeypatch) -> None:
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", _no_sleep)
+    _FlakyCloseClient.failures = 0
+    _FlakyCloseClient.calls = 0
+    _FlakyCloseClient.raise_invalid_state = True
+    adapter, session = _teardown_adapter(_FlakyCloseClient())
+
+    asyncio.run(adapter.teardown(session))
+
+    assert adapter._sessions[session.id].closed is True
+
+
+async def _fake_sleep(_seconds: float) -> None:
+    return None

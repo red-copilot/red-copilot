@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 import time
 import typing
 import uuid
@@ -241,11 +242,34 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
         )
 
     async def teardown(self, session: BenchmarkSession) -> None:
+        # Closing must never raise: an exception here would surface from the
+        # runner's finally block and can mask an otherwise solved case, and a
+        # transient network blip would strand an open challenge container -
+        # which the platform counts against its small max-active limit.
         state = self._sessions.get(session.id)
         if state is None or state.closed:
             return
-        result = await self.client.close_challenge(session.case_id)
-        state.closed = bool(result.closed)
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                result = await self.client.close_challenge(session.case_id)
+                state.closed = bool(result.closed)
+                return
+            except Exception as exc:  # noqa: BLE001 - closing is best effort
+                last_error = exc
+                if _is_sdk_error(exc, "InvalidState"):
+                    # Already closed or the task window ended server-side.
+                    state.closed = True
+                    return
+                if attempt < 2:
+                    await asyncio.sleep(2.0 * (attempt + 1))
+        print(
+            f"[tsec] closing challenge {session.case_id} failed after retries "
+            f"({type(last_error).__name__}); the platform will reclaim the "
+            f"container",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 _FLAG_RE = re.compile(r"HARNESS_FLAG=([^\s]+)")
