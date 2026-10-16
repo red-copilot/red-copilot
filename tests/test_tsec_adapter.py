@@ -551,6 +551,7 @@ def _reset_probe() -> None:
     _ConcurrencyProbeRunner.in_flight = 0
     _ConcurrencyProbeRunner.max_in_flight = 0
     _ConcurrencyProbeRunner.fail_cases = set()
+    _RetryProbeRunner.always_fail = False
 
 
 def test_run_tsec_challenges_solves_cases_concurrently(monkeypatch, tmp_path: Path) -> None:
@@ -662,6 +663,7 @@ class _RetryFlipClient(FakeRunnerClient):
 
 class _RetryProbeRunner(_ConcurrencyProbeRunner):
     fail_cases: ClassVar[set[str]] = set()
+    always_fail: ClassVar[bool] = False
 
     async def run_case(self, *, case, budgets, **kwargs):
         type(self).calls.append(case.id)
@@ -669,7 +671,10 @@ class _RetryProbeRunner(_ConcurrencyProbeRunner):
         type(self).max_in_flight = max(type(self).max_in_flight, type(self).in_flight)
         try:
             await asyncio.sleep(0.01)
-            if case.id in type(self).fail_cases and type(self).calls.count(case.id) == 1:
+            first_attempt = type(self).calls.count(case.id) == 1
+            if type(self).always_fail or (
+                case.id in type(self).fail_cases and first_attempt
+            ):
                 raise RuntimeError("first attempt fails")
             _RetryFlipClient.solved.add(case.id)
             return {
@@ -723,6 +728,7 @@ def test_run_tsec_challenges_stops_when_a_pass_scores_nothing(
     _RetryFlipClient.solved = set()
     _RetryFlipClient.discover_calls = 0
     _RetryProbeRunner.fail_cases = {"WEB-001", "WEB-002"}
+    _RetryProbeRunner.always_fail = True
     monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _RetryFlipClient)
     monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _RetryProbeRunner)
 
@@ -737,9 +743,10 @@ def test_run_tsec_challenges_stops_when_a_pass_scores_nothing(
         )
     )
 
-    # A pass with zero successes stops the loop even with passes remaining.
-    assert _RetryFlipClient.discover_calls == 1
-    assert len(results) == 2
+    # Two consecutive zero-score passes stop the loop; the first one alone
+    # would have been retried (transient-burst tolerance).
+    assert _RetryFlipClient.discover_calls == 2
+    assert len(results) == 4
 
 
 class _FlakyCloseClient(FakeRunnerClient):

@@ -409,6 +409,7 @@ async def run_tsec_challenges(
             # list is re-fetched (completed flags move server-side), and any
             # still-open cases are retried until the window runs out.
             started_at = time.monotonic()
+            zero_score_passes = 0
             slots = asyncio.Semaphore(max(1, concurrency))
 
             async def _run_case(index: int, case, pass_seed: int) -> dict:
@@ -508,10 +509,27 @@ async def run_tsec_challenges(
                 completed_now = sum(
                     1 for result in pass_results if result.get("success")
                 )
+                print(
+                    f"[tsec] pass {pass_index + 1}/{max_passes}: "
+                    f"{len(selected)} cases, {completed_now} newly completed",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 if completed_now == 0:
-                    # Nothing improved this pass; a further identical pass is
-                    # unlikely to change the outcome.
-                    break
+                    zero_score_passes += 1
+                    # One zero-score pass can be a transient burst (a model
+                    # rate-limit window, a platform hiccup) killing every
+                    # in-flight case at once; only stop after two consecutive
+                    # scoreless passes while the window still allows a retry.
+                    if zero_score_passes >= 2:
+                        print(
+                            "[tsec] two consecutive scoreless passes; stopping",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        break
+                else:
+                    zero_score_passes = 0
     except Exception as exc:
         if _is_sdk_error(exc, "VpnCheckError"):
             reason = getattr(exc, "detail", None)
