@@ -1,11 +1,40 @@
-# Knowledge staging
+# Knowledge index
 
-Drop read-only reference material here before a run: payload catalogues
-(PayloadsAllTheThings, OWASP cheat sheets), tool documentation, writeups, or
-engagement-specific notes. The Agent reads these files on demand with its own
-tools; the Harness never parses, indexes or plans over them.
+Read-only reference material for the Agent. Everything here is plain markdown the
+Agent reads with its own tools (`ls` / `cat`); the Harness never parses, indexes
+or plans over it. There is no vector store and no retrieval service.
 
-Rules:
+Start with the methodology pages, then the category you are working in. The
+category pages list which families to consider and where the bulk corpora live.
+
+## Methodology
+
+- [recon-to-report.md](methodology/recon-to-report.md) — the working loop:
+  asset, hypothesis, verification, submission, and when to abandon a path.
+- [evidence-and-reporting.md](methodology/evidence-and-reporting.md) — what
+  counts as evidence, how to record it, and what a minimal report contains.
+
+## Categories
+
+- [web.md](categories/web.md) — HTTP surfaces, injection families, client-side.
+- [network.md](categories/network.md) — services, protocols, and their tells.
+- [cloud.md](categories/cloud.md) — metadata endpoints, identity boundaries.
+- [ad-and-credentials.md](categories/ad-and-credentials.md) — directory services,
+  credential handling and lateral movement constraints.
+
+## Bulk corpora (not stored in this repository)
+
+Large upstream catalogues are fetched into `.harness/knowledge-cache/` before a
+run and mounted alongside this directory with `--knowledge-root`. They are not
+committed, and nothing in the runtime downloads them:
+
+- `PayloadsAllTheThings` — payload families and bypass lists.
+- `HowToHunt` — methodology notes per vulnerability class.
+- `nuclei-templates` — detection templates and their matchers.
+
+See `scripts/fetch-knowledge.sh` for the pinned revisions.
+
+## Staging rules
 
 - Staged locally before the run. The runtime never downloads knowledge, and
   no vector store or retrieval index is involved.
@@ -19,5 +48,5 @@ knowledge:
   - knowledge
 ```
 
-Keep credentials, live target data and anything you would not hand an
-untrusted container out of this tree.
+- Only point `--knowledge-root` at data you would hand an untrusted container.
+  Keep credentials, live target data and personal data out of this tree.
