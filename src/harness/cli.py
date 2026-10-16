@@ -90,6 +90,10 @@ def preflight(
     task: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
     tsec: Annotated[bool, typer.Option("--tsec")] = False,
+    base_url_env: Annotated[str, typer.Option("--base-url-env")] = "BENCHMARK_BASE_URL",
+    benchmark_token_env: Annotated[
+        str, typer.Option("--benchmark-token-env")
+    ] = "BENCHMARK_TOKEN",
     gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
     gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
     gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
@@ -102,6 +106,8 @@ def preflight(
             load_agent(agent),
             task_path=task,
             require_tsec=tsec,
+            tsec_base_url_env=base_url_env,
+            tsec_token_env=benchmark_token_env,
             gateway_enabled=gateway_enabled,
             gateway_mode=gateway_mode,
             gateway_image=gateway_image,

@@ -32,14 +32,19 @@ def load_tsec_config(
 class TSecClientAdapter:
     """Thin async wrapper over the official TSec Benchmark SDK."""
 
-    def __init__(self, config: TSecConfig) -> None:
+    def __init__(
+        self,
+        config: TSecConfig,
+        *,
+        sdk_factory: typing.Callable[[str, str], typing.Any] | None = None,
+    ) -> None:
+        factory = sdk_factory or _default_sdk_factory
         try:
-            from tsec_benchmark import TSecBenchmarkAsync
-        except ImportError as exc:
+            self._client = factory(config.base_url, config.token)
+        except ImportError as exc:  # pragma: no cover - import guard
             raise TSecAdapterError(
                 'tsec-benchmark is not installed; install red-harness with ".[tsec]"'
             ) from exc
-        self._client = TSecBenchmarkAsync(base_url=config.base_url, token=config.token)
 
     async def __aenter__(self) -> typing.Self:
         await self._client.__aenter__()
@@ -62,3 +67,9 @@ class TSecClientAdapter:
 
     async def get_hint(self, unique_code: str):
         return await self._client.get_hint(unique_code)
+
+
+def _default_sdk_factory(base_url: str, token: str) -> typing.Any:
+    from tsec_benchmark import TSecBenchmarkAsync
+
+    return TSecBenchmarkAsync(base_url=base_url, token=token)

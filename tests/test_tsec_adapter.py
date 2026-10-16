@@ -15,8 +15,9 @@ from harness.benchmark.tsec_adapter import (
     extract_flags,
     run_tsec_challenges,
 )
-from harness.benchmark.tsec_client import TSecAdapterError, TSecConfig
-from harness.models import AgentSpec, BudgetSpec
+from harness.benchmark.tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig
+from harness.models import AgentSpec, BudgetSpec, load_agent, load_task
+from harness.preflight import run_preflight
 
 
 class FakeTSecClient:
@@ -554,3 +555,97 @@ def test_run_tsec_challenges_rejects_parallel_above_the_platform_cap(tmp_path: P
                 parallel=MAX_PARALLEL_CHALLENGES + 1,
             )
         )
+
+
+class FakeSDK:
+    def __init__(self, base_url: str, token: str) -> None:
+        self.base_url = base_url
+        self.token = token
+        self.calls: list[tuple] = []
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self.exited = True
+
+    async def list_challenges(self):
+        self.calls.append(("list_challenges",))
+        return ["case"]
+
+    async def start_challenge(self, unique_code: str):
+        self.calls.append(("start_challenge", unique_code))
+        return {"code": unique_code}
+
+    async def submit_flag(self, unique_code: str, flag: str):
+        self.calls.append(("submit_flag", unique_code, flag))
+        return {"correct": True}
+
+    async def close_challenge(self, unique_code: str):
+        self.calls.append(("close_challenge", unique_code))
+        return {"closed": True}
+
+    async def get_hint(self, unique_code: str):
+        self.calls.append(("get_hint", unique_code))
+        return {"hint": "peek"}
+
+
+def test_tsec_client_adapter_forwards_sdk_config_and_every_call() -> None:
+    captured: dict[str, str] = {}
+    sdk = FakeSDK("unused", "unused")
+
+    def factory(base_url: str, token: str) -> FakeSDK:
+        captured.update(base_url=base_url, token=token)
+        return sdk
+
+    adapter = TSecClientAdapter(
+        TSecConfig(base_url="https://tsec.example", token="tok-123"),
+        sdk_factory=factory,
+    )
+
+    async def scenario() -> None:
+        async with adapter as client:
+            await client.list_challenges()
+            await client.start_challenge("WEB-001")
+            await client.submit_flag("WEB-001", "flag{x}")
+            await client.get_hint("WEB-001")
+            await client.close_challenge("WEB-001")
+
+    asyncio.run(scenario())
+
+    assert captured == {"base_url": "https://tsec.example", "token": "tok-123"}
+    assert sdk.calls == [
+        ("list_challenges",),
+        ("start_challenge", "WEB-001"),
+        ("submit_flag", "WEB-001", "flag{x}"),
+        ("get_hint", "WEB-001"),
+        ("close_challenge", "WEB-001"),
+    ]
+    assert sdk.entered and sdk.exited
+
+
+def test_preflight_uses_configurable_tsec_env_names(monkeypatch) -> None:
+    monkeypatch.delenv("BENCHMARK_BASE_URL", raising=False)
+    monkeypatch.delenv("BENCHMARK_TOKEN", raising=False)
+    monkeypatch.setenv("ALT_BASE_URL", "https://tsec.example")
+    monkeypatch.setenv("ALT_TOKEN", "tok")
+    root = Path(__file__).resolve().parents[1]
+    task = root / "benchmarks" / "examples" / "hello" / "task.yaml"
+    agent = root / "agents" / "examples" / "pi.yaml"
+
+    report = run_preflight(
+        load_task(task),
+        load_agent(agent),
+        task_path=task,
+        require_tsec=True,
+        tsec_base_url_env="ALT_BASE_URL",
+        tsec_token_env="ALT_TOKEN",
+    )
+
+    base_url = report.by_name("tsec_base_url")
+    credential = report.by_name("tsec_credential")
+    assert base_url.ok and "ALT_BASE_URL" in base_url.detail
+    assert credential.ok and "ALT_TOKEN" in credential.detail
