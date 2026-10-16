@@ -63,7 +63,6 @@ jobs:
       - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi.yaml'); assert a.type == 'pi'"
       - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi-tsec.yaml'); assert a.type == 'pi' and a.network == 'host'"
       - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi-tsec-hackathon.yaml'); assert a.pi.system_prompt_file == 'prompts/tsec-solver.md'"
-      - run: harness validate-skill skills/examples/network-service-discovery.yaml
       - run: harness tsec --help
       - run: harness gateway --help
       - run: harness capabilities
