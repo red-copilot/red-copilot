@@ -33,8 +33,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # retry in `benchmark/tsec_client.py`; the hint steer in `solver_loop.py` with
 # its adapter/bootstrap/runner/CLI wiring; and the opt-in Harness Pi extension
 # install path in `pi_adapter.py`). Re-measured from the tree, not estimated.
+#
+# ZCP-12 then added the restart-brief metric helpers and result plumbing in
+# `benchmark/runner.py`: measured before 15,764, after 15,814 (+50).
 MAX_MODULES = 56
-MAX_SRC_LINES = 15_764
+MAX_SRC_LINES = 15_814
 
 
 def _module_names() -> set[str]:
