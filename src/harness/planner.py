@@ -6,6 +6,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from .fact_frontier import select_next_fact
 from .progress import ProgressLedger
 from .skills import SkillSpec, StateSelector
 from .world import TRUST_RANK, WorldSnapshot
@@ -24,6 +25,8 @@ class PlanCandidate(BaseModel):
     budget_fit: float = Field(default=1.0, ge=0.0, le=1.0)
     matched_requirements: int = Field(ge=0)
     expected_outputs: list[StateSelector] = Field(default_factory=list)
+    target_fact: str | None = None
+    target_match: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class SkillApplicability(BaseModel):
@@ -210,6 +213,7 @@ class HeuristicSkillPlanner:
             ),
         )
         budget_remaining = progress.remaining_budget_fraction
+        next_fact = select_next_fact(snapshot, skills)
         candidates: list[PlanCandidate] = []
         applicability = {item.skill_id: item for item in self.explain(snapshot, skills)}
         for skill in skills:
@@ -226,6 +230,14 @@ class HeuristicSkillPlanner:
                 continue
             relevance = _goal_relevance(skill, goal_tokens)
             focus_relevance = _focus_relevance(skill, focus)
+            target_match = 0.0
+            target_fact = None
+            if next_fact is not None:
+                target_fact = next_fact.label
+                target_match = 1.0 if any(
+                    selector_matches_focus_item(next_fact.selector, produced)
+                    for produced in skill.produces
+                ) else 0.0
             failure_penalty = min(
                 1.0,
                 progress.failed_skill_counts.get(skill.id, 0) / 3.0,
@@ -238,8 +250,9 @@ class HeuristicSkillPlanner:
                 0.30 * novelty
                 + 0.20 * relevance
                 + 0.20 * focus_relevance
-                + 0.20 * (1.0 - friction)
+                + 0.15 * (1.0 - friction)
                 + 0.10 * budget_fit
+                + 0.15 * target_match
                 - 0.20 * failure_penalty
             )
 
@@ -255,6 +268,8 @@ class HeuristicSkillPlanner:
                     budget_fit=budget_fit,
                     matched_requirements=len(skill.requires),
                     expected_outputs=skill.produces,
+                    target_fact=target_fact,
+                    target_match=target_match,
                 )
             )
 
@@ -311,12 +326,15 @@ class RollingHorizonPlanner:
                 f"novelty={candidate.novelty:.2f}",
                 f"goal_relevance={candidate.goal_relevance:.2f}",
                 f"focus_relevance={candidate.focus_relevance:.2f}",
+                f"target_match={candidate.target_match:.2f}",
                 f"information_gain={candidate.information_gain:.2f}",
                 f"failure_penalty={candidate.failure_penalty:.2f}",
                 f"budget_fit={candidate.budget_fit:.2f}",
                 f"score={candidate.score:.2f}",
                 f"matched_requirements={candidate.matched_requirements}",
             ]
+            if candidate.target_fact:
+                rationale_parts.append(f"target_fact={candidate.target_fact}")
             if progress.current_subgoal:
                 rationale_parts.append(f"subgoal={progress.current_subgoal}")
             if progress.no_progress_count:
