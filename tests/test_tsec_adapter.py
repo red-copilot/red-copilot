@@ -15,7 +15,13 @@ from harness.benchmark.tsec_adapter import (
     extract_flags,
     run_tsec_challenges,
 )
-from harness.benchmark.tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig
+from harness.benchmark.tsec_client import (
+    TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
+    TSecAdapterError,
+    TSecClientAdapter,
+    TSecConfig,
+    _TokenBucket,
+)
 from harness.models import AgentSpec, BudgetSpec, load_agent, load_task
 from harness.preflight import run_preflight
 
@@ -649,3 +655,125 @@ def test_preflight_uses_configurable_tsec_env_names(monkeypatch) -> None:
     credential = report.by_name("tsec_credential")
     assert base_url.ok and "ALT_BASE_URL" in base_url.detail
     assert credential.ok and "ALT_TOKEN" in credential.detail
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def time(self) -> float:
+        return self.now
+
+
+def _fake_sleep(clock: FakeClock, recorded: list[float]):
+    async def sleep(seconds: float) -> None:
+        recorded.append(seconds)
+        clock.now += seconds
+
+    return sleep
+
+
+class RateLimitError(Exception):
+    status_code = 429
+
+
+class FlakyListSDK(FakeSDK):
+    def __init__(self, base_url: str, token: str) -> None:
+        super().__init__(base_url, token)
+        self.list_failures = 0
+        self.list_attempts = 0
+
+    async def list_challenges(self):
+        self.list_attempts += 1
+        if self.list_failures > 0:
+            self.list_failures -= 1
+            raise RateLimitError()
+        return await super().list_challenges()
+
+
+class FailingStartSDK(FakeSDK):
+    async def start_challenge(self, unique_code: str):
+        raise RuntimeError("start rejected")
+
+
+def _limited_adapter(
+    sdk: FakeSDK,
+) -> tuple[TSecClientAdapter, FakeClock, list[float]]:
+    clock = FakeClock()
+    slept: list[float] = []
+    adapter = TSecClientAdapter(
+        TSecConfig(base_url="https://tsec.example", token="tok"),
+        sdk_factory=lambda _url, _token: sdk,
+        limiter=_TokenBucket(clock=clock.time, sleep=_fake_sleep(clock, slept)),
+        sleep=_fake_sleep(clock, slept),
+    )
+    return adapter, clock, slept
+
+
+def test_tsec_client_rate_limits_calls_to_three_per_second() -> None:
+    sdk = FakeSDK("unused", "unused")
+    adapter, _clock, slept = _limited_adapter(sdk)
+
+    async def scenario() -> None:
+        for _ in range(4):
+            await adapter.list_challenges()
+
+    asyncio.run(scenario())
+
+    assert len(sdk.calls) == 4
+    assert slept == [pytest.approx(1 / 3)]
+
+
+def test_tsec_client_caps_instances_and_releases_on_close() -> None:
+    sdk = FakeSDK("unused", "unused")
+    adapter, _clock, _slept = _limited_adapter(sdk)
+
+    async def scenario() -> None:
+        for code in ("A", "B", "C"):
+            await adapter.start_challenge(code)
+        assert adapter.open_instances == {"A", "B", "C"}
+
+        with pytest.raises(TSecAdapterError):
+            await adapter.start_challenge("D")
+        with pytest.raises(TSecAdapterError):
+            await adapter.start_challenge("B")
+
+        await adapter.close_challenge("A")
+        await adapter.close_challenge("A")  # idempotent release
+        await adapter.start_challenge("D")
+        assert adapter.open_instances == {"B", "C", "D"}
+
+    asyncio.run(scenario())
+
+
+def test_tsec_client_releases_instance_when_start_fails() -> None:
+    sdk = FailingStartSDK("unused", "unused")
+    adapter, _clock, _slept = _limited_adapter(sdk)
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError):
+            await adapter.start_challenge("X")
+        assert adapter.open_instances == frozenset()
+
+    asyncio.run(scenario())
+
+
+def test_tsec_client_retries_429_once_then_fails_closed() -> None:
+    sdk = FlakyListSDK("unused", "unused")
+    adapter, _clock, slept = _limited_adapter(sdk)
+
+    async def scenario() -> None:
+        sdk.list_failures = 1
+        assert await adapter.list_challenges() == ["case"]
+
+        sdk.list_failures = 2
+        with pytest.raises(RateLimitError):
+            await adapter.list_challenges()
+
+    asyncio.run(scenario())
+
+    assert sdk.list_attempts == 4
+    assert slept == [
+        TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
+        TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
+    ]
