@@ -35,6 +35,9 @@ challenge.
 - Machine budget: `--parallel` x 3 containers, so the default sweep needs nine
   containers plus the platform's three-instance quota.
 - The `tsec-benchmark` SDK is importable in the environment running the sweep.
+- The repository is installed editable (`pip install -e ".[dev]"`), which puts
+  `src/` on the interpreter path so `python -m spike_swarm` resolves; otherwise
+  run it with `PYTHONPATH=src`.
 
 ## Usage
 
