@@ -82,9 +82,12 @@ WORKDIR /work
 
 # Install the Harness itself from the build context (must run from the
 # repository root: docker build -f docker/hosted/Dockerfile -t <tag> .).
+# The [tsec] extra bundles the TSec Benchmark SDK - the runner has no public
+# network at runtime, so the SDK must already be present in the image.
 COPY pyproject.toml README.md /tmp/harness-build/
 COPY src /tmp/harness-build/src
-RUN python3 -m pip install --no-cache-dir --break-system-packages /tmp/harness-build \
+RUN python3 -m pip install --no-cache-dir --break-system-packages '/tmp/harness-build[tsec]' \
+    && python3 -c "from tsec_benchmark import TSecBenchmarkAsync; print('tsec SDK ok')" \
     && rm -rf /tmp/harness-build
 
 COPY agents /opt/red-harness/agents
