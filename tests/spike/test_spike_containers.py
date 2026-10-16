@@ -208,3 +208,29 @@ def test_read_event_survives_a_line_larger_than_the_reader_limit() -> None:
     event, oversized = asyncio.run(scenario())
     assert event == {"type": "agent_settled"}
     assert oversized == 1
+
+
+def test_wait_settled_returns_early_when_pi_rejects_the_command() -> None:
+    async def scenario() -> tuple[bool, str, bool]:
+        session = PiRpcSession(container="c", provider="p", model="m", thinking=None)
+        reader = asyncio.StreamReader()
+        reader.feed_data(
+            b'{"id":"r1","type":"response","command":"prompt","success":false,'
+            b'"error":"No API key found for openai"}\n'
+        )
+        reader.feed_eof()
+
+        class FakeProcess:
+            stdout = reader
+            returncode = None
+
+        session._process = FakeProcess()  # type: ignore[assignment]
+        session.settled = False
+        settled = await session.wait_settled(timeout=1.0)
+        return settled, session.last_error, session.settled
+
+    settled, error, idle = asyncio.run(scenario())
+    assert settled is False
+    assert error == "No API key found for openai"
+    # A refused command leaves the session idle, so the next round prompts anew.
+    assert idle is True

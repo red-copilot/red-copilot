@@ -25,12 +25,16 @@ Nothing else is shared.
 One line per statement, appended to your inbox:
 
 ```text
-fact: <what you observed> | evidence: <command or output that showed it> | confidence: low|medium|high
-intent: <what you are about to try> | target: <host/service> | status: open|doing|done|dropped
-question: <what you still need to find out>
-flag: <candidate flag value>
-note: <free text for the other solvers>
+fact: port 80 is open | evidence: nmap -sV printed 80/tcp open http | confidence: high
+intent: fuzz the login form | target: 10.0.0.5 | status: doing
+question: which vhost serves the admin panel?
+flag: flag{candidate-value}
+note: ffuf rate-limited me; try -rate 20
 ```
+
+`confidence` must be `low`, `medium` or `high`; `status` must be `open`,
+`doing`, `done` or `dropped`. The `|` separators are required, and a line that
+does not match this grammar is filed as unparsed and never counts as evidence.
 
 Rules the runtime enforces:
 

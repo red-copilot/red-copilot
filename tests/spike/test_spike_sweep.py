@@ -458,3 +458,68 @@ def test_prepare_archives_a_finished_attempt_instead_of_replaying_it(tmp_path: P
     assert not layout.result_path.exists()
     assert layout.goal_journal.exists() is False or layout.goal_journal.read_text() == ""
     assert layout.graph_path.read_text(encoding="utf-8").startswith("# Intent-fact graph")
+
+
+class RejectingPi(FakePi):
+    """Stands in for Pi refusing every command (missing credential, bad model)."""
+
+    async def prompt(self, message: str) -> None:
+        self.briefs.append(message)
+        self.last_error = "No API key found for openai"
+        self.settled = True
+
+    async def send_round(self, message: str) -> None:
+        await self.prompt(message)
+
+    async def wait_settled(self, *, timeout: float) -> bool:
+        del timeout
+        self.settled = True
+        return False
+
+
+def test_run_task_stops_when_every_session_is_refused_by_pi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_launch(*, config, layout, paths, challenge, objective, addresses, thinking):
+        del config, layout, challenge, objective, addresses, thinking
+        session = RejectingPi(paths, [])
+        session.last_error = ""
+        return SessionState(
+            session_id=paths.session_id,
+            index=paths.index,
+            paths=paths,
+            container=f"fake-{paths.session_id}",
+            session=session,
+        )
+
+    async def fake_destroy(name: str) -> None:
+        del name
+
+    monkeypatch.setattr(sweep_module, "launch_session", fake_launch)
+    monkeypatch.setattr(sweep_module, "destroy_container", fake_destroy)
+    client = FakeClient()
+    config = _config(tmp_path, wall_time=30)
+    outcome = asyncio.run(
+        run_task(
+            client=client,
+            challenge=Challenge(code="WEB-4", description="x"),
+            config=config,
+        )
+    )
+    assert outcome.status == "blocked"
+    assert outcome.exit_reason == "provider_error"
+    # Round 1 fails, round 2 fails again; the third board pass is where the
+    # two-consecutive-error-rounds check trips and tears the task down.
+    assert outcome.rounds == 3
+    assert client.closed == ["WEB-4"]
+    layout = RunLayout(root=config.runs_root / "WEB-4", code="WEB-4")
+    result = json.loads(layout.result_path.read_text(encoding="utf-8"))
+    assert result["goal"]["root"]["status"] == "blocked"
+    assert result["sessions"][0]["exit_reason"] == "provider_error"
+    assert result["sessions"][0]["error_rounds"] == 2
+    status_log = layout.session(index=1, session_id="s1").status_log
+    records = [
+        json.loads(line) for line in status_log.read_text(encoding="utf-8").splitlines() if line
+    ]
+    assert records and records[0]["error"] == "No API key found for openai"
+    assert records[0]["settled"] is False

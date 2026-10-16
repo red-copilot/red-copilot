@@ -32,7 +32,8 @@ CONTAINER_INBOX = "/board/inbox"
 CONTAINER_GOALS = "/board/goals"
 CONTAINER_GRAPH = "/board/intent-fact-graph.md"
 CONTAINER_KNOWLEDGE = "/knowledge"
-RPC_READY_TIMEOUT_SECONDS = 120.0
+RPC_FRESH_HANDSHAKE_TIMEOUT = 1.0
+RPC_RESUME_HANDSHAKE_TIMEOUT = 15.0
 # Matches the proven harness reader: one Pi event may embed a large tool
 # result, so the stream limit is generous and overruns are drained, not fatal.
 RPC_READER_LIMIT_BYTES = 64 * 1024 * 1024
@@ -301,6 +302,8 @@ class PiRpcSession:
     settled: bool = True
     events_seen: int = 0
     rounds: int = 0
+    last_error: str = ""
+    _command_failed: bool = field(default=False, repr=False)
     _process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     _framer: JsonlFramer = field(default_factory=JsonlFramer, repr=False)
     _log_handle: object = field(default=None, repr=False)
@@ -321,7 +324,19 @@ class PiRpcSession:
             session_id=self.session_id,
         )
 
-    async def start(self, *, ready_timeout: float = RPC_READY_TIMEOUT_SECONDS) -> None:
+    async def start(
+        self,
+        *,
+        ready_timeout: float = RPC_RESUME_HANDSHAKE_TIMEOUT,
+        require_session: bool = False,
+    ) -> None:
+        """Spawn the RPC process and capture its session identity.
+
+        Pi may stay silent until the first command, so the session record is a
+        best-effort capture on a fresh start and a required handshake on resume.
+        Whatever the process writes first is what the runtime waits for.
+        """
+
         if shutil.which("docker") is None:
             raise ContainerError("docker executable was not found")
         if self.raw_log_path is not None:
@@ -338,25 +353,43 @@ class PiRpcSession:
             start_new_session=True,
             limit=RPC_READER_LIMIT_BYTES,
         )
-        deadline = asyncio.get_running_loop().time() + ready_timeout
+        timeout = ready_timeout if require_session else min(RPC_FRESH_HANDSHAKE_TIMEOUT, ready_timeout)
+        await self._capture_session_identity(timeout=timeout, required=require_session)
+        if not self.alive:
+            raise ContainerError(
+                f"pi RPC session exited during startup: {self.container}"
+                + (f" (see {self.log_path})" if self.log_path else "")
+            )
+        await self.send(
+            {
+                "id": f"spike-steering-mode-{os.getpid()}",
+                "type": "set_steering_mode",
+                "mode": "all",
+            }
+        )
+
+    async def _capture_session_identity(self, *, timeout: float, required: bool) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                raise ContainerError(f"pi RPC session did not start: {self.container}")
+                if required:
+                    raise ContainerError(
+                        f"pi RPC did not report a session id: {self.container}"
+                    )
+                return
             event = await self.read_event(timeout=remaining)
             if event is None:
-                raise ContainerError(f"pi RPC session exited during startup: {self.container}")
+                if not self.alive:
+                    if required:
+                        raise ContainerError(
+                            f"pi RPC exited before reporting its session: {self.container}"
+                        )
+                    return
+                continue
             identifier = session_event_id(event)
             if identifier:
                 self.session_id = identifier
-                self.settled = False
-                await self.send(
-                    {
-                        "id": f"spike-steering-mode-{os.getpid()}",
-                        "type": "set_steering_mode",
-                        "mode": "all",
-                    }
-                )
                 return
 
     async def send(self, command: Mapping[str, object]) -> None:
@@ -367,11 +400,13 @@ class PiRpcSession:
         await self._process.stdin.drain()
 
     async def prompt(self, message: str) -> None:
+        self.last_error = ""
         self.rounds += 1
         await self.send({"id": f"spike-round-{self.rounds}", "type": "prompt", "message": message})
         self.settled = False
 
     async def steer(self, message: str) -> None:
+        self.last_error = ""
         self.rounds += 1
         await self.send({"id": f"spike-round-{self.rounds}", "type": "steer", "message": message})
 
@@ -440,11 +475,28 @@ class PiRpcSession:
             return None
         self.events_seen += 1
         account_event(event, self.counters)
+        identifier = session_event_id(event)
+        if identifier:
+            self.session_id = identifier
+        if event.get("type") == "response" and event.get("success") is False:
+            # Pi rejects a prompt outright (missing credential, bad model) and
+            # never settles that turn, so the round has to end on the error.
+            self.last_error = str(event.get("error") or "command failed").strip()
+            self._command_failed = True
+        elif event.get("type") == "message_end":
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("stopReason") == "error":
+                detail = str(message.get("errorMessage") or "model error").strip()
+                self.last_error = f"{message.get('provider', 'provider')}: {detail}"
         return event
 
     async def wait_settled(self, *, timeout: float) -> bool:
         """Read until ``agent_settled``; True when the turn completed in time."""
 
+        if self._command_failed:
+            self._command_failed = False
+            self.settled = True
+            return False
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
@@ -452,8 +504,10 @@ class PiRpcSession:
                 return False
             event = await self.read_event(timeout=remaining)
             if event is None:
-                if not self.alive:
-                    return False
+                return False
+            if self._command_failed:
+                self._command_failed = False
+                self.settled = True
                 return False
             if event.get("type") == "agent_settled":
                 self.settled = True

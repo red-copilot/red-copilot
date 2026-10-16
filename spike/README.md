@@ -68,6 +68,14 @@ do not retry in a loop - and `4` a challenge produced no run.
 5. Brief all three solvers at once - goal state, graph and their last status -
    and wait for each turn to settle or for the round to time out.
 
+Rounds are paced: the runtime holds a round open until `--round-seconds`, so all
+three solvers write between the same two renders and every solver reads the same
+board. A round that overruns, or one in which every session failed at the
+provider, skips the pause. If all three sessions fail at the provider for two
+consecutive rounds (missing credential, a model the provider rejects), the task
+stops as `blocked` / `provider_error` instead of burning the window - the failure
+is recorded in the session's `status.jsonl` and in `result.json`.
+
 A subgoal only reaches `achieved` when the cited fact is already on the merged
 graph and a *different* session contributed it first. The root goal closes only
 on a platform-accepted flag.

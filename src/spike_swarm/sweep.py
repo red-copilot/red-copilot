@@ -234,6 +234,7 @@ class SessionState:
     session: PiRpcSession
     restarts: int = 0
     rounds: int = 0
+    error_rounds: int = 0
     exit_reason: str = "running"
     last_status: dict[str, object] | None = None
 
@@ -249,6 +250,7 @@ class SessionState:
             "model": self.session.model,
             "thinking": self.session.thinking,
             "rounds": self.rounds,
+            "error_rounds": self.error_rounds,
             "restarts": self.restarts,
             "exit_reason": self.exit_reason,
             "session_id": self.session.session_id,
@@ -456,7 +458,7 @@ async def replace_session(state: SessionState, *, config: SweepConfig) -> None:
         session_id=previous_id,
     )
     try:
-        await replacement.start()
+        await replacement.start(require_session=previous_id is not None)
     except ContainerError:
         state.exit_reason = "restart_failed"
         state.session = replacement
@@ -541,12 +543,10 @@ async def run_task(
 
         round_no = 0
         while True:
-            remaining = window_deadline - time.monotonic()
-            if remaining <= 0:
-                outcome.status = "abandoned"
-                outcome.exit_reason = "window_elapsed"
-                goal_store.abandon_root(reason="window_elapsed", round=round_no)
-                break
+            # Every round begins with the board pass, so the lines the solvers
+            # wrote during the previous round are merged, rendered and applied
+            # before anyone is briefed again. The final pass also runs after the
+            # window closes, which keeps the last round's findings on the record.
             round_no += 1
             outcome.rounds = round_no
             snapshot = _merge_board(states, round=round_no)
@@ -579,6 +579,21 @@ async def run_task(
                 outcome.exit_reason = "all_sessions_dead"
                 goal_store.block_root(reason="all_sessions_dead", round=round_no)
                 break
+            if all(state.error_rounds >= 2 for state in states):
+                # Two rounds in a row where every session failed at the provider
+                # (missing credential, unsupported model): the loop would only
+                # burn the window, so the task fails closed instead.
+                outcome.status = "blocked"
+                outcome.exit_reason = "provider_error"
+                goal_store.block_root(reason="provider_error", round=round_no)
+                break
+            remaining = window_deadline - time.monotonic()
+            if remaining <= 0:
+                outcome.status = "abandoned"
+                outcome.exit_reason = "window_elapsed"
+                goal_store.abandon_root(reason="window_elapsed", round=round_no)
+                break
+            round_started = time.monotonic()
             await _run_round(
                 states,
                 config=config,
@@ -592,6 +607,15 @@ async def run_task(
                 first_round=round_no == 1,
                 delta=delta,
             )
+            if not all(state.error_rounds > 0 for state in states):
+                # Fixed cadence: hold the round open so all three solvers write
+                # between the same two renders. A round in which every session
+                # errored skips the pause so the fail-fast check trips at once.
+                pause = config.round_seconds - (time.monotonic() - round_started)
+                if pause > 0:
+                    await asyncio.sleep(
+                        min(pause, max(0.0, window_deadline - time.monotonic()))
+                    )
     finally:
         for state in states:
             if state.exit_reason == "running":
@@ -753,6 +777,12 @@ async def _run_round(
             return
         settled = await state.session.wait_settled(timeout=round_seconds)
         state.rounds += 1
+        error = str(getattr(state.session, "last_error", "") or "")
+        if error:
+            state.error_rounds += 1
+            state.exit_reason = "provider_error"
+        else:
+            state.error_rounds = 0
         outcome = RoundOutcome(
             round=round,
             session_id=state.session_id,
@@ -765,7 +795,11 @@ async def _run_round(
             counters=state.session.counters.as_dict(),
         )
         state.last_status = outcome.as_dict()
-        append_jsonl(state.paths.status_log, status_record(outcome=outcome, brief_chars=len(brief)))
+        record = status_record(outcome=outcome, brief_chars=len(brief))
+        if error:
+            state.last_status["error"] = error
+            record["error"] = error
+        append_jsonl(state.paths.status_log, record)
 
     await asyncio.gather(*(one(state, brief) for state, brief in zip(states, briefs)))
 
