@@ -72,8 +72,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # `solver_loop.py`, and the bash-timeout clamp in the opt-in Pi extension
 # asset. Measured before 16,968, after 17,075 (+107). Re-measured from the
 # tree, not estimated.
+#
+# RUN-07 (dead-edge quieting) added no module: the projection in
+# `world/context.py` now sources semantic observations and the action tally
+# from the snapshot, summarises `tool.execution` bookkeeping and drops the
+# provenance blob from the Agent-facing lines. Measured before 17,075, after
+# 17,127 (+52). Re-measured from the tree, not estimated.
 MAX_MODULES = 57
-MAX_SRC_LINES = 17_075
+MAX_SRC_LINES = 17_127
 
 
 def _module_names() -> set[str]:

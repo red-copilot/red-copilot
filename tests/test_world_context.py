@@ -4,7 +4,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from harness.world.context import WorldContextBuilder
-from harness.world.models import Goal, Hypothesis, WorldSnapshot
+from harness.world.models import (
+    ActionRecord,
+    Goal,
+    Hypothesis,
+    Observation,
+    Provenance,
+    WorldSnapshot,
+)
 
 
 def _snapshot(*hypotheses: Hypothesis) -> WorldSnapshot:
@@ -108,3 +115,83 @@ def test_rendering_without_budget_lines_is_unchanged() -> None:
 
     assert "budget:" not in rendered
     assert rendered.index("reference:") < rendered.index("subgoal:")
+
+
+def _crowded_snapshot(
+    *, bookkeeping: int = 30, findings: int = 3
+) -> WorldSnapshot:
+    """A run shape from the 2026-10-16 sweep: noise first, findings buried."""
+    from datetime import UTC, datetime
+
+    snapshot = _snapshot()
+    stamp = datetime(2026, 10, 16, 10, 50, tzinfo=UTC)
+    for index in range(bookkeeping):
+        snapshot.observations[f"obs:tool:call-{index:03d}"] = Observation(
+            id=f"obs:tool:call-{index:03d}",
+            type="tool.execution",
+            content={"status": "failed" if index % 10 == 0 else "succeeded", "tool": "bash"},
+            confidence=1.0,
+            source="harness.tool",
+            provenance=Provenance(
+                actor="harness",
+                source="harness.tool",
+                event_id=f"wevt_{index:032d}",
+                source_event_id=f"pi-rpc:deadbeef:{index}:0",
+                epistemic_status="evidence",
+            ),
+            observed_at=stamp,
+        )
+    for index in range(findings):
+        snapshot.observations[f"finding-{index}"] = Observation(
+            id=f"finding-{index}",
+            type="finding",
+            content={"detail": f"semantic finding number {index}"},
+            confidence=0.9,
+            provenance=Provenance(actor="agent:solver", epistemic_status="claim"),
+            observed_at=stamp,
+        )
+    for index in range(20):
+        snapshot.actions[f"action:call-{index:03d}"] = ActionRecord(
+            id=f"action:call-{index:03d}",
+            type="bash",
+            status="failed" if index == 3 else "succeeded",
+            attributes={
+                "duration_ms": 1000 + index,
+                "provenance": {"actor": "agent:solver", "event_id": "wevt_x"},
+            },
+        )
+    return snapshot
+
+
+def test_bookkeeping_does_not_crowd_out_semantic_findings() -> None:
+    builder = WorldContextBuilder()
+    snapshot = _crowded_snapshot()
+
+    rendered = builder.render(snapshot)
+
+    for index in range(3):
+        assert f"finding-{index}" in rendered
+    assert "30 tool executions omitted; 3 failed" in rendered
+    assert "obs:tool:call-000" not in rendered
+
+
+def test_projection_drops_provenance_identifiers() -> None:
+    builder = WorldContextBuilder()
+    snapshot = _crowded_snapshot(bookkeeping=1)
+
+    rendered = builder.render(snapshot)
+
+    assert "wevt_" not in rendered
+    assert "pi-rpc:" not in rendered
+    assert "epistemic_status" in rendered
+
+
+def test_actions_render_as_a_tally_with_a_bounded_tail() -> None:
+    builder = WorldContextBuilder()
+    snapshot = _crowded_snapshot(bookkeeping=1)
+
+    rendered = builder.render(snapshot)
+
+    assert "20 recorded: 1 failed, 19 succeeded" in rendered
+    assert "12 earlier calls omitted" in rendered
+    assert rendered.count("[bash]") >= 8

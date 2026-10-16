@@ -47,14 +47,24 @@ configs is a maintainer call, and the live pacing effect needs the BEN-07 re-run
 Evidence: 19 tool calls over 180s (longest 927s, 51% of the window) and 39 budget steers that only
 arrived after the budget was nearly gone; `world.context.txt` carried no budget section at all.
 
-### RUN-07 [ ] P1 — Remove the dead feedback edges
+### RUN-07 [~] P1 — Remove the dead feedback edges
 Deliver: the Agent-facing context is a bounded fact summary instead of a dump of raw
 `tool.execution` and `action:*` records with full provenance; Agent-authored world changes are
 not echoed back as steers in benchmark mode and `pending` verdicts only reach the trace.
 Accept: replaying the historical traces drops per-run steers from the hundreds to single digits
 (a-05 received 99 world updates plus 39 pending verdicts while failing to submit); the projection
 stays inside the WLD-05 token budget.
-State: pending. Evidence: 2,261 of 3,154 agent feedback records were zero-information
+State: mostly implemented. The quieting switches were already on for benchmark runs (RUN-06
+pins them). The projection is now a fact summary: `world/context.py` sources semantic observations
+and the action tally from the snapshot, so Harness bookkeeping (`tool.execution`, one record per
+command) can no longer fill the retrieval limit and hide the findings; bookkeeping is summarised
+as a count with a failed tally, actions render as a tally plus a bounded eight-line tail, and the
+Agent-facing lines carry the trust tier and timings instead of the full provenance blob
+(actor/event ids). Measured on the 40 stored `world.db` snapshots from the sweep: the projection
+drops from a median 17,922 characters (always hitting its budget) to 4,567, with every semantic
+observation preserved. Evidence: `tests/test_world_context.py`. Outstanding: `pending` verdicts are
+still emitted as trace events (they are already not steered), and the steer-count effect needs the
+BEN-07 re-run. Evidence: 2,261 of 3,154 agent feedback records were zero-information
 `world.state.updated`; 656 of 656 action verdicts were `pending`.
 
 **Non-goals:** distributed workflow orchestrator, required DAG, reimplementation of Pi's internal reasoning loop.
