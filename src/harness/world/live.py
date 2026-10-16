@@ -6,7 +6,6 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from ..secureio import open_regular_file
-from .models import WorldObjectKind
 from .protocol import IngestError, IngestReport, WorldSubmission
 from .repository import WorldRepository
 
@@ -84,17 +83,3 @@ class WorldInboxCursor:
             source_event_id=submission.source_event_id,
         )
 
-
-def collection_name(kind: WorldObjectKind) -> str:
-    return {
-        "entity": "entities",
-        "relation": "relations",
-        "observation": "observations",
-        "artifact": "artifacts",
-        "capability": "capabilities",
-        "hypothesis": "hypotheses",
-        "goal": "goals",
-        "action": "actions",
-        "constraint": "constraints",
-        "failure": "failures",
-    }[kind]

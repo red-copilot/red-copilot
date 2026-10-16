@@ -370,6 +370,7 @@ def test_solver_loop_fetches_hint_once_at_the_threshold(tmp_path: Path) -> None:
     assert fetches == [1]
     hints = [item for item in session.feedback if item.type == "solver.hint"]
     assert len(hints) == 1
+    assert hints[0].data["source"] == "platform"
     assert "peek at the upload form" in hints[0].data["message"]
 
 
@@ -418,6 +419,18 @@ def test_solver_loop_hint_failure_is_not_retried(tmp_path: Path) -> None:
     traces = trace.path.read_text(encoding="utf-8")
     assert '"type":"solver.hint"' in traces
     assert '"used":false' in traces
+    assert '"source":"platform"' in traces
+
+
+def test_operator_and_platform_hints_share_one_steered_event_type() -> None:
+    """Both hint sources reach the Agent as ``solver.hint`` observations.
+
+    The RPC session only steers observation types on its whitelist, so the
+    shared type has to be there or a hint would stop at ``agent.feedback.jsonl``.
+    """
+    from harness.pi_container import ContainerPiRpcSession
+
+    assert "solver.hint" in ContainerPiRpcSession._STEER_TYPES
 
 
 def test_solver_loop_steers_once_per_budget_threshold(tmp_path: Path) -> None:

@@ -36,8 +36,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 #
 # ZCP-12 then added the restart-brief metric helpers and result plumbing in
 # `benchmark/runner.py`: measured before 15,764, after 15,814 (+50).
-MAX_MODULES = 56
-MAX_SRC_LINES = 15_814
+#
+# Merging origin/main (4349a22, operator hint channel) brought in
+# `src/harness/hints.py`, the deliberate +1 module, plus its SolverLoop wiring.
+# Measured before 15,814, after 15,987 (+173). Both hint sources share one
+# `solver.hint` observation absorbed through a single helper instead of two
+# duplicated blocks. Re-measured from the tree, not estimated.
+MAX_MODULES = 57
+MAX_SRC_LINES = 15_987
 
 
 def _module_names() -> set[str]:

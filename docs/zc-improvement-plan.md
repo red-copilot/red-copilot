@@ -9,7 +9,12 @@
 > 按 [security/execution-boundary.md](security/execution-boundary.md) 先复核后实施。
 > 窗口：≤5 个工作日（D1-D5）。先固化（G0）→ P0 提分门 → P1 低风险候选 → 联调日证据。
 
-## 1. 现状（2026-10-16 快照）
+## 1. 现状（2026-10-16 快照，归并 origin/main 之前的记录）
+
+> 本节是计划立项时的快照，保留原样以供对照；ZCP 与 roadmap 的当前状态一律以
+> [agent-engineering.md](agent-engineering.md) 第 5 节与 [roadmap/README.md](roadmap/README.md) 为准。
+> 归并 `origin/main`（`4349a22`，操作者提示通道 `harness hint` + 控制脊瘦身）后，ZCP-02/04
+> 已落地、ZCP-05 阶段二已获批落地（默认关闭），本节列出的"未落地"记录已过期。
 
 **ZCP 梯子**（状态权威见 [agent-engineering.md](agent-engineering.md) 第 5 节）：
 

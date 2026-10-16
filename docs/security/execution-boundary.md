@@ -39,6 +39,16 @@ Nothing authoritative may live there: it must never contain `world.db`, `world.e
 read back only for archival, never as evidence or instruction. The run root itself stays
 unmounted from every session container.
 
+### Operator hint inbox
+
+`harness hint <run_dir>` appends to `hints.jsonl` at the run root, which no session container
+can reach, so a hint can only be written by an operator on the host. That mount boundary is what
+lets the SolverLoop record each hint as an evidence-tier `human.hint` World observation and steer
+it into the running Agent: hints redirect exploration, they are never a verdict, and only a
+verifier or benchmark evaluation can close the objective. If the run root ever became
+container-writable, the evidence-tier status of `human.hint` would have to be revisited, because
+an Agent-authored copy would then be forged operator input rather than a verified fact.
+
 ### Opt-in Harness Pi extension
 
 With `pi.harness_extension: true`, the Harness writes its own TypeScript extension to

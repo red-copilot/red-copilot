@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import TRUST_RANK, WorldSnapshot
+from .models import KIND_COLLECTIONS, TRUST_RANK, WorldSnapshot
 
 DEFAULT_FOCUS_CLAIM_THRESHOLD = 0.7
 DEFAULT_MAX_ESTABLISHED = 8
@@ -29,18 +29,6 @@ _UNKNOWN_KINDS = ("hypothesis", "constraint", "failure")
 # Below-threshold claims are not established facts, but they are still worth
 # surfacing: they are unverified leads the next round can confirm or discard.
 _LEAD_KINDS = _ESTABLISHED_KINDS
-_COLLECTIONS = {
-    "entity": "entities",
-    "relation": "relations",
-    "observation": "observations",
-    "artifact": "artifacts",
-    "capability": "capabilities",
-    "hypothesis": "hypotheses",
-    "goal": "goals",
-    "action": "actions",
-    "constraint": "constraints",
-    "failure": "failures",
-}
 # Only records the Harness or an independent producer authored can displace a
 # record from the established set. Agent claims never displace established facts.
 _DISPLACING_STATUSES = frozenset({"evidence", "verified"})
@@ -153,7 +141,7 @@ def _recency_bonus(snapshot: WorldSnapshot, kinds: tuple[str, ...]) -> dict[str,
     dated = [
         record
         for kind in kinds
-        for record in getattr(snapshot, _COLLECTIONS[kind]).values()
+        for record in getattr(snapshot, KIND_COLLECTIONS[kind]).values()
         if getattr(record, "observed_at", None) is not None
     ]
     dated.sort(key=lambda record: (record.observed_at, record.id), reverse=True)
@@ -223,7 +211,7 @@ class FocusBuilder:
         recency = _recency_bonus(snapshot, _ESTABLISHED_KINDS)
         candidates: list[tuple[float, FocusItem]] = []
         for kind in _ESTABLISHED_KINDS:
-            for record in getattr(snapshot, _COLLECTIONS[kind]).values():
+            for record in getattr(snapshot, KIND_COLLECTIONS[kind]).values():
                 if not record.is_valid_at() or record.id in displaced:
                     continue
                 status = record.provenance.epistemic_status
@@ -255,7 +243,7 @@ class FocusBuilder:
         recency = _recency_bonus(snapshot, (*_UNKNOWN_KINDS, *_LEAD_KINDS))
         candidates: list[tuple[float, FocusItem]] = []
         for kind in _UNKNOWN_KINDS:
-            for record in getattr(snapshot, _COLLECTIONS[kind]).values():
+            for record in getattr(snapshot, KIND_COLLECTIONS[kind]).values():
                 if not record.is_valid_at():
                     continue
                 status = getattr(record, "status", None)
@@ -278,7 +266,7 @@ class FocusBuilder:
                     (score, _focus_item(kind, record, score=score, reason=reason))
                 )
         for kind in _LEAD_KINDS:
-            for record in getattr(snapshot, _COLLECTIONS[kind]).values():
+            for record in getattr(snapshot, KIND_COLLECTIONS[kind]).values():
                 if not record.is_valid_at() or record.id in displaced:
                     continue
                 if record.provenance.epistemic_status != "claim":

@@ -36,7 +36,7 @@ from .runtime.checkpoint import (
 )
 from .runtime.evidence import persist_objective_verdict
 from .runtime.lifecycle import RunLifecycle, resolve_run_status
-from .runtime.projections import finalize_world_goal, network_result, world_result
+from .runtime.projections import finalize_world_goal, network_result, run_summary, world_result
 from .runtime.results import persist_run_result
 from .secureio import read_regular_text
 from .session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
@@ -64,24 +64,25 @@ def _sum_usage(previous: UsageMetrics, current: dict[str, int | float]) -> dict[
 
 
 def _remaining_budget_task(task: TaskSpec, started_at: datetime, used: UsageMetrics) -> TaskSpec:
+    # Only wall_time is enforced; the token/call/cost budget fields are accepted
+    # for compatibility but ignored, so a resume only refuses on spent time.
+    del used
     elapsed = max(0, math.ceil((datetime.now(UTC) - started_at).total_seconds()))
-    mapping = {
-        "max_tokens": used.total_tokens,
-        "max_model_calls": used.model_calls,
-        "max_tool_calls": used.tool_calls,
-        "max_cost_usd": used.cost_usd,
-    }
-    remaining: dict[str, int | float | None] = {
-        "wall_time": task.budgets.wall_time - elapsed,
-    }
-    for field, spent in mapping.items():
-        limit = getattr(task.budgets, field)
-        remaining[field] = None if limit is None else limit - spent
-    exhausted = [field for field, value in remaining.items() if value is not None and value <= 0]
-    if exhausted:
-        raise RuntimeError(f"resume budget exhausted: {', '.join(exhausted)}")
+    remaining_wall_time = task.budgets.wall_time - elapsed
+    if remaining_wall_time <= 0:
+        raise RuntimeError("resume budget exhausted: wall_time")
     return task.model_copy(
-        update={"budgets": task.budgets.model_copy(update=remaining)}
+        update={
+            "budgets": task.budgets.model_copy(
+                update={
+                    "wall_time": remaining_wall_time,
+                    "max_tokens": None,
+                    "max_model_calls": None,
+                    "max_tool_calls": None,
+                    "max_cost_usd": None,
+                }
+            )
+        }
     )
 
 
@@ -683,6 +684,20 @@ class Orchestrator:
         world.flush()
         result["world"] = world_result(world=world, solver_loop=solver_loop, agent_id=agent.id)
         result["world"]["resumed"] = resume_world_events is not None
+        # Deterministic harvest (Cairn-style conclude fallback): every local run
+        # leaves a summary of facts, intents, and exploration behind, whether or
+        # not the Agent managed to write its own report before the deadline.
+        result["summary"] = run_summary(
+            world=world,
+            progress=progress,
+            run_dir=run_dir,
+            outcome={
+                "status": status,
+                "success": result["success"],
+                "failure_class": failure_class,
+            },
+            agent_report_path=agent_workspace / "agent.summary.md",
+        )
         persist_run_result(run_dir=run_dir, trace=trace, result=result)
         return result
 

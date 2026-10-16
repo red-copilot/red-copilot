@@ -177,21 +177,15 @@ def build_container_command(
         container_name,
         "--user",
         f"{container_uid}:{container_gid}",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--pids-limit",
-        str(limits.pids),
-        "--memory",
-        limits.memory,
-        "--cpus",
-        limits.cpus,
+        *hardened_docker_flags(
+            pids_limit=limits.pids,
+            memory=limits.memory,
+            cpus=limits.cpus,
+            tmpfs=limits.tmpfs,
+        ),
+        "--network",
+        network,
     ]
-    for mount in limits.tmpfs:
-        command.extend(["--tmpfs", mount])
-    command.extend(["--network", network])
     if spec.runtime:
         command.extend(["--runtime", spec.runtime])
     for capability in extra_cap_add:
@@ -383,6 +377,56 @@ def _run_monitored(
     )
 
 
+def run_docker(
+    command: list[str],
+    *,
+    cwd: Path,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        raise AgentError(f"{' '.join(command[:3])} failed: {result.stderr.strip()}")
+    return result
+
+
+def hardened_docker_flags(
+    *,
+    pids_limit: int,
+    memory: str,
+    cpus: str,
+    tmpfs: Sequence[str] = (),
+) -> list[str]:
+    """Shared hardening prefix for every container the Harness launches.
+
+    Read-only root filesystem, no Linux capabilities, no privilege escalation,
+    and bounded PIDs/memory/CPU. Resource values stay per call site because the
+    Agent, Verifier, and Gateway sidecar have different working sets.
+    """
+    flags = [
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        str(pids_limit),
+        "--memory",
+        memory,
+        "--cpus",
+        cpus,
+    ]
+    for mount in tmpfs:
+        flags.extend(["--tmpfs", mount])
+    return flags
+
+
 class CLIAdapter:
     """Trusted local-process adapter used for development."""
 
@@ -489,24 +533,7 @@ class DockerAdapter:
 
         return ONE_SHOT_AGENT_CAPABILITIES
 
-    @staticmethod
-    def _docker(
-        command: list[str],
-        *,
-        cwd: Path,
-        check: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if check and result.returncode != 0:
-            raise AgentError(f"{' '.join(command[:3])} failed: {result.stderr.strip()}")
-        return result
+    _docker = staticmethod(run_docker)
 
     def _create_command(
         self,

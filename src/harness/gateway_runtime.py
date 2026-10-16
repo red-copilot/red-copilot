@@ -12,6 +12,7 @@ from typing import Literal
 
 import uvicorn
 
+from .agent import hardened_docker_flags
 from .gateway import ModelPricing, create_gateway_app
 from .policy import load_policy
 from .secureio import open_regular_file
@@ -180,19 +181,12 @@ class DockerGatewaySidecarRuntime:
             self.network_name,
             "--network-alias",
             "harness-gateway",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "128",
-            "--memory",
-            "512m",
-            "--cpus",
-            "1",
-            "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=128m",
+            *hardened_docker_flags(
+                pids_limit=128,
+                memory="512m",
+                cpus="1",
+                tmpfs=("/tmp:rw,nosuid,nodev,size=128m",),
+            ),
             "-v",
             f"{self.usage_event_path.resolve()}:/gateway-events.jsonl:rw",
             "-v",

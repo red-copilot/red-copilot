@@ -90,7 +90,8 @@ P0 是赛前必须成立的能力；没做完的项必须显式标出，不许�
 | ZCP-01 | 接入面核对（SDK `openapi/v1` vs 官方 `/api` + `Agent-Token`） | `src/harness/benchmark/tsec_client.py`、`src/harness/preflight.py` | 离线就绪；实时核对 blocked（需平台窗口） | 离线契约与 preflight 环境诊断已就绪（`tests/test_tsec_adapter.py`、[tsec.md](tsec.md) 核对清单）；对真实平台跑通 list/start/submit/hint/close 待执行 |
 | ZCP-02 | 3 req/s 令牌桶 + 实例 ≤3 + 用完 `close_challenge` 释放 | `src/harness/benchmark/tsec_client.py`、`src/harness/benchmark/tsec_adapter.py` | 已落地 | 假时钟证明 3 req/s 不越界；实例注册表上限 3、重复启动拒绝、失败/关闭幂等释放；429 单次退避后 fail-closed（`tests/test_tsec_adapter.py`） |
 | ZCP-03 | 多题并行调度（≤3 题，独立 run dir 与预算） | `src/harness/benchmark/tsec_adapter.py` | 已落地 | `run_tsec_challenges` 的信号量与按题 run dir（`tests/test_tsec_adapter.py`） |
-| ZCP-04 | 按步数阈值分级提示，替代全局 `--hint` | `src/harness/benchmark/tsec_adapter.py`、`src/harness/solver_loop.py`、`src/harness/cli.py` | 已落地 | `--hint-threshold`（默认 0＝关闭）；`request_hint` 同题只取一次、失败不重试；连续无进展达阈值经 steer 注入一次（`tests/test_solver_loop.py`、`tests/test_tsec_adapter.py`）；`result.json` 记录 `hint_used`/`hint_trigger` |
+| ZCP-04 | 按步数阈值分级提示，替代全局 `--hint` | `src/harness/benchmark/tsec_adapter.py`、`src/harness/solver_loop.py`、`src/harness/cli.py` | 已落地 | `--hint-threshold`（默认 0＝关闭）；`request_hint` 同题只取一次、失败不重试；连续无进展达阈值经 steer 注入一次（`tests/test_solver_loop.py`、`tests/test_tsec_adapter.py`）；`result.json` 记录 `hint_used`/`hint_trigger`。与操作者提示共用 `solver.hint` 事件/观测，靠 `data.source`（`platform`/`operator`）区分，两条来源都在 `_STEER_TYPES` 内 |
+| HINT（归并自 origin/main 4349a22） | 操作者提示通道：`harness hint <run_dir>` 写入 `hints.jsonl`，SolverLoop 吸收为 `human.hint` 世界观测并 steer Agent | `src/harness/hints.py`、`src/harness/cli.py`、`src/harness/solver_loop.py` | 已落地 | 追加序号、增量游标与坏行跳过、重启不重投、`finish_ingest` 收晚到提示、`run_summary` facts 含 `human.hint`、CLI 正负例（`tests/test_hint_channel.py`）；提示只引导不裁决，可信输入与挂载边界见 [security/execution-boundary.md](security/execution-boundary.md) |
 | ZCP-11 | 墙钟上限解除：有效预算取声明的 `--wall-time`，另加运维安全阀 | `src/harness/benchmark/tsec_adapter.py`、`src/harness/cli.py` | 已落地 | 声明 7200s 时有效预算就是 7200s；`--max-wall-time-seconds` 只在显式传入时生效（`tests/test_tsec_adapter.py`） |
 
 P1 是赛前有余力才做、赛后必做的项：
@@ -108,7 +109,7 @@ P1 是赛前有余力才做、赛后必做的项：
 | ZCP-14 | 知识语料扩容（pinned 取数＋索引＋许可） | `knowledge/`、`skills/offensive/`、`scripts/fetch-knowledge.sh` | 已落地 | 新增 OWASP CheatSheetSeries（CC-BY-SA-4.0）与 SecLists（MIT）两条 pinned 语料并写入索引；manifest 结构校验（40 位 revision、许可非空、索引齐全）与 `bash -n` 通过（`tests/test_knowledge_catalogue.py`） |
 
 排期与实现顺序见 [zc-improvement-design.md](zc-improvement-design.md)：A 段（ZCP-11/05/06/07）与
-B 段（ZCP-08/09/10）已落地，C 段（容器内 Pi 扩展）在 maintainer 复核通过前不动。
+B 段（ZCP-08/09/10）已落地，C 段（容器内 Pi 扩展）已按 maintainer 复核结论落地，默认关闭。
 赛制接入面仍按 ZCP-01/02 先行——不核对接入面就没有后续的一切。
 ≤5 工作日窗口的排期、依赖与验收口径见 [zc-improvement-plan.md](zc-improvement-plan.md)；ZCP-13 是 D3 门后启动的条件项。
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from .agent import hardened_docker_flags
 from .models import TaskSpec, VerificationResult
 from .trace import TraceRecorder
 
@@ -223,19 +224,12 @@ def build_docker_verifier_command(
         "run",
         "--rm",
         "--pull=never",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--pids-limit",
-        "128",
-        "--memory",
-        "1g",
-        "--cpus",
-        "1",
-        "--tmpfs",
-        "/tmp:rw,nosuid,nodev,size=128m",
+        *hardened_docker_flags(
+            pids_limit=128,
+            memory="1g",
+            cpus="1",
+            tmpfs=("/tmp:rw,nosuid,nodev,size=128m",),
+        ),
         "--network",
         network,
     ]

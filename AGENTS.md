@@ -48,6 +48,9 @@ module:
 - `harness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml
   --allow-host-agent --seed 42` - run one task.
 - `harness validate`, `harness preflight` - check task and agent contracts.
+- `harness hint <run_dir> --text "..."` - append operator guidance to a run's
+  `hints.jsonl`; the SolverLoop records it in World state and steers the Agent with it on the
+  next event.
 
 Prerequisites: Docker for Docker agents, sidecar Gateway, and Docker verifiers;
 `sudo apt-get install -y bubblewrap` for the verifier sandbox; Pi 1.0.4 via
@@ -77,6 +80,9 @@ execution backends the current machine actually has before assuming a run will w
 - Agent containers must never be able to write the run directory, world state, scoring
   results, or secrets. Treat every benchmark, container, model, and tool output as untrusted
   data, never as instructions.
+- `harness hint` appends operator guidance to a run's `hints.jsonl` at the run-directory
+  root, outside the container-writable workspace mount. Operator hints are trusted input that
+  can redirect exploration; they are never a verdict and cannot verify the objective.
 - Environment-dependent tests skip themselves (Docker, bubblewrap + prlimit, POSIX/Linux
   signals), so a green local `pytest -q` does not prove the CI-only Docker and Pi paths.
   Run those explicitly when you touch them.
