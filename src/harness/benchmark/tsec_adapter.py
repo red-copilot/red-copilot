@@ -363,6 +363,7 @@ async def run_tsec_challenges(
     max_replans: int = BENCHMARK_MAX_REPLANS,
     concurrency: int = 1,
     total_wall_time: int | None = None,
+    max_passes: int = 1,
 ) -> list[dict]:
     """Run selected TSec challenges through the generic benchmark runtime."""
 
@@ -379,27 +380,14 @@ async def run_tsec_challenges(
                 start_retries=start_retries,
                 retry_delay=retry_delay,
             )
-            cases = await adapter.discover()
-            if challenge_code and not any(case.id == challenge_code for case in cases):
-                raise TSecAdapterError(f"challenge not found: {challenge_code}")
-
-            selected = [
-                case
-                for case in cases
-                if not bool(case.metadata.get("is_completed"))
-                and (run_all or challenge_code is None or case.id == challenge_code)
-            ]
-            if not run_all and challenge_code is None:
-                selected = selected[:1]
-
-            # The platform allows a small number of concurrent challenge
-            # containers; run cases through a bounded pool so a stuck case
-            # never blocks the rest of the set, and one case's failure does
-            # not abort the evaluation.
+            # Multi-pass: a failed or timed-out attempt does not forfeit the
+            # challenge for the whole evaluation. After each pass the case
+            # list is re-fetched (completed flags move server-side), and any
+            # still-open cases are retried until the window runs out.
             started_at = time.monotonic()
             slots = asyncio.Semaphore(max(1, concurrency))
 
-            async def _run_case(index: int, case) -> dict:
+            async def _run_case(index: int, case, pass_seed: int) -> dict:
                 async with slots:
                     budgets = effective_budgets
                     if total_wall_time is not None:
@@ -423,7 +411,7 @@ async def run_tsec_challenges(
                             case=case,
                             agent=agent,
                             budgets=budgets,
-                            seed=seed + index,
+                            seed=pass_seed + index,
                             submission_extractor=_extract_submissions,
                             allow_host_agent=allow_host_agent,
                             solver_profile=solver_profile,
@@ -462,9 +450,44 @@ async def run_tsec_challenges(
                     )
                     return result
 
-            results = list(
-                await asyncio.gather(*(_run_case(index, case) for index, case in enumerate(selected)))
-            )
+            for pass_index in range(max(1, max_passes)):
+                if total_wall_time is not None and (
+                    total_wall_time - (time.monotonic() - started_at)
+                    <= DISPATCH_FLOOR_SECONDS + FINALIZE_GRACE_SECONDS
+                ):
+                    break
+                cases = await adapter.discover()
+                if challenge_code and not any(
+                    case.id == challenge_code for case in cases
+                ):
+                    raise TSecAdapterError(f"challenge not found: {challenge_code}")
+
+                selected = [
+                    case
+                    for case in cases
+                    if not bool(case.metadata.get("is_completed"))
+                    and (run_all or challenge_code is None or case.id == challenge_code)
+                ]
+                if not run_all and challenge_code is None:
+                    selected = selected[:1]
+                if not selected:
+                    break
+                pass_results = list(
+                    await asyncio.gather(
+                        *(
+                            _run_case(index, case, seed + pass_index * 10_000)
+                            for index, case in enumerate(selected)
+                        )
+                    )
+                )
+                results.extend(pass_results)
+                completed_now = sum(
+                    1 for result in pass_results if result.get("success")
+                )
+                if completed_now == 0:
+                    # Nothing improved this pass; a further identical pass is
+                    # unlikely to change the outcome.
+                    break
     except Exception as exc:
         if _is_sdk_error(exc, "VpnCheckError"):
             reason = getattr(exc, "detail", None)

@@ -358,6 +358,15 @@ def tsec(
             ),
         ),
     ] = None,
+    max_passes: Annotated[
+        int,
+        typer.Option(
+            "--max-passes",
+            min=1,
+            max=5,
+            help="Retry still-incomplete challenges this many passes over the set.",
+        ),
+    ] = 1,
 ) -> None:
     """Run TSec Benchmark challenges through the generic benchmark runtime."""
     spec = load_agent(agent)
@@ -398,6 +407,7 @@ def tsec(
             max_replans=max_replans,
             concurrency=concurrency,
             total_wall_time=total_wall_time,
+            max_passes=max_passes,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))

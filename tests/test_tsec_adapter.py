@@ -629,3 +629,109 @@ def test_run_tsec_challenges_skips_dispatch_past_total_window(monkeypatch, tmp_p
 
     assert _ConcurrencyProbeRunner.calls == []
     assert all(result["status"] == "skipped" for result in results)
+
+
+class _RetryFlipClient(FakeRunnerClient):
+    """WEB-001 stays incomplete until it succeeds once; others complete fast."""
+
+    solved: ClassVar[set[str]] = set()
+    discover_calls: ClassVar[int] = 0
+
+    async def list_challenges(self):
+        type(self).discover_calls += 1
+        return [
+            SimpleNamespace(
+                unique_code=code,
+                description=f"challenge {code}",
+                category="web",
+                flag_count=1,
+                correct_flag_count=1 if code in type(self).solved else 0,
+                difficulty="easy",
+                level="L1",
+                total_score=100,
+                is_completed=code in type(self).solved,
+            )
+            for code in ("WEB-001", "WEB-002")
+        ]
+
+
+class _RetryProbeRunner(_ConcurrencyProbeRunner):
+    fail_cases: ClassVar[set[str]] = set()
+
+    async def run_case(self, *, case, budgets, **kwargs):
+        type(self).calls.append(case.id)
+        type(self).in_flight += 1
+        type(self).max_in_flight = max(type(self).max_in_flight, type(self).in_flight)
+        try:
+            await asyncio.sleep(0.01)
+            if case.id in type(self).fail_cases and type(self).calls.count(case.id) == 1:
+                raise RuntimeError("first attempt fails")
+            _RetryFlipClient.solved.add(case.id)
+            return {
+                "run_id": f"run-{case.id}",
+                "benchmark": {"case_id": case.id, "session": {}},
+                "status": "finished",
+                "success": True,
+                "score": 100.0,
+                "evaluation": {},
+            }
+        finally:
+            type(self).in_flight -= 1
+
+
+def test_run_tsec_challenges_retries_incomplete_cases_next_pass(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _reset_probe()
+    _RetryFlipClient.solved = set()
+    _RetryFlipClient.discover_calls = 0
+    _RetryProbeRunner.fail_cases = {"WEB-001"}
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _RetryFlipClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _RetryProbeRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=60),
+            runs_root=tmp_path,
+            run_all=True,
+            max_passes=2,
+        )
+    )
+
+    # WEB-001 failed on pass 1, was retried on pass 2 and then solved.
+    assert _RetryProbeRunner.calls == ["WEB-001", "WEB-002", "WEB-001"]
+    assert _RetryFlipClient.discover_calls == 2
+    assert len(results) == 3
+    by_challenge = {}
+    for result in results:
+        by_challenge.setdefault(result["benchmark"]["challenge"], []).append(result["status"])
+    assert by_challenge["WEB-001"] == ["error", "finished"]
+    assert by_challenge["WEB-002"] == ["finished"]
+
+
+def test_run_tsec_challenges_stops_when_a_pass_scores_nothing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _reset_probe()
+    _RetryFlipClient.solved = set()
+    _RetryFlipClient.discover_calls = 0
+    _RetryProbeRunner.fail_cases = {"WEB-001", "WEB-002"}
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _RetryFlipClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _RetryProbeRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=60),
+            runs_root=tmp_path,
+            run_all=True,
+            max_passes=5,
+        )
+    )
+
+    # A pass with zero successes stops the loop even with passes remaining.
+    assert _RetryFlipClient.discover_calls == 1
+    assert len(results) == 2
