@@ -22,5 +22,17 @@ Deliver: one verifier protocol for local tasks and benchmark adapters, sandboxed
 Accept: shared contract tests for success, failure, unavailable verifier, timeout and inconsistent evaluator responses; fail closed when verification is unavailable.
 State: implemented; both runner paths record an `unavailable` verdict with a safe error class and perform normal teardown.
 
+### VER-05 [ ] P1 — Harness observation contract
+Deliver: a typed `ObservationRecord` (producer, capture time, world revision, artifact hash)
+produced only by Harness-owned sources - the platform verdict and Harness-side probes - with the
+Agent's `expected_observation` no longer acting as the comparison baseline: no observation
+records `unavailable` and never steers, a recorded observation is compared.
+Accept: unit tests for "no observation, no steer", a matched observation, and a forged producer
+being rejected; the VER-01/02 authority model and the claim < evidence < verified ladder are
+unchanged.
+State: pending. Evidence: 656 of 656 verdicts were `pending` with
+`world_revision_changed` / `expected_observation_missing`, i.e. the Harness compared an Agent
+string against a world it could not see.
+
 **Not in scope:** LLM self-confidence as proof, automatically elevating World claims, benchmark-specific shortcuts in core.
 

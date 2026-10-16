@@ -22,5 +22,30 @@ Deliver: one owner for container, session, gateway and task teardown with consis
 Accept: forced kill, signal interruption and external benchmark teardown tests; no leaked resources or overwritten terminal results.
 State: atomic first-writer-wins `result.json`, SIGINT/SIGTERM cancellation, a parent-death process supervisor for host CLI agents, single idempotent benchmark teardown bounded to 30s and per-run action-owner locking are implemented. Outstanding: Docker and live external benchmark teardown evidence.
 
+### RUN-05 [~] P1 — Terminal closure for externally evaluated runs
+Deliver: a scored, wall-clock-bounded run closes by handing in its best candidate and its report instead of only a report, and the loop stops spending turns on feedback it cannot act on.
+Accept: the finalize steer asks for a candidate submission when the adapter is score-based; a run that reached half its wall clock with zero submissions is steered once; a run that already submitted is not; Agent-authored world revisions are not echoed back as steers in benchmark mode while Harness-authored ones still are; pending verdicts are recorded but not steered; run metrics distinguish "never tried" from "tried and rejected".
+State: implemented. `SolverLoop` takes `finalize_requests_submission`, `submission_due_fraction`, `quiet_world_steers` and `verdict_steers_only` (all default off, so task runs are unchanged); `BenchmarkRunner` enables them for benchmark runs and records `submissions_attempted` / `first_submission_ms`; `ProgressLedger` counts `submissions_attempted`. Evidence: [2026-10-16 sweep review](../tsec-run-review-2026-10-16.md), coverage in `tests/test_solver_loop.py`, `tests/test_benchmark_streaming.py`. The 15 losing TSec runs on 2026-10-16 all ended with zero submissions, which is the failure shape this item targets. Outstanding: a live sweep to measure time-to-first-submission and the steer-count drop on a real run.
+
+### RUN-06 [ ] P0 — In-run pacing and a visible clock
+Deliver: the Agent can see its remaining wall clock and budget without asking (rendered into the
+Agent-facing context header and readable through the workspace projection), and the benchmark
+path keeps RUN-05's four closure switches on by default while the local task path keeps them off.
+Accept: offline tests cover the rendered budget block and the per-path defaults; replaying a
+historical trace does not change the submission path of a run that already succeeded.
+State: pending. Evidence: 19 tool calls over 180s (longest 927s, 51% of the window) and 39
+budget steers that only arrived after the budget was nearly gone; `world.context.txt` carried no
+budget section at all.
+
+### RUN-07 [ ] P1 — Remove the dead feedback edges
+Deliver: the Agent-facing context is a bounded fact summary instead of a dump of raw
+`tool.execution` and `action:*` records with full provenance; Agent-authored world changes are
+not echoed back as steers in benchmark mode and `pending` verdicts only reach the trace.
+Accept: replaying the historical traces drops per-run steers from the hundreds to single digits
+(a-05 received 99 world updates plus 39 pending verdicts while failing to submit); the projection
+stays inside the WLD-05 token budget.
+State: pending. Evidence: 2,261 of 3,154 agent feedback records were zero-information
+`world.state.updated`; 656 of 656 action verdicts were `pending`.
+
 **Non-goals:** distributed workflow orchestrator, required DAG, reimplementation of Pi's internal reasoning loop.
 

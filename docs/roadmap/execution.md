@@ -32,5 +32,31 @@ Deliver: one pydantic schema per Agent-authored event type, validated at the ACI
 Accept: the registry covers exactly the typed events `TypedACI` translates; malformed payloads fail closed into `aci.feedback` without state changes.
 State: implemented in `agent_events.py::TYPED_EVENT_SCHEMAS` with a documented fail-closed tightening on known keys with wrong types; a live Pi run remains before acceptance.
 
+### EXE-07 [ ] P1 — Tool availability over tool count
+Deliver: fix or explicitly retire the tools the Agent actually reached for and could not use -
+nmap is broken in-run (`/usr/lib/nmap/nmap: Operation not permitted`, 28 occurrences) - and
+pre-install the missing basics (`unzip`, `xxd`, `php-cli`, `iptables`, `traceroute`, the Python
+`requests`/`bs4`/`lxml`/`PIL`/`pycryptodome`/`paramiko` stack) in the offline image; the prompt
+carries the documented replacement path for anything retired.
+Accept: the image static contract test asserts the added tools and that nothing installs at solve
+time; an in-container probe runs the replacement reconnaissance path and imports the Python
+stack; the image size delta is recorded.
+State: pending. Evidence: 28 `Operation not permitted` results from nmap, `unzip`/`xxd`/`php`
+missing in session transcripts, `pip install` unusable under the offline profile, and zero calls
+to five of the ten Kali tools the image already ships. Capability or seccomp changes need
+maintainer review before the code moves.
+
+### EXE-08 [ ] P2 — Rendered observation (browser), phased
+Deliver: phase one is a Harness-side read-only `render(url)` observation (status, DOM text,
+redirect chain, XHR list) recorded to the trace and usable as a VER-05 observation source, with
+chromium and playwright baked into the offline image; phase two - letting the Agent drive a
+browser freely - waits on maintainer review because `cap-drop ALL` with no-new-privileges
+requires `--no-sandbox`, which is an isolation downgrade.
+Accept: phase one is covered offline against a local fixture page plus the image static contract
+and a recorded size delta; phase two has no acceptance path until the boundary review concludes.
+State: pending, deliberately unproven: c-01 spent 136 tool calls and 70 model calls on a Vue SPA
+and scored zero, but the seven unsolved `a-*` runs stalled on finding a bypass predicate rather
+than on rendering, so this item is a bet rather than a measured bottleneck.
+
 **Non-goals:** arbitrary unsandboxed host execution as a default, dynamic tool downloads in offline competition runs, schema-ing the Harness-normalized `tool.*`/`model.*` streams, multi-agent session contracts.
 
