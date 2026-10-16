@@ -51,6 +51,10 @@ module:
 - `harness hint <run_dir> --text "..."` - append operator guidance to a run's
   `hints.jsonl`; the SolverLoop records it in World state and steers the Agent with it on the
   next event.
+- `harness tsec --help`, `harness gc-runs --root .harness/tsec-runs` - a TSec sweep gates
+  itself on the platform before creating run directories and exits 3 when the VPN or control
+  plane is unusable (fix the platform; never wrap the sweep in a retry loop), 4 when some case
+  produced no run; `gc-runs` reports artifact-free run directories (dry run unless `--apply`).
 
 Prerequisites: Docker for Docker agents, sidecar Gateway, and Docker verifiers;
 `sudo apt-get install -y bubblewrap` for the verifier sandbox; Pi 1.0.4 via

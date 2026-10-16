@@ -1,5 +1,8 @@
 # Modular monolith boundaries
 
+Diagrams of the current topology, control loop and trust boundary:
+[architecture-map.md](architecture-map.md).
+
 Harness is one deployable Python application, not a collection of microservices.
 Modules are separated by responsibilities and explicit composition points.
 The single closed feedback loop that these modules form, the pruning rationale,

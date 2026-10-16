@@ -34,7 +34,7 @@ def seed_notes_from_summary(*, workspace: Path, previous_run_dir: Path) -> Path:
     into the writable notes directory so the Agent can read it at session
     start, and the Harness never reads it back as evidence.
     """
-    source = Path(previous_run_dir) / "agent.summary.md"
+    source = _previous_summary_path(previous_run_dir)
     notes = workspace / "notes"
     notes.mkdir(mode=0o700, exist_ok=True)
     try:
@@ -56,6 +56,25 @@ def seed_notes_from_summary(*, workspace: Path, previous_run_dir: Path) -> Path:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
     return target
+
+
+def _previous_summary_path(previous_run_dir: Path) -> Path:
+    """The prior report, whether the caller named the run or its workspace.
+
+    A benchmark run keeps the Agent workspace one level down (``agent-workspace``)
+    while a task run writes into the run directory itself, so an operator
+    pointing ``--seed-notes-from`` at a completed run should not have to know
+    which layout produced it.
+    """
+    run_dir = Path(previous_run_dir)
+    candidates = (
+        run_dir / "agent.summary.md",
+        run_dir / "agent-workspace" / "agent.summary.md",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
 
 
 def validate_agent_task_inputs(*, task_dir: Path, verifier_entrypoint: str) -> None:

@@ -29,6 +29,32 @@ CONTEXT_RESTART_TOOL_CALLS = 300
 CONTEXT_RESTART_BUDGET_FRACTION = 0.6
 MAX_CONTEXT_RESTARTS = 2
 
+# Which delivered Agent observation feeds which metric bucket. The names are
+# the ones the 2026-10-16 sweep review used by hand: "world" and "verification"
+# were 93% of the traffic and carried no action-able information, which is why
+# the improvement plan quiets them instead of adding more of them.
+STEER_BUCKETS: dict[str, str] = {
+    "world.state.updated": "world",
+    "solver.verification": "verification",
+    "solver.repetition_steer": "repetition",
+    "solver.budget": "budget",
+    "solver.finalize": "finalize",
+}
+STEER_BUCKET_NAMES: tuple[str, ...] = (
+    "world",
+    "verification",
+    "repetition",
+    "budget",
+    "finalize",
+)
+# Slow-call telemetry is a bounded top-N list, not a per-call log: the run
+# result must stay small enough to aggregate a whole sweep.
+SLOW_TOOL_CALLS = 5
+
+
+def empty_steer_counts() -> dict[str, int]:
+    return dict.fromkeys(STEER_BUCKET_NAMES, 0)
+
 
 class ProgressHypothesis(BaseModel):
     id: str
@@ -106,6 +132,9 @@ class ProgressLedger(BaseModel):
     model_calls: int = 0
     accepted_submissions: int = 0
     rejected_submissions: int = 0
+    # Every candidate handed to the evaluator, accepted or rejected. The
+    # accepted/rejected split cannot answer "did this run ever try?".
+    submissions_attempted: int = 0
     objective_completed: bool = False
     objective_verdict: dict[str, Any] | None = None
     last_event_type: str | None = None
@@ -344,6 +373,7 @@ class ProgressLedger(BaseModel):
 
     def record_submission(self, *, accepted: bool, completed: bool) -> None:
         del completed  # Final evaluation, not submission feedback, owns completion.
+        self.submissions_attempted += 1
         if accepted:
             self.accepted_submissions += 1
             self.no_progress_count = 0

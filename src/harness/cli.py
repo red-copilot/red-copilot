@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -12,11 +13,12 @@ from pydantic import ValidationError
 
 from .benchmark.base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from .benchmark.tsec_adapter import MAX_PARALLEL_CHALLENGES, run_tsec_challenges
-from .benchmark.tsec_client import load_tsec_config
+from .benchmark.tsec_client import TSecPlatformError, load_tsec_config
 from .gateway_runtime import GatewayConfig
 from .models import BudgetSpec, load_agent, load_task
 from .orchestrator import Orchestrator
 from .preflight import run_preflight
+from .runtime.results import find_empty_run_dirs
 
 app = typer.Typer(
     name="harness",
@@ -340,6 +342,37 @@ def tsec(
     max_unconfirmed_progress: Annotated[
         int, typer.Option("--max-unconfirmed-progress", min=1)
     ] = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
+    preflight: Annotated[
+        bool,
+        typer.Option(
+            "--preflight/--no-preflight",
+            help=(
+                "Check the benchmark VPN and control plane before selecting cases. "
+                "A platform-wide failure exits 3 without creating run directories."
+            ),
+        ),
+    ] = True,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume/--rerun",
+            help=(
+                "Skip cases that already have a completed local run and seed the "
+                "remaining attempts from their last Agent report."
+            ),
+        ),
+    ] = True,
+    summary_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--summary-out",
+            dir_okay=False,
+            help=(
+                "Sweep summary JSON path. Defaults to "
+                "<runs-root>/sweep-summary-<UTC>.json."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run TSec Benchmark challenges through the generic benchmark runtime."""
     spec = load_agent(agent)
@@ -353,27 +386,94 @@ def tsec(
         max_tool_calls=max_tool_calls,
         max_cost_usd=max_cost_usd,
     )
-    results = asyncio.run(
-        run_tsec_challenges(
-            config=config,
-            agent=spec,
-            budgets=budgets,
-            runs_root=runs_root,
-            challenge_code=challenge,
-            run_all=run_all,
-            seed=seed,
-            use_hint=use_hint,
-            hint_threshold=hint_threshold,
-            start_retries=start_retries,
-            retry_delay=retry_delay,
-            allow_host_agent=allow_host_agent,
-            max_unconfirmed_progress=max_unconfirmed_progress,
-            parallel=parallel,
-            max_wall_time_seconds=max_wall_time_seconds,
-            seed_notes_from=seed_notes_from,
-        )
+    summary_path = summary_out or (
+        runs_root / f"sweep-summary-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
     )
+    try:
+        results = asyncio.run(
+            run_tsec_challenges(
+                config=config,
+                agent=spec,
+                budgets=budgets,
+                runs_root=runs_root,
+                challenge_code=challenge,
+                run_all=run_all,
+                seed=seed,
+                use_hint=use_hint,
+                hint_threshold=hint_threshold,
+                start_retries=start_retries,
+                retry_delay=retry_delay,
+                allow_host_agent=allow_host_agent,
+                max_unconfirmed_progress=max_unconfirmed_progress,
+                parallel=parallel,
+                max_wall_time_seconds=max_wall_time_seconds,
+                seed_notes_from=seed_notes_from,
+                preflight=preflight,
+                resume=resume,
+                summary_out=summary_path,
+            )
+        )
+    except TSecPlatformError as exc:
+        typer.echo(
+            f"benchmark platform is not usable ({exc.kind}): {exc.detail}\n"
+            f"partial sweep summary: {summary_path}\n"
+            "fix the platform or VPN state; do not retry this sweep in a loop.",
+            err=True,
+        )
+        raise typer.Exit(code=3) from exc
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
+    failed = _sweep_failure_count(summary_path)
+    if failed:
+        typer.echo(
+            f"{failed} case(s) did not produce a run; see {summary_path}", err=True
+        )
+        raise typer.Exit(code=4)
+
+
+def _sweep_failure_count(summary_path: Path) -> int:
+    """Failures recorded in a sweep summary, or ``0`` when there is nothing to read."""
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    failures = payload.get("failures")
+    return len(failures) if isinstance(failures, list) else 0
+
+
+@app.command("gc-runs")
+def gc_runs(
+    root: Annotated[Path, typer.Option("--root", file_okay=False)] = Path(
+        ".harness/tsec-runs"
+    ),
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Delete the reported directories. Without it this is a dry run.",
+        ),
+    ] = False,
+) -> None:
+    """Report (or delete) run directories that hold no artifact at all."""
+    import shutil
+
+    empty = find_empty_run_dirs(root)
+    for path in empty:
+        typer.echo(str(path))
+    typer.echo(f"{len(empty)} empty run directory(ies) under {root}", err=True)
+    if not apply:
+        typer.echo("dry run: pass --apply to delete them", err=True)
+        return
+    removed = 0
+    for path in empty:
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            typer.echo(f"could not remove {path}: {exc.strerror}", err=True)
+            continue
+        removed += 1
+    typer.echo(f"removed {removed} empty run directory(ies)", err=True)
 
 
 @app.command("capabilities")
@@ -465,7 +565,60 @@ def report(
                     total_tokens=entry.get("total_tokens", 0),
                 )
             )
+    metrics = result.get("metrics")
+    if isinstance(metrics, dict):
+        typer.echo(_format_metrics(metrics))
     typer.echo(result_path.read_text(encoding="utf-8"))
+
+
+def _format_metrics(metrics: dict) -> str:
+    """Render the loop-health block a failing run is judged by.
+
+    Written for the questions the 2026-10-16 sweep review had to answer with
+    hand-written jq: did the run ever submit, how much of the wall clock did
+    tools hold, how much did the Harness talk at the Agent, and how large was
+    the final prompt.
+    """
+    attempted = metrics.get("submissions_attempted")
+    first_ms = metrics.get("first_submission_ms")
+    fraction = metrics.get("submitted_at_fraction")
+    if first_ms is None:
+        submitted = "submitted: never"
+    else:
+        submitted = f"submitted: first at {first_ms} ms"
+        if isinstance(fraction, (int, float)):
+            submitted += f" ({fraction:.2f} of the run)"
+    steers = metrics.get("steer_counts")
+    steer_text = (
+        ", ".join(f"{key}={value}" for key, value in sorted(steers.items()))
+        if isinstance(steers, dict) and steers
+        else "none recorded"
+    )
+    lines = [
+        "run metrics:",
+        f"- candidates attempted: {attempted if attempted is not None else 'unknown'}",
+        f"- {submitted}",
+        f"- steers delivered: {steer_text}",
+        "- tool time: {tool} ms over {calls} calls ({failures} failed)".format(
+            tool=metrics.get("tool_time_ms", 0),
+            calls=metrics.get("tool_calls", 0),
+            failures=metrics.get("tool_failures", 0),
+        ),
+        f"- final prompt size: {metrics.get('context_tokens_final', 0)} tokens",
+    ]
+    slow = metrics.get("slow_tool_calls")
+    if isinstance(slow, list) and slow:
+        lines.append("- slowest calls:")
+        for entry in slow:
+            if not isinstance(entry, dict):
+                continue
+            lines.append(
+                "  - {tool} {duration} ms".format(
+                    tool=entry.get("tool") or "?",
+                    duration=entry.get("duration_ms", 0),
+                )
+            )
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

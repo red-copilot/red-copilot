@@ -1,0 +1,4 @@
+{"event_id":"evt-1","run_id":"tsec_a-05_test0001","type":"tool.result","ts":"2026-10-16T10:50:23.000000+00:00","data":{"tool":"bash","tool_call_id":"call-slow","duration_ms":90000,"is_error":false,"exit_code":0}}
+{"event_id":"evt-2","run_id":"tsec_a-05_test0001","type":"tool.result","ts":"2026-10-16T10:52:01.000000+00:00","data":{"tool":"bash","tool_call_id":"call-fast","duration_ms":5000,"is_error":true,"exit_code":1}}
+{"event_id":"evt-3","run_id":"tsec_a-05_test0001","type":"model.usage","ts":"2026-10-16T10:52:02.000000+00:00","data":{"source":"pi","input_tokens":3000,"output_tokens":100,"cache_read_tokens":10000,"total_tokens":13100}}
+{"event_id":"evt-4","run_id":"tsec_a-05_test0001","type":"model.usage","ts":"2026-10-16T10:54:02.000000+00:00","data":{"source":"pi","input_tokens":2500,"output_tokens":220,"cache_read_tokens":22000,"total_tokens":24720}}

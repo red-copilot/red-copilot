@@ -47,8 +47,26 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # `orchestrator.py`, the immediate-hint dedupe in `benchmark/tsec_adapter.py`,
 # the credential digest in `extract.py` and the streak-aware fold in
 # `runtime/executors.py`. Measured before 15,987, after 16,023 (+36).
+#
+# The 2026-10-16 sweep review (BEN-05 orchestration reliability, RUN-05 run
+# closure) added no module either: the platform-failure classification and
+# bounded preflight gate in `benchmark/tsec_client.py` + `tsec_adapter.py`, the
+# per-case dispatch queue, resume scan and sweep summary in `tsec_adapter.py`,
+# provision-before-mkdir plus submission metrics in `benchmark/runner.py`, the
+# submission-due steer and steer-quieting in `solver_loop.py` with its
+# bootstrap wiring, `submissions_attempted` in `progress.py`, the empty-run
+# sweep in `runtime/results.py`, and the `gc-runs` command in `cli.py`.
+# Measured before 16,023, after 16,658 (+635). Re-measured from the tree.
+#
+# The second 2026-10-16 review round (BEN-06 metric coverage) added no module:
+# the steer vocabulary and the offline replay helpers in `progress.py` and
+# `runtime/results.py`, the delivered-steer/tool/context counters in
+# `solver_loop.py`, the run-level fold in `benchmark/runner.py`, the sweep
+# summary fields in `benchmark/tsec_adapter.py` and the `harness report` block
+# in `cli.py`. Measured before 16,658, after 16,968 (+310). Re-measured from
+# the tree, not estimated.
 MAX_MODULES = 57
-MAX_SRC_LINES = 16_023
+MAX_SRC_LINES = 16_968
 
 
 def _module_names() -> set[str]:

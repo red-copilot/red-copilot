@@ -1,0 +1,8 @@
+{"id":"feedback-1","type":"world.state.updated","data":{"revision_before":5,"revision_after":6}}
+{"id":"feedback-2","type":"world.state.updated","data":{"revision_before":6,"revision_after":7}}
+{"id":"feedback-3","type":"world.state.updated","data":{"revision_before":7,"revision_after":9}}
+{"id":"feedback-4","type":"solver.verification","data":{"status":"pending"}}
+{"id":"feedback-5","type":"solver.verification","data":{"status":"pending"}}
+{"id":"feedback-6","type":"solver.repetition_steer","data":{"family":"bash:grep","level":1}}
+{"id":"feedback-7","type":"solver.budget","data":{"threshold":0.5}}
+{"id":"feedback-8","type":"aci.feedback","data":{"accepted":true,"event_type":"action.intent"}}

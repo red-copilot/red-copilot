@@ -5,7 +5,7 @@ import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
@@ -13,7 +13,7 @@ from typing import ClassVar
 from .aci import TypedACI
 from .action_verifier import ActionVerifier
 from .hints import HINTS_FILE, HintCursor, HintRecord
-from .progress import ProgressLedger
+from .progress import SLOW_TOOL_CALLS, ProgressLedger, empty_steer_counts
 from .session import AgentEvent, AgentObservation, AgentSession
 from .solver_policy import (
     DEFAULT_MAX_NO_PROGRESS,
@@ -88,6 +88,15 @@ class SolverLoopStats:
     inbox_rejected: int = 0
     duplicate_events: int = 0
     conflicting_event_ids: int = 0
+    # Delivered Agent observations by bucket. Only what the Agent actually
+    # received is counted, so a quieted steer is absent from both this count
+    # and the feedback file it mirrors.
+    steer_counts: dict[str, int] = field(default_factory=empty_steer_counts)
+    tool_calls: int = 0
+    tool_failures: int = 0
+    tool_time_ms: int = 0
+    slow_tool_calls: list[dict] = field(default_factory=list)
+    context_tokens_final: int = 0
     last_verification_key: tuple | None = None
 
 
@@ -119,6 +128,10 @@ class SolverLoop:
         max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
         hint_request: Callable[[], Awaitable[str | None]] | None = None,
         hint_threshold: int = 0,
+        finalize_requests_submission: bool = False,
+        submission_due_fraction: float | None = None,
+        quiet_world_steers: bool = False,
+        verdict_steers_only: bool = False,
         processed_event_ids: dict[str, str] | None = None,
         world_inbox_path: Path | None = None,
         hint_cursor: HintCursor | None = None,
@@ -160,10 +173,21 @@ class SolverLoop:
         self.max_unconfirmed_progress = max_unconfirmed_progress
         self._hint_request = hint_request
         self.hint_threshold = hint_threshold
+        # Externally evaluated runs score through submitted candidates, so the
+        # finalize instruction has to ask for one and the loop has to notice a
+        # run that reached the halfway mark without submitting anything.
+        self.finalize_requests_submission = finalize_requests_submission
+        self.submission_due_fraction = submission_due_fraction
+        # Long interactive transcripts degrade when the Harness steers on every
+        # world revision: the Agent hears its own writes echoed back and the
+        # pending verdicts of a benchmark with no local verifier add nothing.
+        self.quiet_world_steers = quiet_world_steers
+        self.verdict_steers_only = verdict_steers_only
         self._hint_steered = False
         self._budget_steers_fired: set[float] = set()
         self._finalize_steered = False
         self._finalize_prompted = False
+        self._submission_due_steered = False
         self.stats = SolverLoopStats()
         self._processed_event_ids: dict[str, str] = dict(processed_event_ids or {})
 
@@ -275,6 +299,11 @@ class SolverLoop:
                     parent_event_id=event.event_id,
                     action_id=tool_call_id,
                 )
+                if event.type == "tool.result":
+                    self._record_tool_metrics(event)
+
+        if event.type == "model.usage":
+            self._record_context_metrics(event)
 
         try:
             aci_mutations = self.typed_aci.apply(
@@ -337,9 +366,11 @@ class SolverLoop:
         # Operator hints: advisory guidance from a human operator, recorded at
         # evidence tier so the Agent and the end-of-run summary see it. A hint
         # is never an objective verdict and never verifies anything by itself.
+        operator_hint_delivered = False
         for hint in self.hint_cursor.poll():
             if not self._absorb_operator_hint(hint):
                 continue
+            operator_hint_delivered = True
             await session.observe(
                 AgentObservation(
                     type="solver.hint",
@@ -365,6 +396,7 @@ class SolverLoop:
                 },
             )
 
+        agent_authored_revision = bool(aci_mutations) or live_ingest.accepted > 0
         if after_revision != before_revision:
             self._write_context()
             self.trace.emit(
@@ -374,16 +406,26 @@ class SolverLoop:
                     "revision_after": after_revision,
                 },
             )
-            await session.observe(
-                AgentObservation(
-                    type="world.state.updated",
-                    data={
-                        "revision_before": before_revision,
-                        "revision_after": after_revision,
-                        "context_path": "world.context.txt",
-                    },
-                )
+            # In a benchmark run the Agent's own submissions are most of the
+            # revision traffic; echoing those back spends context on what the
+            # Agent just wrote. Harness-authored changes still steer.
+            quiet_self_authored = (
+                self.quiet_world_steers
+                and agent_authored_revision
+                and not operator_hint_delivered
             )
+            if not quiet_self_authored:
+                self._count_steer("world")
+                await session.observe(
+                    AgentObservation(
+                        type="world.state.updated",
+                        data={
+                            "revision_before": before_revision,
+                            "revision_after": after_revision,
+                            "context_path": "world.context.txt",
+                        },
+                    )
+                )
 
         if event.type in self.VERIFY_EVENTS:
             verification = self.action_verifier.verify(
@@ -447,18 +489,24 @@ class SolverLoop:
                         actor="harness",
                         data=verification.model_dump(mode="json"),
                     )
-                    await session.observe(
-                        AgentObservation(
-                            type="solver.verification",
-                            data=verification.model_dump(mode="json"),
+                    # A benchmark with no action-level verifier produces a
+                    # pending verdict for nearly every execution; only a real
+                    # verdict is worth an Agent turn.
+                    if not (self.verdict_steers_only and verification.status == "pending"):
+                        self._count_steer("verification")
+                        await session.observe(
+                            AgentObservation(
+                                type="solver.verification",
+                                data=verification.model_dump(mode="json"),
+                            )
                         )
-                    )
 
         self.progress.write(self.progress_path)
         self._sync_agent_views()
         await self._maybe_steer_repetition(session)
         await self._maybe_steer_hint(session)
         await self._maybe_steer_budget(session)
+        await self._maybe_steer_submission_due(session)
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
         decision = self.decide(event_type=event.type)
@@ -472,6 +520,67 @@ class SolverLoop:
             )
         self._emit_decision(decision, event_type=event.type, event_id=event.event_id)
         return decision
+
+    def _count_steer(self, bucket: str) -> None:
+        """Record one delivered Agent observation.
+
+        Counted here rather than inferred from the trace: the trace records the
+        world change, but only the Agent-facing delivery is a steer, and a
+        quieted change must not inflate the metric.
+        """
+        counts = self.stats.steer_counts
+        if bucket in counts:
+            counts[bucket] += 1
+
+    def _record_tool_metrics(self, event: AgentEvent) -> None:
+        """Per-call tool telemetry, bounded to a top-N slow list.
+
+        The 2026-10-16 sweep had 19 calls over 180s and a single 927s call; the
+        run result has to show that without keeping a full per-call log.
+        """
+        data = event.data
+        duration = data.get("duration_ms")
+        duration = duration if isinstance(duration, int) and not isinstance(duration, bool) else 0
+        duration = max(duration, 0)
+        self.stats.tool_calls += 1
+        self.stats.tool_time_ms += duration
+        exit_code = data.get("exit_code")
+        failed = bool(data.get("is_error")) or (
+            isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0
+        )
+        if failed:
+            self.stats.tool_failures += 1
+        entry = {
+            "tool": data.get("tool"),
+            "tool_call_id": data.get("tool_call_id"),
+            "duration_ms": duration,
+            "is_error": bool(data.get("is_error")),
+        }
+        self.stats.slow_tool_calls.append(entry)
+        self.stats.slow_tool_calls.sort(key=lambda item: item["duration_ms"], reverse=True)
+        del self.stats.slow_tool_calls[SLOW_TOOL_CALLS:]
+
+    def _record_context_metrics(self, event: AgentEvent) -> None:
+        """Track the prompt size of the most recent model call."""
+        data = event.data
+        prompt = 0
+        for key in ("input_tokens", "cache_read_tokens"):
+            value = data.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                prompt += value
+        if prompt:
+            self.stats.context_tokens_final = prompt
+
+    def metrics_snapshot(self) -> dict:
+        """Run-level metric fields shared with ``result.json`` and the sweep summary."""
+        return {
+            "steer_counts": dict(self.stats.steer_counts),
+            "tool_calls": self.stats.tool_calls,
+            "tool_failures": self.stats.tool_failures,
+            "tool_time_ms": self.stats.tool_time_ms,
+            "slow_tool_calls": [dict(item) for item in self.stats.slow_tool_calls],
+            "context_tokens_final": self.stats.context_tokens_final,
+        }
 
     def _emit_decision(
         self, decision: SolverDecision, *, event_type: str, event_id: str | None
@@ -514,6 +623,7 @@ class SolverLoop:
                 "budget_fractions": fractions,
             }
             self.trace.emit("solver.budget", actor="harness", data=data)
+            self._count_steer("budget")
             await session.observe(
                 AgentObservation(
                     type="solver.budget",
@@ -566,6 +676,7 @@ class SolverLoop:
                 "confirmed progress. Change the hypothesis or the input class before "
                 "calling it again; the same command with new arguments is the same path."
             )
+        self._count_steer("repetition")
         await session.observe(
             AgentObservation(
                 type="solver.repetition_steer",
@@ -631,7 +742,9 @@ class SolverLoop:
         usage ceiling are soft, and the remaining grace window belongs to
         writing down what was found (facts) and what was being attempted
         (intents) so a timed-out or budget-exhausted run still leaves usable
-        state.
+        state. An externally evaluated run is asked for its best current
+        candidate first: a report cannot score, and every observed failure in
+        the 2026-10-16 sweep ended with zero submissions.
         """
         if self._finalize_steered or self.progress.objective_completed:
             return
@@ -648,7 +761,15 @@ class SolverLoop:
             data["budget"] = exceeded
         self._finalize_steered = True
         self.trace.emit("solver.finalize", actor="harness", data=data)
+        self._count_steer("finalize")
         lead = "A run budget is exhausted" if soft_usage else "Time is up"
+        submission_lead = (
+            "First append your best current candidate flag to "
+            "$HARNESS_SUBMISSION_INBOX as one JSON line - a rejected candidate is "
+            "evidence, not a failure. Then write a short report to "
+            if self.finalize_requests_submission
+            else "write a short report to "
+        )
         await session.observe(
             AgentObservation(
                 type="solver.finalize",
@@ -659,11 +780,56 @@ class SolverLoop:
                         f"{lead}, and this finalize instruction overrides any earlier "
                         "instruction that told you to keep working. Stop launching new "
                         "probes and do not run any more commands. Based only on what you "
-                        "have already confirmed, write a short report to "
+                        f"have already confirmed, {submission_lead}"
                         "$HARNESS_SUMMARY_FILE with exactly these four sections: "
                         "(1) confirmed facts - each with the evidence that confirms it; "
                         "(2) unconfirmed hypotheses; (3) what you tried and ruled out; "
                         "(4) unfinished intents. Then stop."
+                    ),
+                },
+            )
+        )
+
+    async def _maybe_steer_submission_due(self, session: AgentSession) -> None:
+        """Notice a scored run that reached the halfway mark without submitting.
+
+        Without this, a run can spend its whole wall clock grinding one path and
+        be judged only as "no submission", which is the failure shape observed
+        for all fifteen losing TSec runs on 2026-10-16. This steer is on the
+        same bounded footing as the budget steer: it fires once, states the
+        remaining budget, and never carries a verdict.
+        """
+        if self._submission_due_steered or self.progress.objective_completed:
+            return
+        if self.submission_due_fraction is None:
+            return
+        if self.progress.submissions_attempted > 0:
+            return
+        fractions = self.progress.budget_fractions()
+        if not fractions:
+            return
+        remaining = min(fractions.values())
+        elapsed_fraction = 1.0 - remaining
+        if elapsed_fraction < self.submission_due_fraction:
+            return
+        self._submission_due_steered = True
+        data = {
+            "elapsed_fraction": elapsed_fraction,
+            "threshold": self.submission_due_fraction,
+            "remaining_budget_fraction": remaining,
+        }
+        self.trace.emit("solver.submission_due", actor="harness", data=data)
+        await session.observe(
+            AgentObservation(
+                type="solver.submission_due",
+                data={
+                    **data,
+                    "message": (
+                        "No candidate flag has been submitted yet and most of the budget "
+                        "is gone. Consolidate the strongest lead you hold and append your "
+                        "best current candidate to $HARNESS_SUBMISSION_INBOX as one JSON "
+                        "line, or switch attack surface deliberately - a rejected "
+                        "candidate is evidence, an unsubmitted one scores nothing."
                     ),
                 },
             )
@@ -706,6 +872,13 @@ class SolverLoop:
         self.trace.emit(
             "solver.finalize", actor="harness", data={"reason": "summary_missing"}
         )
+        self._count_steer("finalize")
+        submission_lead = (
+            "If you hold any candidate flag, append it to $HARNESS_SUBMISSION_INBOX "
+            "first. Then write "
+            if self.finalize_requests_submission
+            else "Write "
+        )
         await session.observe(
             AgentObservation(
                 type="solver.finalize",
@@ -714,7 +887,8 @@ class SolverLoop:
                     "summary_file": "agent.summary.md",
                     "message": (
                         "Your round ended without a summary. This instruction overrides any "
-                        "earlier instruction to keep working: run no more commands. Write "
+                        "earlier instruction to keep working: run no more commands. "
+                        f"{submission_lead}"
                         "$HARNESS_SUMMARY_FILE now, based only on what you already confirmed: "
                         "confirmed facts with their evidence, unconfirmed hypotheses, what you "
                         "tried and ruled out, and unfinished intents. Then stop."
