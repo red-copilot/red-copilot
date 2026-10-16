@@ -16,6 +16,8 @@ const MAX_INLINE_CHARS = 32000;
 const PREVIEW_CHARS = 600;
 const SPILL_DIR = "/run/harness/artifacts/tool-spill";
 
+let spillSequence = 0;
+
 const RETENTION_INSTRUCTIONS = `You are compacting a penetration-testing agent session. Produce one structured markdown summary that preserves, under these exact headings:
 
 1. Scope and authorization constraints
@@ -37,19 +39,31 @@ function isTextBlock(block: { type?: string; text?: string }): block is TextBloc
 
 export default function harnessContext(pi: ExtensionAPI) {
 	pi.on("tool_result", async (event) => {
-		const textChars = event.content
-			.filter(isTextBlock)
+		const textBlocks = event.content.filter(isTextBlock);
+		const textChars = textBlocks
 			.reduce((total, block) => total + block.text.length, 0);
 		if (textChars <= MAX_INLINE_CHARS) return;
 
-		await mkdir(SPILL_DIR, { recursive: true });
-		const safeId = event.toolCallId.replace(/[^A-Za-z0-9._-]/g, "-");
-		const spillPath = `${SPILL_DIR}/${safeId}.txt`;
-		const fullText = event.content
-			.filter(isTextBlock)
-			.map((block) => block.text)
-			.join("\n\n");
-		await writeFile(spillPath, fullText, "utf8");
+		// Spilling is a context optimisation, never a correctness requirement: if
+		// the workspace cannot take the file, hand Pi the untouched tool result
+		// back instead of failing the hook and dropping it.
+		let spillPath = "";
+		try {
+			await mkdir(SPILL_DIR, { recursive: true });
+			const callId = String(event.toolCallId ?? "");
+			spillSequence += 1;
+			const safeId =
+				callId.replace(/[^A-Za-z0-9._-]/g, "-") ||
+				`tool-${spillSequence.toString().padStart(4, "0")}`;
+			spillPath = `${SPILL_DIR}/${safeId}.txt`;
+			await writeFile(
+				spillPath,
+				textBlocks.map((block) => block.text).join("\n\n"),
+				"utf8",
+			);
+		} catch {
+			return;
+		}
 
 		let keptPreview = false;
 		const content = event.content.map((block) => {
