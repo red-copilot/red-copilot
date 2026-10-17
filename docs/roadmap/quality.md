@@ -28,6 +28,18 @@ ZCP improvement round (2026-10-15). Landed the code-level gaps from [zc-improvem
 
 TSec sweep review round (2026-10-16). Landed BEN-05 and RUN-05 from [tsec-run-review-2026-10-16.md](../tsec-run-review-2026-10-16.md) without adding a module: the platform-failure classification and bounded preflight (`benchmark/tsec_client.py` + `benchmark/tsec_adapter.py`), the case-dispatch queue, resume scan and sweep summary (`benchmark/tsec_adapter.py`), provision-before-mkdir and the submission metrics (`benchmark/runner.py`), the submission-due steer plus steer quieting (`solver_loop.py` with its bootstrap wiring), `submissions_attempted` (`progress.py`), the artifact-free sweep in `runtime/results.py` and the `gc-runs` command in `cli.py`. Ceilings re-measured from the tree rather than raised as a package: modules 57 → 57, source lines 16,023 → 16,658, recorded in the comment above `MAX_SRC_LINES` in `tests/test_control_metrics.py`. Validation: `ruff check .` clean; `pytest -q` 336 passed with the environment-dependent skips; `tests/test_architecture.py` and `tests/test_control_metrics.py` pass; the live-platform probe of the new gate exits 3 in 5.0s with zero run directories.
 
+RUN-09 Agent-Native thin-control round (2026-10-17). Removed the typed Agent event/ACI
+contract, action-level verifier, Focus projection and dead World-inbox modules, plus heuristic
+repetition, slow-tool, budget-threshold and automatic platform-hint steering. `progress.json`
+is now `harness/progress/v5` with v4 read compatibility; only `hint`, `finalize`, `submission`
+and `verification` steer buckets remain; the control law stops only on exhausted budget/wall
+clock. The ceilings moved down from 58 modules / 18,311 lines to **51 modules / 15,829 lines**
+and were re-measured from the tree. Validation: `ruff check .` clean; `pytest -q` 503 passed
+with the upstream Starlette/httpx deprecation warning; targeted architecture/control tests pass;
+the Docker/bubblewrap-boundary set (`test_pi_kali_image.py`, `test_container_boundary.py`,
+`test_network_profiles_docker.py`) passed 7/7 locally. Live TSec A/B remains blocked because the
+benchmark token, base URL and VPN are unavailable.
+
 ## Validation sequence
 
 `ruff check .`; `pytest -q`; `pytest tests/test_architecture.py -q` after any module move; `harness validate`/`preflight` on touched fixtures; the hello smoke run. Docker and TSec paths run only in prepared environments and must be reported as unexecuted otherwise.
