@@ -456,3 +456,20 @@ def test_cli_critical_path_excludes_removed_subsystems() -> None:
     closure = _import_closure(("harness.cli",), PACKAGE_ROOT)
     leaked = sorted(module for module in closure if _is_removed(module))
     assert not leaked, f"removed subsystems reachable from the CLI: {leaked}"
+
+
+def test_spike_swarm_is_independent_from_harness() -> None:
+    spike_root = Path(__file__).resolve().parents[1] / "src" / "spike_swarm"
+    violations: list[str] = []
+    for path in sorted(spike_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            modules: list[str] = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                modules = [node.module]
+            for module in modules:
+                if module == "harness" or module.startswith("harness."):
+                    violations.append(f"{path.relative_to(spike_root)} -> {module}")
+    assert not violations, f"spike_swarm imported the production package: {violations}"

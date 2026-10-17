@@ -32,7 +32,7 @@ dev = [
 harness = "harness.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/harness"]
+packages = ["src/harness", "src/spike_swarm"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

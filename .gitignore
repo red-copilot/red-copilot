@@ -12,3 +12,4 @@ build/
 # local image exports never belong in the repository
 agent.tar.gz
 agent*/
+.spike/

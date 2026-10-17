@@ -7,6 +7,20 @@ ARG PI_VERSION=1.0.4
 # https://mirrors.tuna.tsinghua.edu.cn/kali or https://mirrors.ustc.edu.cn/kali).
 ARG KALI_MIRROR=http://http.kali.org/kali
 
+# The package list is the Agent's tool surface, chosen from what runs actually
+# reached for (2026-10-16 sweep): the image already shipped ten Kali tools and
+# used three, `unzip`/`xxd`/`php`/`traceroute` were missing outright, and the
+# Python stack below had to be installed offline because `pip install` cannot
+# run under the offline profiles.
+#
+# `setcap -r /usr/lib/nmap/nmap` is deliberate: Kali ships that binary with file
+# capabilities (cap_net_bind_service,cap_net_admin,cap_net_raw=eip) and the
+# kernel refuses the exec under `--cap-drop ALL` plus `no-new-privileges` with
+# EPERM, which broke reconnaissance in 28 results of the same sweep. Stripping
+# the file capabilities restores nmap and removes a privilege-escalation vector
+# instead of relaxing the sandbox: -sT works unprivileged and -sS uses the
+# container's own NET_RAW when the agent declares it.
+
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         -exec sed -i \
             -e "s#http://http.kali.org/kali#${KALI_MIRROR}#g" \
@@ -54,10 +68,23 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         python3-venv \
         nodejs \
         npm \
+        unzip \
+        xxd \
+        php-cli \
+        traceroute \
+        iptables \
+        python3-requests \
+        python3-bs4 \
+        python3-lxml \
+        python3-pil \
+        python3-pycryptodome \
+        python3-paramiko \
     && node -e 'const [M,m]=process.versions.node.split(".").map(Number); if (M < 22 || (M === 22 && m < 19)) { console.error("Pi requires Node >= 22.19"); process.exit(1) }' \
     && test -s /usr/share/wordlists/dirb/common.txt \
     && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && pi --version \
+    && setcap -r /usr/lib/nmap/nmap \
+    && test -z "$(getcap /usr/lib/nmap/nmap)" \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
