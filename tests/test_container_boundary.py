@@ -70,9 +70,13 @@ def test_docker_agent_cannot_reach_harness_state_secrets_or_host_network(
         "try:\n"
         f" s = socket.create_connection(('127.0.0.1', {port}), timeout=0.3); s.close(); network_open = True\n"
         "except OSError: network_open = False\n"
+        # The Agent container runs as root by decision (docs/roadmap/execution.md
+        # EXE-09); the boundary is the mount and capability set, not the uid, so
+        # the probe no longer asserts a non-root identity. Everything it can
+        # still reach stays asserted below.
         "checks = [not can_read_world, not can_write_world, not can_write_result, "
         "not root_writable, not network_open, "
-        "os.geteuid() != 0, 'HARNESS_TEST_SECRET' not in os.environ, "
+        "'HARNESS_TEST_SECRET' not in os.environ, "
         "'HARNESS_CONTROL_TOKEN' not in os.environ, "
         "not any(os.environ.get(name) for name in ('HTTP_PROXY','HTTPS_PROXY','NO_PROXY','FTP_PROXY','ALL_PROXY','http_proxy','https_proxy','no_proxy','ftp_proxy','all_proxy')), "
         "not any('proxy-secret' in value for name,value in os.environ.items() if 'proxy' in name.lower()), "

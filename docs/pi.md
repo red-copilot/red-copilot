@@ -121,9 +121,9 @@ because Pi can continue retries or queued work; `agent_settled` defines the comp
 
 Harness creates the Pi container with:
 
-- non-root numeric identity matching the writable workspace owner
+- root inside the container, with the workspace kept harness-owned and owner-only
 - read-only root filesystem
-- all Linux capabilities dropped, then only `pi.cap_add` restored
+- all Linux capabilities dropped, then the `DAC_OVERRIDE`/`FOWNER` baseline plus `pi.cap_add`
 - `no-new-privileges`
 - CPU, RAM, PID, and tmpfs limits
 - task mounted read-only
@@ -133,7 +133,9 @@ Harness creates the Pi container with:
 - explicit network selection
 - per-run Pi config/session directories
 
-`pi.cap_add` defaults to an empty list. Add `NET_RAW` only for tasks that need raw sockets.
+`pi.cap_add` defaults to an empty list. The container runs as root with every capability
+dropped, so a declared capability is the only route to kernel-level access: add `NET_RAW` for
+tasks that need raw sockets (`nmap -sS`, UDP scans); without it, use connect-based scanning.
 
 Pi is also started with deterministic non-interactive defaults:
 

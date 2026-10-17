@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -135,11 +136,18 @@ def test_pi_container_command_is_restricted_and_passes_direct_secret(
         host_gateway=False,
     )
     assert "--read-only" in command
-    assert command[command.index("--user") + 1] == (
-        f"{workspace.stat().st_uid}:{workspace.stat().st_gid}"
-    )
+    # Root inside the container: the workspace keeps the harness identity as
+    # owner and widens to 0755/0644 so its root-written artifacts stay readable.
+    assert command[command.index("--user") + 1] == "0:0"
+    assert workspace.stat().st_uid == os.getuid()
     assert command[command.index("--cap-drop") + 1] == "ALL"
-    assert "--cap-add" not in command
+    # Every Agent container carries the cap-dropped-root baseline; NET_RAW is
+    # only added when the Agent spec declares it.
+    assert [
+        command[index + 1]
+        for index, entry in enumerate(command)
+        if entry == "--cap-add"
+    ] == ["DAC_OVERRIDE", "FOWNER"]
     assert "no-new-privileges" in command
     assert command[command.index("--pids-limit") + 1] == "512"
     assert command[command.index("--memory") + 1] == "4g"

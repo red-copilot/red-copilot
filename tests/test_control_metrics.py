@@ -86,8 +86,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # `benchmark/runner.py`, the counter in `progress.py` and the audit tally.
 # Measured before 17,127, after 17,276 (+149). Re-measured from the tree, not
 # estimated.
+#
+# EXE-09 (root container identity) added no module: the root identity, the
+# owner-only workspace and the cap-dropped-root baseline capability set.
+# Measured before 17,276, after 17,281 (+5). Re-measured from the tree, not
+# estimated.
 MAX_MODULES = 57
-MAX_SRC_LINES = 17_276
+MAX_SRC_LINES = 17_281
 
 
 def _module_names() -> set[str]:

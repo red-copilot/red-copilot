@@ -68,10 +68,21 @@ explicitly, which the competition profile does not do.
 
 ## Process and network boundary
 
-Docker Agents run as the workspace's mapped numeric identity (UID/GID 65532 when Harness
-runs as root), use a read-only root filesystem, drop all capabilities by default, set
-`no-new-privileges`, and have explicit PID, memory, CPU, and temporary-filesystem limits.
-Pi capability additions are explicit configuration. Container networking is selected from
+Docker Agents run as **root inside the container** (decision recorded in
+[roadmap/execution.md](../roadmap/execution.md) EXE-09), use a read-only root filesystem, drop
+all capabilities by default and set `no-new-privileges`, so the container root has no power the
+dropped set does not restore. Two capabilities are the container baseline
+(`ROOT_AGENT_CAPABILITIES` in `agent.py`): `CAP_DAC_OVERRIDE` and `CAP_FOWNER`, because a
+cap-dropped root is *weaker* than the workspace owner and could otherwise not write the
+harness-owned `agent-workspace/` at all. Because the override makes permission bits moot for the
+Agent, the workspace stays owned by the harness identity with owner-only modes, and the non-root
+Harness keeps the write access its atomic view replacement and artifact harvest need. The
+override reaches only what is mounted: the workspace and tmpfs are writable, the task snapshot
+and knowledge roots stay read-only mounts, and the run root, World store, result, checkpoint,
+trace, evidence and verifier logs remain unmounted. Declared capabilities such as `NET_RAW` are
+added on top and are the only way to reach raw sockets; without a declared capability, port
+scanning must use connect-based tools (`nmap -sT`, `nc`).
+Container networking is selected from
 the Agent's declared network profile and network mode. `fully-offline` (and legacy `offline`)
 uses Docker `none`. `target-only` requires the target Compose network to report Docker
 `Internal=true` and attaches the Agent only to that network. `model-allowed` requires the
