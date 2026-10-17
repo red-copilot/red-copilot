@@ -22,6 +22,26 @@ HISTORICAL_PATH_REFERENCES = frozenset(
     }
 )
 
+# These documents describe the pre-RUN-09 state and remain historical evidence.
+HISTORICAL_CONTRACT_DOCS = frozenset(
+    {
+        "docs/tsec-run-review-2026-10-16.md",
+        "docs/tsec-improvement-plan-2026-10-16.md",
+        "docs/zc-improvement-design.md",
+        "docs/zc-improvement-plan.md",
+        "docs/agent-architecture.md",
+    }
+)
+
+REMOVED_AGENT_CONTRACT = (
+    "HARNESS_EVENT_FILE",
+    "HARNESS_WORLD_INBOX",
+    "HARNESS_PROGRESS_FILE",
+    "action.intent",
+    "--hint-threshold",
+    "--max-unconfirmed-progress",
+)
+
 PATH_REFERENCE = re.compile(
     r"`((?:agents|benchmarks|docker|docs|knowledge|prompts|schemas|skills|src|tests)/"
     r"[A-Za-z0-9_./-]+)`"
@@ -119,3 +139,23 @@ def test_documented_cli_flags_exist() -> None:
     assert not missing, "documentation invokes unknown flags:\n" + "\n".join(
         sorted(set(missing))
     )
+
+
+def test_active_docs_do_not_teach_removed_agent_contracts() -> None:
+    stale: list[str] = []
+    for path, text in _document_texts().items():
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if relative in HISTORICAL_CONTRACT_DOCS:
+            continue
+        for token in REMOVED_AGENT_CONTRACT:
+            if token in text:
+                stale.append(f"{relative}: {token}")
+
+    assert not stale, "active docs teach removed Agent contracts:\n" + "\n".join(stale)
+
+
+def test_runtime_roadmap_records_run_09() -> None:
+    roadmap = (REPO_ROOT / "docs" / "roadmap" / "runtime.md").read_text(encoding="utf-8")
+
+    assert "RUN-09" in roadmap
+    assert "Agent-Native" in roadmap

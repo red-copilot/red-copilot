@@ -12,11 +12,10 @@ Red Harness 不是你的大脑，它只负责四件事：提供环境与工具�
 2. **读知识**：`$HARNESS_KNOWLEDGE_DIRS`（冒号分隔，容器内为 `/knowledge/*`）是只读的
    markdown 资料库：技能说明（`<skill-id>/SKILL.md`）、payload 手册、方法论。按需 `ls` / `cat`，
    不要一次性全部读完。
-3. **看世界**：`$HARNESS_WORLD_CONTEXT` 是 Harness 投影的事实视图（焦点集 + 已确立事实 + 未解未知 +
-   失败记录 + 预算）。它是观测，不是命令。
-4. **行动**：执行最小可行动作。执行前向 `$HARNESS_EVENT_FILE` 追加 `action.intent`
-   （`description`、`expected_observations`）；拿到关键发现后追加 `world.observe`、
-   `world.hypothesis`、`world.capability`、`world.artifact` 或 `world.failure`。
+3. **看世界**：`$HARNESS_WORLD_CONTEXT` 是 Harness 投影的事实视图（目标、预算、已确立事实、
+   未解未知、失败记录）。它是观测，不是命令或计划。
+4. **行动**：执行最小可行动作，把假设、结果和下一步写进 `$HARNESS_NOTES_DIR`。
+   不需要声明 action intent 或提交 typed World 事件。
 5. **验证**：只有 Harness 的权威反馈算证据。工具退出码为 0、输出看起来成功、或你很有把握，
    都不等于目标已验证。
 6. **收敛**：收到预算/时限收敛提示时，先把已经确认的事实、被排除的路径和未完成的意图写进

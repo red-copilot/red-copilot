@@ -31,8 +31,10 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
   跨轮次、跨会话的长期记忆。Harness 不解析、不排序、不做 schema 校验。
 - **知识** `$HARNESS_KNOWLEDGE_DIRS`：只读 markdown 目录（`skills/offensive`、
   `knowledge/`、payload 手册、方法论）。Agent 用 `ls` / `cat` 按需取用，不预先全量注入。
-- **世界** `$HARNESS_WORLD_CONTEXT`：Harness 投影的**事实**视图——焦点集、已确立事实、
-  未解未知、失败记录、预算。它是观测输入，不含候选动作、不含计划。
+- **世界** `$HARNESS_WORLD_CONTEXT`：Harness 投影的**事实**视图——目标、预算、已确立事实、
+  未解未知和失败记录。它是观测输入，不含 Focus、subgoal、候选动作或计划。
+- **共享发现** `$HARNESS_SHARED_FINDINGS`：只有同题多会话时才挂载；是 Agent 之间唯一的
+  可写协作面，Harness 只归档内容快照。
 
 技能目录 `skills/**/<skill-id>/SKILL.md` 只描述"何时适用、预期结论、操作边界"，
 **没有可执行语义**：没有任何模块解析它，也没有排序器把它变成候选列表。需要强制执行的东西
@@ -55,14 +57,15 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 
 ## 4. 控制律与边界
 
-`solver_policy.decide_solver_action` 退化为**纯止损律**：无进展上限、无确认进展上限、
-预算耗尽、低预算且无进展。没有 replan、没有候选打分、没有计划文件。
+`solver_policy.decide_solver_action` 退化为**纯外部止损律**：只有预算/墙钟耗尽会主动
+stop。连续失败、长时间无新事实、相同的命令参数都不再由 Harness 推断为“应该结束”。
+没有 replan、没有候选打分、没有计划文件。
 
 保留的 Harness 权威：
 
 - 只有授权 verifier / benchmark evaluator 能签发 `verified`；Agent 自述与工具退出码都是观测。
 - 权威工件仍是 `trace.jsonl`、`progress.json`、`result.json`、`world.*`；不可信侧仍是
-  `events.jsonl`、`agent.events.jsonl`、`agent.summary.md`。
+  `events.jsonl`、`agent.summary.md`、`notes/` 与 `shared-findings.md`。
 - checkpoint 只记录控制游标与已用量，不含角色/计划字段（v3 记录仍可读）。
 
 零提交收尾也属于控制律，而不是认知层：Agent 自行结束且从未提交时，Harness 只补一次
@@ -74,9 +77,10 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 
 | 变更 | 内容 |
 | --- | --- |
-| 删除 | `--solver-profile`、`--crew-profile`、`--crew-solvers`、`--max-replans`、`--max-unconfirmed-progress`、`harness validate-skill` |
+| 删除 | `--solver-profile`、`--crew-profile`、`--crew-solvers`、`--max-replans`、旧的无进展/未确认进展上限参数、自动平台 hint 阈值参数、`harness validate-skill` |
 | 删除 | `AgentSpec.crew` 与 `CrewSpec`/`CrewRoleSpec`/`CrewBudgetShares`/`CrewLimits`；typed events `crew.plan`/`crew.critique`；`SkillSpec` 与 `StateSelector`、`Goal.required_states` |
-| 删除 | 模块 `planner.py`、`cognition.py`、`skills.py`、`crew/`、`runtime/solver_profile.py` |
+| 删除 | 模块 `planner.py`、`cognition.py`、`skills.py`、`crew/`、`runtime/solver_profile.py`、`aci.py`、`agent_events.py`、`action_verifier.py`、`world/focus.py` |
+| 删除 | Agent-facing 事件文件、World inbox、progress 文件与 typed action-intent/world 写入协议 |
 | 新增 | `AgentSpec.knowledge: list[str]`（只读知识根，容器内挂到 `/knowledge/<name>`） |
 | 新增 | `AgentSpec.executors: list[ExecutorSpec]`（同题多会话竞争） |
 | 新增 | CLI `--knowledge-root DIR`（可重复，覆盖 YAML）、`harness tsec --parallel N`（默认 1，上限 3） |
@@ -85,8 +89,9 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 | 新增 | CLI `harness tsec --seed-notes-from DIR`：把上一轮 `agent.summary.md` 作为只读接力材料写进新会话 notes |
 | 新增 | 长会话重启：自上次重启起工具调用 300 次或又用掉 `max_tool_calls` 的 60% 时触发，最多 2 次；接力简报写在会话根的 `carry-forward.md`，事件为 `solver.context_restart` |
 | 新增 | 结果契约：`agent_report.present` / `agent_report.sections_missing`；竞争运行的 `executor_sessions[].prompt`、`provider`、`summary_sections_missing` 与顶层 `executor_summary` |
-| 新增 | trace 事件 `solver.repetition_steer`、`solver.context_restart`、`solver.summary_incomplete` |
+| 新增 | trace 事件 `solver.context_restart`、`solver.summary_incomplete`、`solver.submission_due`、`solver.submission_reask`、`solver.closing_session` |
 | 新增 | 零提交收尾：`solver.submission_reask`、`solver.closing_session`，结果字段 `closing_attempt` / `closing_outcome`；`steer_counts.submission` 记录提交类提示 |
+| 新增 | RUN-09 后 `steer_counts` 只有 `hint`、`finalize`、`submission`、`verification`；慢调用只进 trace 与指标，不再 steer |
 
 ## 6. 消融基线
 

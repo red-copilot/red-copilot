@@ -345,7 +345,10 @@ For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
         only the sensor (verifier / evaluator) may close the loop
 ```
 
-World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). Reusable technique metadata uses `harness/skill/v1`; skills describe state preconditions and possible outcomes but are not executable code. The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
+World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md).
+The core state schema is domain-neutral and does not require a DAG. Agent memory is markdown under
+`$HARNESS_NOTES_DIR`; the World projection carries Harness-observed facts and remaining budget,
+not candidate actions.
 
 Core separation rule:
 
@@ -354,7 +357,7 @@ Task != Environment != Agent != Model != Tool != Verifier
 ```
 
 The closed-loop control spine, the module that owns each stage, and the pruning
-rationale are documented in [`docs/agent-architecture.md`](docs/agent-architecture.md)
+rationale are documented in [`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md)
 together with the agent-side architecture as a whole (adapter/session contracts,
 solver loop, rounds, trust tiers, recovery).
 
@@ -369,7 +372,8 @@ solver loop, rounds, trust tiers, recovery).
 7. **Done:** control-spine simplification (open-loop subsystems removed, single feedback loop).
 8. **Done:** dead-contract removal and duplicate-path consolidation (Firecracker stub, file world store, unreferenced schemas removed; single Docker command builder, usage accounting and TSec path).
 9. Containerized Pi adapter hardening and snapshot pooling.
-10. **Done:** repository slimming (production-unreachable modules and orphaned fixtures removed, stale design docs merged into [`docs/agent-architecture.md`](docs/agent-architecture.md), roadmap trimmed to item definitions, redundant tests cut).
+10. **Done:** repository slimming (production-unreachable modules and orphaned fixtures removed, stale design docs consolidated, roadmap trimmed to item definitions, redundant tests cut).
+11. **Done:** RUN-09 thin control (typed Agent events, Focus projection, action verification and heuristic steering removed; notes plus fact projection are the Agent contract).
 
 
 ### Benchmark adapters
@@ -387,7 +391,7 @@ teardown
 
 A `BenchmarkSession` contains a normalized objective, targets, and benchmark metadata. The generic
 `BenchmarkRunner` seeds targets into the World Model, builds `world.context.txt`, runs the selected
-Agent adapter, ingests world-state submissions, sends benchmark submissions, records evaluation,
+Agent adapter, sends benchmark submissions, records evaluation,
 and always tears the external session down.
 
 TSecBench is implemented through this contract. Its SDK token stays in the Harness process and is
@@ -411,11 +415,10 @@ continue while an action is unresolved; `harness.runtime.checkpoint.reconcile_pe
 records an operator-supplied outcome and never reruns the interrupted tool. This provides safe
 accounting and reconciliation without claiming exactly-once execution.
 
-Each benchmark run also maintains `progress.json` (`harness/progress/v4`) separately from World
-State. It stores Agent-authored facts as claims, distinguishes successful execution from verified
-evidence and goal progress, and tracks no-progress/failure counters, budget usage, submissions, and
-objective completion. A successful tool exit or accepted submission alone does not establish
-objective completion; the final task verifier or benchmark evaluation controls the result.
+Each benchmark run also maintains `progress.json` (`harness/progress/v5`) separately from World
+State. It tracks budget usage, submissions, pending-action reconciliation, context restarts and the
+authoritative objective verdict. A successful tool exit or accepted submission alone does not
+establish objective completion; the final task verifier or benchmark evaluation controls the result.
 
 
 ### Agent cognition and competing sessions
@@ -424,7 +427,8 @@ The Harness no longer plans, ranks skills, or compiles rounds. Cognition lives i
 it keeps its own markdown notes under `$HARNESS_NOTES_DIR`, reads read-only knowledge roots
 (`AgentSpec.knowledge`, mounted at `/knowledge/<name>`) on demand, and treats the projected
 `world.context.txt` as observations rather than instructions. The Harness keeps the environment,
-trust, accounting, recovery and the bounded stop law (`solver_policy.decide_solver_action`).
+trust, accounting, recovery and the external budget/wall-clock stop law. Repeated failures, slow
+tools and identical commands do not trigger Harness-authored steering.
 
 A case may declare several competing solver sessions (`AgentSpec.executors`, at most four). Each
 session gets its own container, workspace, notes, progress ledger and checkpoint under
@@ -446,11 +450,8 @@ echo "flag format is zc{...}" | harness hint .harness/runs/run_...
 Hints are appended to the run's `hints.jsonl`, outside the container-writable workspace. The
 SolverLoop polls the file on every event, records each hint in World state as an evidence-tier
 `human.hint` observation, and steers the running Agent with a `solver.hint` observation (one-shot
-Agents read it from `agent.feedback.jsonl`). The benchmark adapter steers the same observation type
-for a platform hint fetched at a configured no-progress threshold, so both sources share
-`solver.hint` and are told apart by `data.source` (`operator` or `platform`). Hints are advisory:
-they can redirect exploration, but they never verify the objective — only a verifier or benchmark
-evaluation can do that.
+Agents read it from `agent.feedback.jsonl`). Hints are advisory: they can redirect exploration, but
+they never verify the objective — only a verifier or benchmark evaluation can do that.
 
 ### SQLite World State
 

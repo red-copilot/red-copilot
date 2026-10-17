@@ -76,7 +76,6 @@ harness tsec \
   --all \
   --knowledge-root skills/offensive \
   --parallel 3 \
-  --max-unconfirmed-progress 160 \
   --wall-time 3600 \
   --start-retries 2 \
   --retry-delay 2
@@ -118,9 +117,9 @@ elapses without the summary.
 Because a TSec run is scored only through submitted candidates, the finalize steer also asks the
 Agent to append its best current candidate to `$HARNESS_SUBMISSION_INBOX` before writing the
 report, and a benchmark run that reaches half its wall clock without a single submission is
-steered once (`solver.submission_due`) to consolidate or change attack surface. Benchmark runs
-also stop echoing the Agent's own world revisions back as `world.state.updated` steers and only
-inject `verified`/`contradicted` verdicts, keeping the context for work instead of bookkeeping.
+steered once (`solver.submission_due`) to consolidate or change attack surface. World updates are
+written to the context projection without an extra steer; only authoritative benchmark feedback,
+operator hints and the bounded submission/finalize closure reach the live session.
 If the Agent settles without submitting, `solver.submission_reask` asks once for the best
 candidate already in its notes; if the process has ended and at least 60 seconds remain,
 `BenchmarkRunner` starts one closing session that is restricted to that submission or a final

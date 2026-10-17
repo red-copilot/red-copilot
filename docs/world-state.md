@@ -1,233 +1,62 @@
 # Universal World State Runtime
 
-Red Harness keeps offensive-agent execution separate from agent reasoning. The world-state
-runtime adds durable, replayable state without requiring the Harness to own the Agent's planner.
+The Harness keeps durable, replayable run state without owning the Agent's
+reasoning. The Agent writes its own markdown notes; the World is a fact and
+evidence projection assembled by the Harness.
 
-## Design principles
+## Ownership
 
-- **Events are authoritative.** The SQLite `world_events` stream in `world.db` is canonical.
-- **Projections are derived.** `world_objects`, `world.snapshot.json`, and JSONL exports can be rebuilt from events.
-- **Core defines mechanics, domains define semantics.** Core type strings are intentionally open.
-- **The world is not assumed to be a DAG.** Relations may form arbitrary directed graphs.
-- **Beliefs are not facts.** Observations and hypotheses may carry confidence and provenance.
-- **Capabilities are first-class.** Offensive progress is often best represented by what the Agent
-  can now do rather than by a fixed task graph.
-- **Reasoning remains optional.** Agents may plan internally; future Harness planners can consume
-  the same state contract.
+- Agent memory: `$HARNESS_NOTES_DIR`, plus `shared-findings.md` for competing
+  sessions. The Harness does not parse, rank or rewrite either file.
+- Harness observations: targets, deterministic facts extracted from bounded
+  tool output, benchmark submission feedback and operator hints.
+- Authority: only a task verifier or benchmark evaluator can mark the objective
+  verified. Agent text and tool exit codes remain observations.
+
+The Agent no longer submits typed action-intent or world events. There is
+no Agent-facing World inbox or event file.
 
 ## Core objects
 
-The v1 state schema contains:
+- `Entity`: a host, endpoint, process, principal, resource or other world object.
+- `Relation`: a typed directed relation between objects.
+- `Observation`: a Harness-recorded fact with provenance and trust tier.
+- `Artifact`: a durable or addressable object.
+- `Capability`: an ability acquired within a scope.
+- `Hypothesis`: a testable belief; retained for verifier and legacy-run compatibility.
+- `Goal`: the immutable run objective and final status.
+- `ActionRecord`: execution bookkeeping used by audit and recovery.
+- `Constraint`, `Failure`: execution boundaries and failed attempts.
 
-- `Entity`: any world object such as a host, endpoint, process, binary, principal, role, or resource.
-- `Relation`: a typed directed relation between state objects.
-- `Observation`: an observed result with optional confidence and source.
-- `Artifact`: a durable or addressable object such as a file, dump, token bundle, or report.
-- `Capability`: an ability acquired by an Agent within a scope.
-- `Hypothesis`: a testable belief with confidence and lifecycle status.
-- `Goal`: a persistent objective or sub-objective. Its optional `required_states`
-  selectors declare the target World states that drive the goal frontier.
-- `ActionRecord`: a planned/running/completed offensive action with optional target.
-- `Constraint`: an active/satisfied/violated/expired execution or policy boundary.
-- `Failure`: a structured failed attempt or execution condition.
+Core type strings are intentionally open. The state is not assumed to be a DAG.
 
-The core does not define security-domain taxonomies. Extensions can use namespaced type strings,
-for example `web.endpoint`, `binary.elf`, `cloud.principal`, or `ad.dcsync`.
+## Persistence
 
-## Persistence model
+The SQLite event stream in `world.db` is canonical. `world.events.jsonl` and
+`world.snapshot.json` are compatibility/debug exports. Every mutation is an
+event; the reducer derives the snapshot.
 
-Each mutation is represented as a `WorldEvent`:
+Container Agents never write these files. The run root and canonical database
+stay outside every Agent mount.
 
-```json
-{
-  "schema_version": "harness/world/v1",
-  "kind": "capability",
-  "op": "upsert",
-  "object": {
-    "id": "cap-1",
-    "type": "network.tcp_connect",
-    "subject": "agent",
-    "scope": "target:443",
-    "attributes": {}
-  },
-  "actor": "agent"
-}
-```
+## Context projection
 
-`WorldReducer` folds events into `WorldSnapshot`. `SQLiteWorldRepository` persists an event and
-atomically materializes the current snapshot after each mutation.
+`WorldContextBuilder` writes `world.context.txt` with:
 
-## Run integration
+- the objective and remaining budget;
+- target entities and Harness-extracted evidence;
+- open hypotheses and bounded failure records where present;
+- pointers to notes, shared findings and the summary file.
 
-Every normal Harness run creates:
+The projection does not contain a Focus block, a subgoal, a candidate action or
+a next-action recommendation. It is a deterministic fact view, not a plan.
 
-```text
-world.db                 # authoritative transactional state
-world.events.jsonl       # compatibility/debug export
-world.snapshot.json      # compatibility/debug export
-```
+## Trust and history
 
-The task objective is seeded as the root Goal when the run starts and updated with the final
-success, score, and run status when execution finishes.
+Every record carries provenance: actor, source, event identity, epistemic
+status, observation time and validity window. `claim` < `evidence` < `verified`.
+Agent-authored text never becomes verified evidence.
 
-Agents receive a `HARNESS_WORLD_INBOX` path. They may append untrusted JSONL submissions
-using the `harness/world-submission/v1` envelope. The Harness validates each submission and copies
-accepted mutations into the authoritative world event log with the actor forced to `agent`.
-
-Example:
-
-```json
-{"schema_version":"harness/world-submission/v1","kind":"capability","op":"upsert","object":{"id":"cap-shell","type":"host.shell","subject":"agent","scope":"host-1","attributes":{}}}
-```
-
-Agents never write `world.db`, `world.events.jsonl`, or `world.snapshot.json` directly. Invalid inbox lines are
-rejected and summarized in the Harness trace. This keeps the world log replayable even when an
-Agent emits malformed or adversarial state.
-
-Pi receives a concise protocol instruction in its task prompt. Generic CLI/Docker agents can opt
-in simply by detecting `HARNESS_WORLD_INBOX`.
-
-## Evolution status
-
-1. **Done:** validated Agent-facing state-event ingestion protocol.
-2. **Done:** compact context builder over persisted world state.
-3. **Done:** resume from prior World State using a fresh Agent session.
-4. **Done:** domain-neutral Skill metadata registry.
-5. **Done:** rolling-horizon planner integrated with the interactive SolverLoop.
-6. **Done:** shared leased blackboard for explicit multi-agent coordination.
-7. **Research:** derived graph/timeline views, learned retrieval, and transition-model planning.
-
-The runtime loop now treats World State as durable knowledge, `progress.json` as ephemeral solver
-state, and `plan.json` as a derived short-horizon decision artifact. Progress v2 stores Agent-authored
-`confirmed_fact` fields as claims; successful tool exits only update execution metrics. Replanning is triggered by
-verification failures, repeated no-progress, and benchmark feedback; Skill metadata remains
-non-executable and is used only to rank candidate next actions.
-
-## Context and resume
-
-Each run materializes `world.context.txt` from the current snapshot and exposes its path as
-`HARNESS_WORLD_CONTEXT`. The projection prioritizes goals, capabilities, open hypotheses,
-artifacts, bounded observations, recent failures, and relations.
-
-A new run may continue directly from a previous SQLite state database:
-
-```bash
-harness run benchmarks/examples/hello/task.yaml \
-  --agent agents/examples/pi.yaml \
-  --resume-world .harness/runs/<run-id>/world.db
-```
-
-The new run copies the prior SQLite state database, re-activates the root task goal, builds a fresh
-context projection, and starts a new Agent session. Legacy `world.events.jsonl` files are still
-accepted and imported into SQLite on first open. Provider transcripts are never required.
-
-
-## Repository boundary
-
-World-state consumers depend on the `WorldRepository` protocol rather than on JSONL paths. The
-default implementation is `SQLiteWorldRepository`, backed by `world.db` with WAL, persistent
-event sequence numbers, event-id deduplication, optimistic `expected_revision` checks, and a
-materialized `world_objects` projection. It is the only World store implementation; the
-`world.events.jsonl` and `world.snapshot.json` files are compatibility/debug exports.
-
-Both the Orchestrator and State Plane API continue to accept a repository factory, so a future
-PostgreSQL implementation can replace SQLite without changing Agent, planner, or run semantics.
-
-The authoritative source remains the event stream. Snapshots are derived and must never contain
-state that cannot be reconstructed from repository events.
-
-## Provenance and temporal semantics
-
-Every world record carries common metadata:
-
-```text
-provenance.actor
-provenance.source
-provenance.event_id
-provenance.source_event_id
-provenance.epistemic_status
-
-observed_at
-valid_from
-expires_at
-supersedes[]
-```
-
-The reducer derives authoritative event provenance when a mutation is accepted. Agent-provided
-domain metadata may add a human/tool source, but cannot replace the event actor or event identity
-written by the Harness.
-
-`valid_from` and `expires_at` describe a validity window; invalid reversed windows are rejected.
-`supersedes` records explicit replacement relationships without requiring the storage graph to be
-a DAG.
-
-`epistemic_status` distinguishes `claim`, `evidence`, `verified`, and `unclassified` records.
-Agent-authored World submissions are always marked `claim`, even if the submitted object asks to be
-trusted. Benchmark or verifier records are marked `evidence`; only an explicit Harness verifier
-result can create a `verified` observation. These labels describe how the record entered the World
-and are not cryptographic proof against a modified run directory.
-
-Skill selectors can state a minimum provenance level:
-
-```yaml
-requires:
-  - kind: observation
-    type: web.endpoint
-    minimum_trust: verified
-```
-
-These fields are intentionally generic: credentials, sessions, cloud permissions, service
-observations, exploit capabilities, and other domain extensions may all become stale over time.
-
-
-## Retrieval and context compaction
-
-`WorldContextBuilder` no longer treats the full snapshot as the prompt contract. It uses a
-deterministic `WorldRetriever` to rank currently valid records against the active objective.
-
-The first implementation intentionally avoids embeddings. Ranking combines:
-
-- record-kind priority;
-- lexical overlap with the current objective;
-- hypothesis/observation confidence when available;
-- current status;
-- recency among timestamped records.
-
-Each record kind has a bounded Top-K limit, and the final context has a character budget. Truncation
-happens on complete record boundaries rather than in the middle of serialized state. This keeps the
-retrieval policy reproducible while leaving the retrieval interface replaceable by semantic or
-learned retrieval later.
-
-World State remains durable memory. `progress.json` is separate solver working state and should not
-be treated as ground truth about the target.
-
-
-## Live ingestion and single-writer semantics
-
-Agent processes never write the canonical `world.db` directly. They submit untrusted
-JSONL mutations to `world.inbox.jsonl`.
-
-`WorldInboxCursor` incrementally consumes only newly appended lines, validates each submission, and
-applies accepted mutations through the Harness-owned `WorldRepository`. This makes the Harness
-process the single authoritative writer for a run while preserving the append-only WorldEvent log.
-
-During session-based runs, accepted live mutations cause:
-
-```text
-world.inbox.jsonl
-  -> WorldInboxCursor
-  -> WorldRepository append
-  -> world revision N+1
-  -> world.context.txt refresh
-  -> world.state.updated trace
-  -> trusted AgentSession observation
-```
-
-Both external benchmark runs and ordinary Orchestrator runs use this session path when the Agent
-adapter exposes `start_session()`. Legacy one-shot adapters retain end-of-run ingestion as a
-compatibility fallback.
-
-SQLite is the default transactional backend. Multiple readers and multiple repository instances may
-share a run database; writes are serialized by SQLite and can use `expected_revision` for optimistic
-conflict detection. Agent processes must still submit through the Harness boundary rather than
-opening the canonical database directly.
+Historical runs may still contain `agent.events.jsonl`, `world.inbox.jsonl`,
+old progress fields and `action.verified` trace events. They remain read-only
+audit inputs; new runs neither create nor consume them.

@@ -73,8 +73,7 @@ BEN-07 re-run. Evidence: 2,261 of 3,154 agent feedback records were zero-informa
 
 ### RUN-08 [~] P1 — Zero-submission closure and repetition precision
 Deliver: a scored run that ends without submitting gets one bounded chance to hand in
-the candidate it already holds, and repetition steering fires only on repeated failures
-or identical arguments rather than on every command in a broad family.
+the candidate it already holds. RUN-09 later removed repetition steering entirely.
 Accept: a settled benchmark session with zero submissions receives one
 `solver.submission_reask`; if the process has already ended, the runner starts at most
 one closing session and skips it when less than 60 seconds remain; local task runs and
@@ -88,4 +87,23 @@ zero submissions (11 ended voluntarily), and 56 repetition steers landed on 17 o
 successful runs. Coverage: `tests/test_control_replay.py`, `tests/test_control_properties.py`,
 `tests/test_solver_loop.py`, `tests/test_executors.py`, `tests/test_benchmark_streaming.py`.
 Outstanding: the BEN-07 live same-case A/B run.
+
+### RUN-09 [~] P1 — Agent-Native thin control
+Deliver: remove the residual Harness-side cognition and workflow contract. Agent memory is
+notes plus shared findings; `world.context.txt` is a fact-only projection; typed Agent events,
+the action-intent workflow, the Focus/next-action projection and action-level verification are gone.
+Heuristic repetition, slow-tool, budget-threshold and automatic platform-hint steering are gone;
+only budget/wall-clock, authoritative evaluation, submission/finalize/closing closure, context
+restart and operator hints remain.
+Accept: no new run exposes Agent event/inbox/progress-file channels; a boundary-free run with
+no typed Agent events starts; repeated failures do not stop a run; only exhausted budget/time
+stops it; progress v4 remains readable and upgrades to v5; submission closure, context restart,
+operator hint and benchmark feedback still work; active docs do not teach removed contracts.
+State: implemented offline. Evidence: `tests/test_pi_adapter.py`,
+`tests/test_solver_loop.py`, `tests/test_world_context.py`, `tests/test_control_properties.py`,
+`tests/test_control_law_properties.py`, `tests/test_session_telemetry.py`,
+`tests/test_run_metrics.py`, `tests/test_benchmark_streaming.py`,
+`tests/test_executors.py`, `tests/test_architecture.py`.
+Outstanding: the BEN-07 live same-case A/B run; missing platform credentials and VPN keep the
+effect measurement `blocked`.
 

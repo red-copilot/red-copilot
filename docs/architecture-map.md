@@ -54,8 +54,8 @@ flowchart TB
 
     CLI --> ORCH
     CLI --> BRN
-    LOOP -->|"prompt · steer"| AG
-    AG -->|"agent.events.jsonl<br/>未校验观测"| LOOP
+    LOOP -->|"prompt · closing steer · operator hint"| AG
+    AG -->|"工具输出 · notes · submission inbox"| LOOP
     AG -->|"模型与工具调用<br/>一次性 Gateway 令牌"| GW
     GW --> MODEL
     BRN -->|"provision · submit · evaluate"| PLAT
@@ -66,8 +66,8 @@ flowchart TB
 
 - `runtime.bootstrap_solver` 是本地运行与外部 benchmark 的唯一组合点，两条入口线因此共享
   同一套 World / Progress / Trace / Verifier 装配。
-- Agent 只有一条回传通道：写在可写工作区里的 JSONL 观测。它们先过 `TypedACI` 校验，
-  再由 Harness 以 `actor=agent` 写入世界，Agent 永远不直接写 `world.db`。
+- Agent 的长期记忆是自己写的 notes；Harness 只把 deterministically 提取的工具事实和权威
+  评测反馈写入 World。Agent 永远不直接写 `world.db`，也不再提交 typed solver events。
 - Gateway 是凭据边界：模型 provider key 留在 Gateway 进程，容器只拿到一次性
   `HARNESS_GATEWAY_TOKEN`。
 
@@ -92,12 +92,12 @@ sequenceDiagram
     EN->>AG: 启动会话（/task 与 /knowledge 只读，/run/harness 可写）
     SL->>AG: prompt 目标 + 事实投影 world.context.txt
     loop 每个 Agent 事件
-        AG-->>SL: agent.events.jsonl（不可信输入）
-        SL->>W: TypedACI 校验通过后 ingest
-        SL->>VE: 验证事件或提交候选
-        VE-->>SL: 裁决（证据 / 提交结果）
-        SL->>AG: steer 验证反馈、hint、预算与重复动作告警
-        SL->>SL: solver_policy 止损律判定
+        AG-->>SL: 工具结果与提交 inbox（不可信输入）
+        SL->>W: 写入 Harness 提取的事实与运行账本
+        SL->>VE: 最终评测或提交候选
+        VE-->>SL: 权威裁决
+        SL->>AG: 仅在提交收尾或 operator hint 时 steer
+        SL->>SL: solver_policy 仅按预算/墙钟止损
     end
     SL->>W: 收尾投影（Goal 结果、run summary）
     EN->>VE: 客观判定或 benchmark 评测
@@ -106,8 +106,8 @@ sequenceDiagram
     Note over EN, W: checkpoint.json 记录控制游标与已用量，崩溃后据此对账恢复
 ```
 
-止损律是纯函数（`solver_policy.decide_solver_action`）：无进展上限、未确认进展上限、
-预算耗尽、低预算且无进展。它只决定 continue / verify / stop，不做规划、不打分、不排序。
+止损律是纯函数（`solver_policy.decide_solver_action`）：只有预算/墙钟耗尽会主动 stop。
+它不做规划、不打分、不排序，也不根据连续失败推断 Agent 是否应该结束。
 
 ## 3. 模块分层与依赖方向
 
@@ -118,7 +118,7 @@ flowchart TB
     APP["orchestrator.py · benchmark/runner.py<br/>应用生命周期"]
     BEN["benchmark/（base · protocol · tsec_*）<br/>基准适配层"]
     BOOT["runtime/bootstrap.py<br/>唯一组合点"]
-    LOOP["solver_loop.py · solver_policy.py · aci.py · action_verifier.py<br/>闭环层"]
+    LOOP["solver_loop.py · solver_policy.py<br/>闭环层"]
     SESS["session.py · agent.py · pi_adapter.py · pi_container.py"]
     VER["verification.py · verifier.py"]
     ACCT["budget.py · progress.py · trace.py · extract.py · hints.py"]
@@ -165,7 +165,7 @@ flowchart TB
         subgraph runroot["run_dir：Harness 独占，任何会话容器都挂不到"]
             direction TB
             T1["权威：world.db · world.events.jsonl<br/>world.snapshot.json · trace.jsonl<br/>progress.json · checkpoint.json<br/>result.json · evidence/ · verifier.*.log"]
-            H1["不可信：agent-workspace/<br/>events.jsonl · world.inbox.jsonl<br/>submission.inbox.jsonl · notes/ · agent.summary.md"]
+            H1["不可信：agent-workspace/<br/>events.jsonl · submission.inbox.jsonl<br/>notes/ · agent.summary.md"]
             SH["executor-shared/<br/>shared-findings.md"]
             T4["hints.jsonl（仅宿主可写）"]
         end
@@ -181,7 +181,7 @@ flowchart TB
     TASK -->|"剔除 verifier · 拒软链 · ≤4096 文件/2GiB"| C1
     KNOW -->|"Harness 不解析、不排序"| C2
     H1 -->|"rw 挂载；Harness 回读时按敌意输入处理"| C3
-    T1 -.->|"只读副本 world.context.txt / progress.json"| C3
+    T1 -.->|"只读副本 world.context.txt"| C3
     T4 -->|"SolverLoop 记为 human.hint 并 steer"| C3
     SH -->|"唯一跨会话可写面"| C4
 ```
@@ -227,7 +227,7 @@ wall_time 不切分，因为并发会话共享同一个赛窗。单个会话触�
 | 1 | 唯一组合点 | `src/harness/runtime/bootstrap.py` | `CONTROL_SPINE` 冻结闭包 |
 | 1、2 | 单闭环控制 | `src/harness/solver_loop.py` | `tests/test_solver_loop.py` |
 | 1、2 | 纯止损律 | `src/harness/solver_policy.py` | `tests/test_control_law_properties.py` |
-| 1、2 | 事件校验入口 | `src/harness/aci.py`、`agent_events.py` | `tests/test_solver_loop.py` |
+| 1、2 | 工具事实提取 | `src/harness/solver_loop.py`、`extract.py` | `tests/test_solver_loop.py` |
 | 1、2 | 预算记账 | `src/harness/budget.py` | `tests/test_budget.py`、`tests/test_control_metrics.py` |
 | 1 | 世界状态 | `src/harness/world/` | `tests/test_sqlite_world.py`、`tests/test_world_context.py` |
 | 1 | 凭据隔离 | `src/harness/gateway.py`、`gateway_runtime.py` | `tests/test_gateway.py`、[security/gateway-tools.md](security/gateway-tools.md) |

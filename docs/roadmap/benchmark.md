@@ -33,11 +33,10 @@ Accept: every field is reproducible offline from a checked-in trace fixture; a r
 submitted reports `submissions_attempted=0` with a null first-submission time.
 State: implemented. `progress.py` owns the steer vocabulary and `runtime/results.py` the
 offline replay (`steer_counts`, `derive_run_metrics`, `submission_fraction`); `SolverLoop` counts
-only the observations it actually delivers (so a quieted world echo is absent from both the
-counter and `agent.feedback.jsonl`), records tool time with a bounded top-five slow list and the
+only the observations it actually delivers, records tool time with a bounded top-five slow list and the
 final prompt size, and `BenchmarkRunner` folds the per-session counters into `result.json:metrics`
-together with `submitted_at_fraction`. The vocabulary now has a dedicated `submission` bucket for
-the submission-due, re-ask and closing-session steers, and scored runs record `closing_attempt` /
+together with `submitted_at_fraction`. RUN-09 reduced the vocabulary to `hint`, `finalize`,
+`submission`, and `verification`; slow calls remain telemetry, not steers. Scored runs record `closing_attempt` /
 `closing_outcome` when the zero-submission closure path is considered. The TSec sweep summary
 carries the same fields per case and `harness report` prints them as a loop-health block. Evidence:
 `tests/test_run_metrics.py`
@@ -53,10 +52,11 @@ Deliver: the acceptance re-run of the ten unsolved or never-run challenges (`b-0
 reachable, compared on submission rate, time to first submission, wall clock, steer counts and
 tokens.
 Accept: each landed item either improves its metric or is rolled back; RUN-07 (steer quieting)
-and VER-05 (`unavailable` semantics) are checked first because they can hide real feedback.
+and RUN-09 (thin control) are checked first because they can hide real feedback.
 State: pending platform availability; the VPN health check still fails as of 2026-10-16.
-Offline prerequisite landed under RUN-08: replay fixtures cover the successful same-family
-and failed same-family shapes, and the zero-submission closure path has deterministic tests.
+Offline prerequisite landed under RUN-08/RUN-09: replay fixtures cover the successful same-family
+and failed same-family shapes, the zero-submission closure path has deterministic tests, and the
+thin-control run no longer emits heuristic steers.
 The live comparator remains the authority.
 
 ### BEN-08 [ ] P1 — Hosted-run compliance

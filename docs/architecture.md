@@ -8,15 +8,15 @@ Modules are separated by responsibilities and explicit composition points.
 The single closed feedback loop that these modules form, the pruning rationale,
 the Agent-facing cognition layer and the agent-side architecture as a whole
 (adapter/session contracts, solver loop, world contracts, trust tiers, recovery)
-are consolidated in [agent-architecture.md](agent-architecture.md) (Chinese).
+are consolidated in [agent-architecture-v2.md](agent-architecture-v2.md) (Chinese).
 
 - `runtime/`: application-level composition, solver initialization, run state.
 - `world/`: domain state, event storage, snapshots, retrieval. No benchmark or HTTP dependencies.
 - `benchmark/`: externally provisioned challenge lifecycle, submissions and adapters.
 - `agent.py`, `session.py`, `pi_*.py`: agent/session integration and infrastructure.
 - `tool_adapter.py`: domain-neutral async tool plugin contract; concrete tools are explicitly selected by application composition and remain subject to Gateway authorization.
-- `solver_loop.py`, `solver_policy.py`, `action_verifier.py`: solver policies.
-  `solver_policy.py` is a pure stop law (budget, no-progress); cognition belongs
+- `solver_loop.py`, `solver_policy.py`: solver control.
+  `solver_policy.py` is a pure external stop law (budget/wall clock); cognition belongs
   to the Agent, which keeps its own notes and reads markdown knowledge roots.
 - `orchestrator.py`: local-run lifecycle and environment integration.
 

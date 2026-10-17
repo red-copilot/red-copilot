@@ -27,10 +27,9 @@ Deliver: one typed `AgentRunContext`, an observable session phase machine and de
 Accept: all adapter call sites use the context object; phase transitions are validated and mirrored into the trace; capability emission appears in local and benchmark traces.
 State: implemented in `agent.py` and `session.py`; live Docker/RPC smoke remains before acceptance.
 
-### EXE-06 [~] P2 — Single-source typed event schemas
-Deliver: one pydantic schema per Agent-authored event type, validated at the ACI boundary so wire contract, tests and docs cannot drift.
-Accept: the registry covers exactly the typed events `TypedACI` translates; malformed payloads fail closed into `aci.feedback` without state changes.
-State: implemented in `agent_events.py::TYPED_EVENT_SCHEMAS` with a documented fail-closed tightening on known keys with wrong types; a live Pi run remains before acceptance.
+### EXE-06 [!] P2 — Single-source typed event schemas (superseded by RUN-09)
+Descoped: RUN-09 removed Agent-authored typed solver events and the ACI boundary. Agent memory is
+notes/shared findings; the Harness writes only observed facts and authoritative verdicts.
 
 ### EXE-07 [x] P1 — Tool availability over tool count
 Deliver: fix or explicitly retire the tools the Agent actually reached for and could not use -
