@@ -13,6 +13,10 @@ set -eu
 # window for the whole set, which stops dispatching near the end so the
 # finalize grace fits. Defaults fit the ranking set's 360-minute window; the
 # competition expects ~10h - set HARNESS_TOTAL_WALL_TIME=34800 there.
+# The hosted sandbox already sits inside the benchmark network: skip the
+# SDK's VPN probe so a platform-side probe hiccup cannot kill the run at entry.
+export TSEC_SKIP_VPN_CHECK=1
+
 # The solver can dispatch focused sub-agents (harness subagent); point them
 # at this agent spec by default.
 export HARNESS_AGENT="/opt/red-harness/agents/hosted/pi-deepseek.yaml"

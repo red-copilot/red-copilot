@@ -81,12 +81,17 @@ TSEC_PREFLIGHT_TIMEOUT_SECONDS = 45.0
 class TSecConfig:
     base_url: str
     token: str
+    # Hosted evaluation sandboxes already live inside the benchmark network:
+    # the SDK's entry-time VPN probe is skipped there (connectivity is still
+    # proven by the challenge listing).
+    check_vpn: bool = True
 
 
 def load_tsec_config(
     *,
     base_url_env: str = "BENCHMARK_BASE_URL",
     token_env: str = "BENCHMARK_TOKEN",
+    skip_vpn_env: str = "TSEC_SKIP_VPN_CHECK",
 ) -> TSecConfig:
     base_url = os.environ.get(base_url_env, "")
     token = os.environ.get(token_env, "")
@@ -94,7 +99,11 @@ def load_tsec_config(
         raise TSecAdapterError(f"missing {base_url_env}")
     if not token:
         raise TSecAdapterError(f"missing {token_env}")
-    return TSecConfig(base_url=base_url, token=token)
+    return TSecConfig(
+        base_url=base_url,
+        token=token,
+        check_vpn=os.environ.get(skip_vpn_env, "") != "1",
+    )
 
 
 class _TokenBucket:
@@ -180,7 +189,7 @@ class TSecClientAdapter:
         self,
         config: TSecConfig,
         *,
-        sdk_factory: typing.Callable[[str, str], typing.Any] | None = None,
+        sdk_factory: typing.Callable[..., typing.Any] | None = None,
         limiter: _TokenBucket | None = None,
         registry: _InstanceRegistry | None = None,
         sleep: typing.Callable[[float], typing.Awaitable[None]] = asyncio.sleep,
@@ -188,7 +197,13 @@ class TSecClientAdapter:
     ) -> None:
         factory = sdk_factory or _default_sdk_factory
         try:
-            self._client = factory(config.base_url, config.token)
+            try:
+                self._client = factory(
+                    config.base_url, config.token, check_vpn=config.check_vpn
+                )
+            except TypeError:
+                # Injected factories with the older two-argument signature.
+                self._client = factory(config.base_url, config.token)
         except ImportError as exc:  # pragma: no cover - import guard
             raise TSecAdapterError(
                 'tsec-benchmark is not installed; install red-harness with ".[tsec]"'
@@ -247,7 +262,9 @@ class TSecClientAdapter:
         return await self._call(self._client.get_hint, unique_code)
 
 
-def _default_sdk_factory(base_url: str, token: str) -> typing.Any:
+def _default_sdk_factory(base_url: str, token: str, *, check_vpn: bool = True) -> typing.Any:
     from tsec_benchmark import TSecBenchmarkAsync
 
-    return TSecBenchmarkAsync(base_url=base_url, token=token)
+    return TSecBenchmarkAsync(
+        base_url=base_url, token=token, auto_check_vpn=check_vpn
+    )

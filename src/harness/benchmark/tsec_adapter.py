@@ -181,6 +181,7 @@ async def _platform_preflight(
     client: TSecClientAdapter,
     *,
     timeout: float = TSEC_PREFLIGHT_TIMEOUT_SECONDS,
+    check_vpn: bool = True,
 ) -> None:
     """Fail closed on a platform-wide outage before any run directory exists.
 
@@ -191,7 +192,8 @@ async def _platform_preflight(
     """
     try:
         async with asyncio.timeout(timeout):
-            await client.check_vpn()
+            if check_vpn:
+                await client.check_vpn()
             await client.list_challenges()
     except TimeoutError as exc:
         raise TSecPlatformError(
@@ -752,7 +754,7 @@ async def run_tsec_challenges(
             if preflight:
                 for attempt in range(DISCOVER_ATTEMPTS):
                     try:
-                        await _platform_preflight(client)
+                        await _platform_preflight(client, check_vpn=config.check_vpn)
                         break
                     except Exception as exc:
                         if (

@@ -1698,3 +1698,36 @@ def test_pass_boundary_discover_retries_transient_network_failures(
     assert len(results) == 3
     assert all(result["status"] == "finished" for result in results)
     assert calls.count("discover") >= 3
+
+
+def test_hosted_config_skips_the_vpn_probe(monkeypatch) -> None:
+    from harness.benchmark.tsec_client import load_tsec_config
+
+    monkeypatch.setenv("BENCHMARK_BASE_URL", "https://benchmark.invalid")
+    monkeypatch.setenv("BENCHMARK_TOKEN", "secret")
+    monkeypatch.setenv("TSEC_SKIP_VPN_CHECK", "1")
+
+    config = load_tsec_config()
+    assert config.check_vpn is False
+
+    class ExplodingVpnClient(FakeRunnerClient):
+        async def check_vpn(self):
+            raise AssertionError("check_vpn must not be called when disabled")
+
+        async def list_challenges(self):
+            return []
+
+    # The preflight proves connectivity by listing instead of probing.
+    asyncio.run(
+        tsec_adapter._platform_preflight(ExplodingVpnClient(), check_vpn=False)
+    )
+
+
+def test_default_config_keeps_the_vpn_probe(monkeypatch) -> None:
+    monkeypatch.setenv("BENCHMARK_BASE_URL", "https://benchmark.invalid")
+    monkeypatch.setenv("BENCHMARK_TOKEN", "secret")
+    monkeypatch.delenv("TSEC_SKIP_VPN_CHECK", raising=False)
+
+    from harness.benchmark.tsec_client import load_tsec_config
+
+    assert load_tsec_config().check_vpn is True
