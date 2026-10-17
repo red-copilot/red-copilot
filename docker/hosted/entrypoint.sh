@@ -26,7 +26,7 @@ MAX_PASSES="${HARNESS_MAX_PASSES:-3}"
 
 exec harness tsec \
   --agent /opt/red-harness/agents/hosted/pi-deepseek.yaml \
-  --skills-root /opt/red-harness/skills \
+  --knowledge-root /opt/red-harness/knowledge \
   --runs-root /work/tsec-runs \
   --all \
   --allow-host-agent \

@@ -125,7 +125,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages '/tmp/harness-
 
 COPY agents /opt/red-harness/agents
 COPY prompts /opt/red-harness/prompts
-COPY skills /opt/red-harness/skills
+COPY knowledge /opt/red-harness/knowledge
 COPY docker/hosted/entrypoint.sh /opt/red-harness/entrypoint.sh
 
 # Fail the build when a hosted agent references a file the image does not
