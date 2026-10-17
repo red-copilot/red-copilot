@@ -1655,3 +1655,46 @@ def test_sweep_summary_defaults_missing_metrics_to_zero(monkeypatch, tmp_path: P
     assert case["steer_counts"] == {}
     assert case["tool_time_ms"] == 0
     assert case["context_tokens_final"] == 0
+
+
+def test_pass_boundary_discover_retries_transient_network_failures(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _reset_probe()
+    calls: list[str] = []
+
+    async def fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", fast_sleep)
+
+    class FlakyDiscoverClient(FakeMultiChallengeClient):
+        failures_left = 2
+
+        async def list_challenges(self):
+            calls.append("discover")
+            if type(self).failures_left > 0:
+                type(self).failures_left -= 1
+                raise TSecConnError("request failed: ConnectTimeout")
+            return await super().list_challenges()
+
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FlakyDiscoverClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _ConcurrencyProbeRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=60),
+            runs_root=tmp_path,
+            run_all=True,
+            concurrency=3,
+            max_passes=1,
+        )
+    )
+
+    # The preflight and listing survived the two transient failures and the
+    # single pass completed every case.
+    assert len(results) == 3
+    assert all(result["status"] == "finished" for result in results)
+    assert calls.count("discover") >= 3

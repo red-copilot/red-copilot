@@ -59,6 +59,34 @@ def _is_instance_conflict(exc: BaseException) -> bool:
     return _is_sdk_error(exc, "InvalidState") and "max active" in str(exc)
 
 
+# A pass-boundary discover that hits a transient network blip must not be
+# classified as a dead platform and kill the sweep; wait and re-list before
+# giving up. Only a sustained outage (all attempts fail) stays fatal.
+DISCOVER_ATTEMPTS = 3
+DISCOVER_RETRY_WAIT_SECONDS = 15.0
+
+
+async def _discover_with_retry(adapter: BenchmarkAdapter) -> list[BenchmarkCase]:
+    last_error: Exception | None = None
+    for attempt in range(DISCOVER_ATTEMPTS):
+        try:
+            return await adapter.discover()
+        except Exception as exc:
+            last_error = exc
+            if classify_platform_failure(exc) == PLATFORM_FAILURE_VPN:
+                raise
+            if attempt < DISCOVER_ATTEMPTS - 1:
+                print(
+                    f"[tsec] challenge listing failed ({type(exc).__name__}); "
+                    f"retrying in {DISCOVER_RETRY_WAIT_SECONDS:.0f}s "
+                    f"({attempt + 1}/{DISCOVER_ATTEMPTS})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                await asyncio.sleep(DISCOVER_RETRY_WAIT_SECONDS)
+    raise last_error  # type: ignore[misc]
+
+
 def _is_sdk_error(exc: Exception, name: str) -> bool:
     return type(exc).__name__ == name
 
@@ -722,14 +750,31 @@ async def run_tsec_challenges(
     try:
         async with _tsec_client(config) as client:
             if preflight:
-                await _platform_preflight(client)
+                for attempt in range(DISCOVER_ATTEMPTS):
+                    try:
+                        await _platform_preflight(client)
+                        break
+                    except Exception as exc:
+                        if (
+                            classify_platform_failure(exc) == PLATFORM_FAILURE_VPN
+                            or attempt == DISCOVER_ATTEMPTS - 1
+                        ):
+                            raise
+                        print(
+                            f"[tsec] platform preflight failed ({type(exc).__name__}); "
+                            f"retrying in {DISCOVER_RETRY_WAIT_SECONDS:.0f}s "
+                            f"({attempt + 1}/{DISCOVER_ATTEMPTS})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        await asyncio.sleep(DISCOVER_RETRY_WAIT_SECONDS)
             adapter = TSecBenchmarkAdapter(
                 client,
                 use_hint=use_hint,
                 start_retries=start_retries,
                 retry_delay=retry_delay,
             )
-            discovered = await adapter.discover()
+            discovered = await _discover_with_retry(adapter)
             if challenge_code and not any(
                 case.id == challenge_code for case in discovered
             ):
@@ -859,7 +904,7 @@ async def run_tsec_challenges(
                 ):
                     break
                 if pass_index:
-                    discovered = await adapter.discover()
+                    discovered = await _discover_with_retry(adapter)
                 if challenge_code and not any(
                     case.id == challenge_code for case in discovered
                 ):
