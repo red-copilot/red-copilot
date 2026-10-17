@@ -32,7 +32,7 @@ Deliver: one pydantic schema per Agent-authored event type, validated at the ACI
 Accept: the registry covers exactly the typed events `TypedACI` translates; malformed payloads fail closed into `aci.feedback` without state changes.
 State: implemented in `agent_events.py::TYPED_EVENT_SCHEMAS` with a documented fail-closed tightening on known keys with wrong types; a live Pi run remains before acceptance.
 
-### EXE-07 [ ] P1 — Tool availability over tool count
+### EXE-07 [x] P1 — Tool availability over tool count
 Deliver: fix or explicitly retire the tools the Agent actually reached for and could not use -
 nmap is broken in-run (`/usr/lib/nmap/nmap: Operation not permitted`, 28 occurrences) - and
 pre-install the missing basics (`unzip`, `xxd`, `php-cli`, `iptables`, `traceroute`, the Python
@@ -41,10 +41,19 @@ carries the documented replacement path for anything retired.
 Accept: the image static contract test asserts the added tools and that nothing installs at solve
 time; an in-container probe runs the replacement reconnaissance path and imports the Python
 stack; the image size delta is recorded.
-State: pending. Evidence: 28 `Operation not permitted` results from nmap, `unzip`/`xxd`/`php`
+State: implemented. Evidence: 28 `Operation not permitted` results from nmap, `unzip`/`xxd`/`php`
 missing in session transcripts, `pip install` unusable under the offline profile, and zero calls
-to five of the ten Kali tools the image already ships. Capability or seccomp changes need
-maintainer review before the code moves.
+to five of the ten Kali tools the image already ships. The image adds `unzip`, `xxd`, `php-cli`,
+`traceroute`, `iptables` and the Python stack, and strips nmap's file capabilities (see EXE-09 for
+why the exec failed even before privileges; no capability or seccomp relaxation was needed).
+Measured, not estimated: `docker image inspect` reports 2,868,832,915 bytes in the 2026-10-14
+baseline against 2,983,477,199 bytes now (+114,644,284 bytes, +0.11 GiB), while the file a
+platform actually receives is much smaller - `docker save ... | wc -c` reports 766,589,952 bytes
+and the gzipped form 763,061,574 bytes, both inside the 3 GB upload ceiling. Verified by `tests/test_pi_kali_image.py` (static contract: added tools,
+the capability strip, and no solve-time install anywhere in the image or the agent-facing
+markdown) and `tests/test_pi_kali_tools_docker.py` (connect and raw-socket scans, the Python
+stack, and a root-written artifact the harness can read back). The prompt and
+`skills/offensive/active-recon` now carry the connect-scan default and the fallback path.
 
 ### EXE-08 [ ] P2 — Rendered observation (browser), phased
 Deliver: phase one is a Harness-side read-only `render(url)` observation (status, DOM text,
