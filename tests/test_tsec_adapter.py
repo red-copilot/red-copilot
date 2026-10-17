@@ -1479,66 +1479,6 @@ def test_tsec_client_retries_429_once_then_fails_closed() -> None:
     ]
 
 
-def test_tsec_adapter_requests_hint_once_per_case() -> None:
-    async def scenario() -> None:
-        client = HintCountingClient()
-        adapter = TSecBenchmarkAdapter(client, use_hint=False)
-        cases = await adapter.discover()
-        session = await adapter.provision(cases[0])
-
-        assert session.metadata["hint_trigger"] is None
-        first = await adapter.request_hint("WEB-001")
-        second = await adapter.request_hint("WEB-001")
-
-        assert first == "look at the service"
-        assert second == first
-        assert client.hint_calls == 1
-        assert session.metadata["hint_used"] is True
-        assert session.metadata["hint_trigger"] == "threshold"
-        assert session.metadata["hint"] == "look at the service"
-
-    asyncio.run(scenario())
-
-
-def test_tsec_adapter_hint_failure_is_recorded_and_not_retried() -> None:
-    async def scenario() -> None:
-        client = FailingHintClient()
-        adapter = TSecBenchmarkAdapter(client, use_hint=False)
-        cases = await adapter.discover()
-        session = await adapter.provision(cases[0])
-
-        assert await adapter.request_hint("WEB-001") is None
-        assert await adapter.request_hint("WEB-001") is None
-        assert client.hint_calls == 1
-        assert session.metadata["hint_used"] is False
-        assert session.metadata["hint_error"] is True
-        assert session.metadata["hint_trigger"] == "threshold"
-
-    asyncio.run(scenario())
-
-
-def test_tsec_adapter_immediate_hint_is_not_requested_again_by_the_threshold() -> None:
-    """--hint plus --hint-threshold must pay for one hint view, not two."""
-
-    async def scenario() -> None:
-        client = HintCountingClient()
-        adapter = TSecBenchmarkAdapter(client, use_hint=True)
-        cases = await adapter.discover()
-        session = await adapter.provision(cases[0])
-
-        assert client.hint_calls == 1
-        assert session.metadata["hint_trigger"] == "immediate"
-
-        assert await adapter.request_hint("WEB-001") == "look at the service"
-        assert client.hint_calls == 1
-        assert session.metadata["hint_trigger"] == "immediate"
-        assert session.metadata["hint"] == "look at the service"
-        # The cached reply is not a fresh fetch, so no failure flag is written.
-        assert "hint_error" not in session.metadata
-
-    asyncio.run(scenario())
-
-
 class MetricsRunner(FakeBenchmarkRunner):
     """A runner whose result carries the run metric block the sweep aggregates."""
 

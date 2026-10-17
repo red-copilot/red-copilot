@@ -749,8 +749,8 @@ def test_pi_rpc_session_sends_prompt_and_steers_before_settled(monkeypatch, tmp_
             if event.type == "tool.call":
                 await session.observe(
                     AgentObservation(
-                        type="solver.verification",
-                        data={"status": "pending", "replan_required": True},
+                        type="solver.hint",
+                        data={"source": "operator", "message": "try another surface"},
                     )
                 )
             elif event.type == "pi.agent_settled":
@@ -773,7 +773,7 @@ def test_pi_rpc_session_sends_prompt_and_steers_before_settled(monkeypatch, tmp_
     assert commands[1]["type"] == "prompt"
     assert "solver.plan.updated" in commands[1]["message"]
     assert commands[2]["type"] == "steer"
-    assert "solver.verification" in commands[2]["message"]
+    assert "solver.hint" in commands[2]["message"]
     assert commands[3]["type"] == "prompt"
     assert "benchmark.feedback" in commands[3]["message"]
     assert [event.type for event in events] == [
@@ -1153,28 +1153,6 @@ def test_pi_missing_system_prompt_file_fails_closed(monkeypatch, tmp_path: Path)
 
     with pytest.raises(AgentError, match="system prompt file was not found"):
         adapter._prompt_text(task)
-
-
-def test_pi_rpc_normalizes_a_coarse_command_family() -> None:
-    from harness.pi_adapter import _command_family
-
-    assert _command_family("bash", {"command": "for id in ../../etc/passwd; do curl $id; done"}) == (
-        "bash:curl"
-    )
-    assert _command_family("bash", {"command": "TARGET=x ffuf -w /w -u http://$TARGET"}) == (
-        "bash:ffuf"
-    )
-    assert _command_family("bash", {"command": "/usr/bin/curl -s http://x"}) == "bash:curl"
-    assert _command_family("bash", {"command": "cd /tmp; for id in a b; do curl $id; done"}) == (
-        "bash:curl"
-    )
-    assert _command_family("bash", {"command": "timeout 60 curl -s http://x"}) == "bash:curl"
-    assert _command_family(
-        "bash", {"command": "cd /tmp\n# enumerate endpoints\nffuf -u http://x/FUZZ -w /w"}
-    ) == "bash:ffuf"
-    assert _command_family("bash", {"command": "echo hello > /tmp/a"}) is None
-    assert _command_family("bash", {"command": "cat notes.txt | grep admin"}) is None
-    assert _command_family("read", {}) is None
 
 
 def test_pi_tool_output_feeds_fact_extraction(monkeypatch, tmp_path: Path) -> None:

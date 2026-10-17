@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -21,84 +20,6 @@ from .agent import (
 from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
-
-# Commands and shell syntax that say nothing about what the attempt is doing.
-# Generic text utilities are deliberately excluded from the family identity:
-# a run that inspects notes and a run that attacks a target cannot share the
-# "same repeated action" just because both used cat or echo.
-_FAMILY_NOISE_HEADS = frozenset(
-    {
-        "awk",
-        "cat",
-        "cd",
-        "echo",
-        "export",
-        "false",
-        "find",
-        "grep",
-        "head",
-        "ls",
-        "mkdir",
-        "printf",
-        "pwd",
-        "rm",
-        "sed",
-        "set",
-        "tail",
-        "test",
-        "true",
-        "wc",
-        "which",
-    }
-)
-_FAMILY_LOOP_HEADS = frozenset({"case", "for", "function", "if", "until", "while"})
-_FAMILY_STRUCTURAL_HEADS = frozenset({"do", "else", "elif", "then"})
-_FAMILY_END_HEADS = frozenset({"done", "esac", "fi"})
-_FAMILY_WRAPPER_HEADS = frozenset({"command", "exec", "nohup", "sleep", "sudo", "timeout"})
-
-
-def _command_family(tool: str, arguments: object) -> str | None:
-    """Coarse identity of a shell command, e.g. ``bash:curl`` or ``bash:ffuf``.
-
-    Repeated near-identical attempts (the same loop with a different wordlist or
-    path) share a family even when their exact arguments differ, which is the
-    signal that a line of attack is being ground down.
-    """
-    if not isinstance(arguments, dict):
-        return None
-    command = arguments.get("command") or arguments.get("cmd")
-    if not isinstance(command, str) or not command.strip():
-        return None
-    for line in command.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        for segment in re.split(r"[;&|]+", stripped):
-            tokens = segment.split()
-            index = 0
-            while index < len(tokens):
-                token = tokens[index]
-                if token.startswith("#"):
-                    break
-                if "=" in token and not token.startswith(("/", "-", ".")):
-                    index += 1  # leading VAR=value assignment
-                    continue
-                head = token.strip("'\"").rsplit("/", 1)[-1]
-                if head in _FAMILY_LOOP_HEADS or head in _FAMILY_END_HEADS:
-                    break
-                if head in _FAMILY_STRUCTURAL_HEADS:
-                    index += 1
-                    continue
-                if head == "env":
-                    index += 1
-                    continue
-                if head in _FAMILY_WRAPPER_HEADS:
-                    index += 2  # wrapper plus the wrapped command's first token
-                    continue
-                if head in _FAMILY_NOISE_HEADS:
-                    break  # generic utility: its arguments are not an action
-                return f"{tool}:{head[:16]}"
-    return None
 
 
 def _tool_output_excerpt(event: object, *, limit: int = 8 * 1024) -> str | None:
@@ -207,26 +128,12 @@ class PiAdapter:
             tool_call_id = str(event.get("toolCallId") or "")
             if tool_call_id:
                 self._tool_started[tool_call_id] = time.monotonic()
-            arguments = event.get("args")
-            fingerprint = (
-                hashlib.sha256(
-                    json.dumps(arguments, sort_keys=True, default=str).encode("utf-8")
-                ).hexdigest()[:16]
-                if arguments
-                else None
-            )
             return [
                 (
                     "tool.call",
                     {
                         "tool": event.get("toolName", "unknown"),
                         "tool_call_id": event.get("toolCallId"),
-                        # Bounded identity of the arguments, so repeated identical
-                        # attempts are visible without storing agent text.
-                        "args_fingerprint": fingerprint,
-                        "args_family": _command_family(
-                            str(event.get("toolName", "unknown")), arguments
-                        ),
                         "source": "pi",
                     },
                 )

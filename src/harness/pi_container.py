@@ -91,13 +91,8 @@ class ContainerPiRpcSession:
     # what the Harness actually emits belongs here.
     _STEER_TYPES = frozenset(
         {
-            "solver.verification",
-            "aci.feedback",
             "benchmark.feedback",
-            "world.state.updated",
-            "solver.budget",
             "solver.finalize",
-            "solver.repetition_steer",
             "solver.submission_due",
             "solver.submission_reask",
             "solver.closing_session",

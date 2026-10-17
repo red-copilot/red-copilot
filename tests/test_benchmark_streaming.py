@@ -693,12 +693,11 @@ def test_report_tolerates_a_result_without_metrics(tmp_path: Path) -> None:
     assert "run metrics:" not in result.stdout
 
 
-def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path: Path) -> None:
+def test_benchmark_runs_keep_submission_closure_on(monkeypatch, tmp_path: Path) -> None:
     """Pin the defaults the failure shape of 2026-10-16 depends on.
 
-    Fifteen losing runs submitted nothing and spent turns on feedback they could
-    not act on; the benchmark path has to keep asking for a submission at the
-    soft limit and stop echoing zero-information steers.
+    Fifteen losing runs submitted nothing; the benchmark path has to keep asking
+    for a submission at the soft limit and while closing.
     """
     import harness.benchmark.runner as runner_module
 
@@ -734,7 +733,5 @@ def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path:
     for kwargs in captured:
         assert kwargs["finalize_requests_submission"] is True
         assert kwargs["submission_due_fraction"] == runner_module.BENCHMARK_SUBMISSION_DUE_FRACTION
-        assert kwargs["quiet_world_steers"] is True
-        assert kwargs["verdict_steers_only"] is True
 
 

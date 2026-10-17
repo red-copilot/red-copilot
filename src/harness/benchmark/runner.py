@@ -639,7 +639,6 @@ class BenchmarkRunner:
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
         max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
-        hint_threshold: int = 0,
         seed_notes_from: Path | None = None,
     ) -> dict:
         if agent.type in {"docker", "pi"} and agent.network == "environment":
@@ -770,10 +769,6 @@ class BenchmarkRunner:
             runtimes: list[_ExecutorRuntime] = []
             world = None
             registry = None
-            request_hint = getattr(adapter, "request_hint", None)
-            hint_request = (
-                (lambda: request_hint(case.id)) if callable(request_hint) else None
-            )
             for planned in plan.sessions:
                 attach = world is not None
                 session_runtime = bootstrap_solver(
@@ -787,12 +782,8 @@ class BenchmarkRunner:
                     budget_limits=enforced_budget_limits(planned.budgets),
                     agent_workspace=planned.workspace,
                     max_unconfirmed_progress=max_unconfirmed_progress,
-                    hint_request=hint_request,
-                    hint_threshold=hint_threshold,
                     finalize_requests_submission=True,
                     submission_due_fraction=BENCHMARK_SUBMISSION_DUE_FRACTION,
-                    quiet_world_steers=True,
-                    verdict_steers_only=True,
                     world_repository_factory=(
                         (lambda _path, shared=world: shared) if attach else SQLiteWorldRepository
                     ),

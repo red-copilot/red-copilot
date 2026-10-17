@@ -221,158 +221,11 @@ def test_solver_loop_stops_after_the_bounded_no_progress_limit(tmp_path: Path) -
     assert '"action":"stop"' in decisions[-1]
 
 
-def test_solver_loop_fetches_hint_once_at_the_threshold(tmp_path: Path) -> None:
-    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
-    progress = ProgressLedger()
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-hint", "task-hint")
-    session = FakeSession()
-    fetches: list[int] = []
-
-    async def fetch_hint() -> str | None:
-        fetches.append(1)
-        return "peek at the upload form"
-
-    loop = SolverLoop(
-        world=world,
-        progress=progress,
-        run_dir=tmp_path,
-        trace=trace,
-        actor="agent:test",
-        context_query="stuck run",
-        planned_world_revision=world.snapshot.revision,
-        hint_request=fetch_hint,
-        hint_threshold=2,
-    )
-
-    async def run() -> None:
-        for index in range(3):
-            await loop.process_event(
-                session,
-                AgentEvent(
-                    type="tool.result",
-                    event_id=f"hint-{index}",
-                    data={
-                        "tool": f"probe-{index}",
-                        "tool_call_id": f"hint-call-{index}",
-                        "is_error": True,
-                    },
-                ),
-            )
-
-    asyncio.run(run())
-
-    assert fetches == [1]
-    hints = [item for item in session.feedback if item.type == "solver.hint"]
-    assert len(hints) == 1
-    assert hints[0].data["source"] == "platform"
-    assert "peek at the upload form" in hints[0].data["message"]
-
-
-def test_solver_loop_hint_failure_is_not_retried(tmp_path: Path) -> None:
-    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
-    progress = ProgressLedger()
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-hint-fail", "task-hint-fail")
-    session = FakeSession()
-    fetches: list[int] = []
-
-    async def fetch_hint() -> str | None:
-        fetches.append(1)
-        raise RuntimeError("hint service down")
-
-    loop = SolverLoop(
-        world=world,
-        progress=progress,
-        run_dir=tmp_path,
-        trace=trace,
-        actor="agent:test",
-        context_query="stuck run",
-        planned_world_revision=world.snapshot.revision,
-        hint_request=fetch_hint,
-        hint_threshold=1,
-    )
-
-    async def run() -> None:
-        for index in range(2):
-            await loop.process_event(
-                session,
-                AgentEvent(
-                    type="tool.result",
-                    event_id=f"fail-{index}",
-                    data={
-                        "tool": f"probe-fail-{index}",
-                        "tool_call_id": f"fail-call-{index}",
-                        "is_error": True,
-                    },
-                ),
-            )
-
-    asyncio.run(run())
-
-    assert fetches == [1]
-    assert not [item for item in session.feedback if item.type == "solver.hint"]
-    traces = trace.path.read_text(encoding="utf-8")
-    assert '"type":"solver.hint"' in traces
-    assert '"used":false' in traces
-    assert '"source":"platform"' in traces
-
-
-def test_operator_and_platform_hints_share_one_steered_event_type() -> None:
-    """Both hint sources reach the Agent as ``solver.hint`` observations.
-
-    The RPC session only steers observation types on its whitelist, so the
-    shared type has to be there or a hint would stop at ``agent.feedback.jsonl``.
-    """
+def test_operator_hints_use_a_steered_event_type() -> None:
+    """The RPC session only steers whitelisted observation types."""
     from harness.pi_container import ContainerPiRpcSession
 
     assert "solver.hint" in ContainerPiRpcSession._STEER_TYPES
-
-
-def test_solver_loop_steers_once_per_budget_threshold(tmp_path: Path) -> None:
-    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
-    progress = ProgressLedger(budget_limits={"max_tokens": 1000})
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    session = FakeSession()
-    loop = SolverLoop(
-        world=world,
-        progress=progress,
-        run_dir=tmp_path,
-        trace=trace,
-        actor="agent:test",
-        context_query="solve the target",
-        planned_world_revision=world.snapshot.revision,
-    )
-
-    def usage(tokens: int) -> None:
-        asyncio.run(
-            loop.process_event(
-                session,
-                AgentEvent(
-                    type="model.usage", data={"total_tokens": tokens, "cost_usd": 0.0}
-                ),
-            )
-        )
-
-    def steers() -> list:
-        return [item for item in session.feedback if item.type == "solver.budget"]
-
-    usage(400)  # 60% remaining: above every threshold
-    assert steers() == []
-
-    usage(150)  # 45% remaining: crosses 50%
-    assert [item.data["threshold"] for item in steers()] == [0.5]
-
-    usage(150)  # 30% remaining: 25% threshold not crossed yet
-    assert [item.data["threshold"] for item in steers()] == [0.5]
-
-    usage(100)  # 20% remaining: crosses 25%
-    assert [item.data["threshold"] for item in steers()] == [0.5, 0.25]
-
-    usage(100)  # 10% remaining: crosses 10%
-    assert [item.data["threshold"] for item in steers()] == [0.5, 0.25, 0.1]
-
-    usage(100)  # already fired: never repeats
-    assert [item.data["threshold"] for item in steers()] == [0.5, 0.25, 0.1]
-    assert steers()[0].data["tightest_budget"] == "max_tokens"
 
 
 def _scored_loop(tmp_path: Path, **kwargs) -> tuple[SolverLoop, ProgressLedger, FakeSession]:
@@ -574,19 +427,6 @@ def test_settle_without_submission_stays_off_after_objective_completion(
     assert [item for item in session.feedback if item.type == "solver.submission_reask"] == []
 
 
-def test_solver_loop_quiet_mode_still_steers_harness_authored_world_changes(
-    tmp_path: Path,
-) -> None:
-    from harness.hints import append_hint
-
-    append_hint(run_dir=tmp_path, text="try the admin panel")
-    loop, _progress, session = _scored_loop(tmp_path, quiet_world_steers=True)
-
-    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
-
-    steers = [item for item in session.feedback if item.type == "world.state.updated"]
-    assert len(steers) == 1
-    assert steers[0].data["revision_after"] > steers[0].data["revision_before"]
 def test_solver_loop_finalize_on_usage_exhaustion_holds_stop_in_grace(tmp_path: Path) -> None:
     world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     progress = ProgressLedger(budget_limits={"max_tokens": 100}, wall_time_grace_seconds=180)
@@ -626,23 +466,6 @@ def test_solver_loop_finalize_on_usage_exhaustion_holds_stop_in_grace(tmp_path: 
     assert decision.reason == "budget_exhausted"
 
 
-def _repetition_loop(tmp_path: Path) -> tuple[SolverLoop, ProgressLedger, FakeSession]:
-    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
-    progress = ProgressLedger()
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-test", "task-test")
-    session = FakeSession()
-    loop = SolverLoop(
-        world=world,
-        progress=progress,
-        run_dir=tmp_path,
-        trace=trace,
-        actor="agent:test",
-        context_query="find the flag",
-        planned_world_revision=world.snapshot.revision,
-    )
-    return loop, progress, session
-
-
 def _tool_call(call_id: str, family: str, index: int) -> AgentEvent:
     return AgentEvent(
         type="tool.call",
@@ -654,110 +477,6 @@ def _tool_call(call_id: str, family: str, index: int) -> AgentEvent:
             "args_fingerprint": f"fingerprint-{index}",
         },
     )
-
-
-def _record_failed_tool(
-    loop: SolverLoop,
-    session: FakeSession,
-    *,
-    call_id: str,
-    family: str,
-    index: int,
-) -> None:
-    asyncio.run(loop.process_event(session, _tool_call(call_id, family, index)))
-    asyncio.run(
-        loop.process_event(
-            session,
-            AgentEvent(
-                type="tool.result",
-                event_id=f"result-{index}",
-                data={
-                    "tool": "bash",
-                    "tool_call_id": call_id,
-                    "is_error": True,
-                    "exit_code": 1,
-                },
-            ),
-        )
-    )
-
-
-def test_solver_loop_intervenes_once_per_repeated_command_family(tmp_path: Path) -> None:
-    loop, progress, session = _repetition_loop(tmp_path)
-
-    for index in range(3):
-        _record_failed_tool(
-            loop,
-            session,
-            call_id=f"call-{index}",
-            family="bash:curl",
-            index=index,
-        )
-
-    steers = [item for item in session.feedback if item.type == "solver.repetition_steer"]
-    assert len(steers) == 1
-    assert steers[0].data["family"] == "bash:curl"
-    assert steers[0].data["level"] == 1
-    assert progress.steered_tool_families["bash:curl"] == 1
-
-    # A fourth call in the same family does not re-nudge at level 1.
-    _record_failed_tool(
-        loop,
-        session,
-        call_id="call-3",
-        family="bash:curl",
-        index=3,
-    )
-    assert len([item for item in session.feedback if item.type == "solver.repetition_steer"]) == 1
-
-
-def test_solver_loop_escalates_a_family_that_keeps_repeating(tmp_path: Path) -> None:
-    loop, progress, session = _repetition_loop(tmp_path)
-
-    for index in range(6):
-        _record_failed_tool(
-            loop,
-            session,
-            call_id=f"call-{index}",
-            family="bash:nmap",
-            index=index,
-        )
-
-    steers = [item for item in session.feedback if item.type == "solver.repetition_steer"]
-    levels = [item.data["level"] for item in steers]
-    assert levels == [1, 2]
-    assert progress.steered_tool_families["bash:nmap"] == 2
-
-    # Level 2 also fires at most once per family.
-    _record_failed_tool(
-        loop,
-        session,
-        call_id="call-6",
-        family="bash:nmap",
-        index=6,
-    )
-    assert len([item for item in session.feedback if item.type == "solver.repetition_steer"]) == 2
-
-
-def test_solver_loop_ignores_family_rotation_and_confirmed_progress(tmp_path: Path) -> None:
-    loop, progress, session = _repetition_loop(tmp_path)
-
-    for index, family in enumerate(("bash:curl", "bash:nmap", "bash:curl", "bash:nmap")):
-        asyncio.run(loop.process_event(session, _tool_call(f"call-{index}", family, index)))
-
-    assert progress.tool_family_streak == 1
-    assert [item for item in session.feedback if item.type == "solver.repetition_steer"] == []
-
-    # Confirmed progress clears the streak before the next call.
-    asyncio.run(loop.process_event(session, _tool_call("call-4", "bash:curl", 4)))
-    asyncio.run(loop.process_event(session, _tool_call("call-5", "bash:curl", 5)))
-    assert progress.tool_family_streak == 2
-    progress.record_submission(accepted=True, completed=False)
-
-    assert progress.tool_family_streak == 0
-    assert progress.last_tool_family is None
-    asyncio.run(loop.process_event(session, _tool_call("call-6", "bash:curl", 6)))
-    assert [item for item in session.feedback if item.type == "solver.repetition_steer"] == []
 
 
 def test_context_restart_waits_for_new_work_after_a_restart() -> None:
@@ -861,16 +580,52 @@ def test_metrics_snapshot_reports_tool_cost_and_final_context(tmp_path: Path) ->
     ]
 
 
-def test_metrics_snapshot_counts_a_harness_authored_world_steer(tmp_path: Path) -> None:
-    from harness.hints import append_hint
+def test_heuristic_steers_are_not_delivered(tmp_path: Path) -> None:
+    loop, _progress, session = _metrics_loop(
+        tmp_path,
+        progress_kwargs={"budget_limits": {"max_tokens": 1000}},
+    )
 
-    append_hint(run_dir=tmp_path, text="try the admin panel")
-    loop, _progress, session = _metrics_loop(tmp_path, quiet_world_steers=True)
+    for index in range(3):
+        asyncio.run(
+            loop.process_event(
+                session,
+                AgentEvent(
+                    type="tool.call",
+                    data={
+                        "tool": "bash",
+                        "tool_call_id": f"same-{index}",
+                        "args_family": "bash:curl",
+                    },
+                ),
+            )
+        )
+        asyncio.run(
+            loop.process_event(
+                session,
+                AgentEvent(
+                    type="tool.result",
+                    data={
+                        "tool": "bash",
+                        "tool_call_id": f"same-{index}",
+                        "duration_ms": 200_000,
+                        "is_error": True,
+                        "exit_code": 1,
+                    },
+                ),
+            )
+        )
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(type="model.usage", data={"total_tokens": 600, "cost_usd": 0.0}),
+        )
+    )
 
-    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
-
-    assert len([item for item in session.feedback if item.type == "world.state.updated"]) == 1
-    assert loop.metrics_snapshot()["steer_counts"]["world"] == 1
+    delivered = {item.type for item in session.feedback}
+    assert "solver.repetition_steer" not in delivered
+    assert "solver.tool_slow" not in delivered
+    assert "solver.budget" not in delivered
 
 
 def test_metrics_snapshot_counts_the_finalize_steer_once(tmp_path: Path) -> None:
@@ -915,8 +670,8 @@ def test_written_context_carries_the_remaining_window(tmp_path: Path) -> None:
     assert "budget: max_tokens 75% left" in context
 
 
-def test_a_blocking_command_is_traced_and_surfaced_once(tmp_path: Path) -> None:
-    """One 927s call ate half a window in the 2026-10-16 sweep, silently."""
+def test_a_blocking_command_is_traced_without_steering(tmp_path: Path) -> None:
+    """Slow-call timing is telemetry; the Agent decides what to do with it."""
     loop, _progress, session = _metrics_loop(tmp_path)
     slow = AgentEvent(
         type="tool.result",
@@ -937,9 +692,7 @@ def test_a_blocking_command_is_traced_and_surfaced_once(tmp_path: Path) -> None:
         for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert trace_types.count("tool.slow") == 2
-    slow_steers = [item for item in session.feedback if item.type == "solver.tool_slow"]
-    assert len(slow_steers) == 1
-    assert "814s" in slow_steers[0].data["message"]
+    assert [item for item in session.feedback if item.type == "solver.tool_slow"] == []
     assert loop.metrics_snapshot()["tool_time_ms"] == 1_628_000
 
 
@@ -973,5 +726,3 @@ def test_closure_switches_default_off_for_task_runs(tmp_path: Path) -> None:
 
     assert loop.finalize_requests_submission is False
     assert loop.submission_due_fraction is None
-    assert loop.quiet_world_steers is False
-    assert loop.verdict_steers_only is False
