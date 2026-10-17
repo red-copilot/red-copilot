@@ -22,7 +22,7 @@ TOTAL_WALL_TIME="${HARNESS_TOTAL_WALL_TIME:-20400}"
 CONCURRENCY="${HARNESS_CONCURRENCY:-3}"
 # Failed or timed-out challenges are retried on later passes while the
 # window lasts, so a single stuck attempt never forfeits a question.
-MAX_PASSES="${HARNESS_MAX_PASSES:-3}"
+MAX_PASSES="${HARNESS_MAX_PASSES:-8}"
 
 exec harness tsec \
   --agent /opt/red-harness/agents/hosted/pi-deepseek.yaml \
