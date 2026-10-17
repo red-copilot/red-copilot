@@ -29,6 +29,44 @@ CONTEXT_RESTART_TOOL_CALLS = 300
 CONTEXT_RESTART_BUDGET_FRACTION = 0.6
 MAX_CONTEXT_RESTARTS = 2
 
+# Which delivered Agent observation feeds which metric bucket. The names are
+# the ones the 2026-10-16 sweep review used by hand: "world" and "verification"
+# were 93% of the traffic and carried no action-able information, which is why
+# the improvement plan quiets them instead of adding more of them.
+STEER_BUCKETS: dict[str, str] = {
+    "world.state.updated": "world",
+    "solver.verification": "verification",
+    "solver.repetition_steer": "repetition",
+    "solver.budget": "budget",
+    "solver.finalize": "finalize",
+}
+STEER_BUCKET_NAMES: tuple[str, ...] = (
+    "world",
+    "verification",
+    "repetition",
+    "budget",
+    "finalize",
+)
+# Slow-call telemetry is a bounded top-N list, not a per-call log: the run
+# result must stay small enough to aggregate a whole sweep.
+SLOW_TOOL_CALLS = 5
+
+
+def empty_steer_counts() -> dict[str, int]:
+    return dict.fromkeys(STEER_BUCKET_NAMES, 0)
+
+
+def _format_seconds(seconds: float) -> str:
+    """Compact duration for the Agent-facing budget line (e.g. ``11m12s``)."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    minutes, rest = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m{rest:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
 
 class ProgressHypothesis(BaseModel):
     id: str
@@ -64,6 +102,9 @@ class ProgressLedger(BaseModel):
     goal_advanced: int = 0
     contradicted_actions: int = 0
     pending_actions: int = 0
+    # Verdicts the Harness could not decide because it had no independent
+    # observation: recorded, never steered, never mistaken for a stall.
+    unavailable_actions: int = 0
     skipped_verifications: int = 0
     last_action: dict[str, Any] | None = None
     active_actions: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -106,6 +147,9 @@ class ProgressLedger(BaseModel):
     model_calls: int = 0
     accepted_submissions: int = 0
     rejected_submissions: int = 0
+    # Every candidate handed to the evaluator, accepted or rejected. The
+    # accepted/rejected split cannot answer "did this run ever try?".
+    submissions_attempted: int = 0
     objective_completed: bool = False
     objective_verdict: dict[str, Any] | None = None
     last_event_type: str | None = None
@@ -341,9 +385,12 @@ class ProgressLedger(BaseModel):
             self.unconfirmed_progress += 1
         elif status == "pending":
             self.pending_actions += 1
+        elif status == "unavailable":
+            self.unavailable_actions += 1
 
     def record_submission(self, *, accepted: bool, completed: bool) -> None:
         del completed  # Final evaluation, not submission feedback, owns completion.
+        self.submissions_attempted += 1
         if accepted:
             self.accepted_submissions += 1
             self.no_progress_count = 0
@@ -440,6 +487,34 @@ class ProgressLedger(BaseModel):
             return False
         elapsed = (datetime.now(UTC) - self.budget_exceeded_at).total_seconds()
         return elapsed >= self.wall_time_grace_seconds
+
+    def agent_budget_lines(self) -> list[str]:
+        """Deterministic, Agent-facing statement of what is left.
+
+        The 2026-10-16 sweep sent 39 budget steers, all of them only once the
+        budget was nearly gone, and `world.context.txt` carried no budget
+        section at all; the Agent had no way to answer "how much time is left"
+        except by burning a turn on it.
+        """
+        if not self.budget_limits:
+            return ["no declared budget; the operator owns the wall clock"]
+        lines: list[str] = []
+        for dimension, fraction in sorted(
+            self.budget_fractions().items(),
+            key=lambda item: (item[0] != "wall_time", item[0]),
+        ):
+            if dimension == "wall_time":
+                limit = self.budget_limits.get("wall_time", 0.0)
+                effective = limit + self.wall_time_grace_seconds
+                elapsed = max(0.0, (datetime.now(UTC) - self.started_at).total_seconds())
+                lines.append(
+                    f"wall_time {fraction:.0%} left "
+                    f"({_format_seconds(max(0.0, effective - elapsed))} of "
+                    f"{_format_seconds(effective)})"
+                )
+            else:
+                lines.append(f"{dimension} {fraction:.0%} left")
+        return lines
 
     def budget_fractions(self) -> dict[str, float]:
         """Per-dimension remaining budget fraction (``1.0`` when untouched)."""

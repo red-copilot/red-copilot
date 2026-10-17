@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -479,6 +480,143 @@ def test_solver_loop_steers_once_per_budget_threshold(tmp_path: Path) -> None:
     usage(100)  # already fired: never repeats
     assert [item.data["threshold"] for item in steers()] == [0.5, 0.25, 0.1]
     assert steers()[0].data["tightest_budget"] == "max_tokens"
+
+
+def _scored_loop(tmp_path: Path, **kwargs) -> tuple[SolverLoop, ProgressLedger, FakeSession]:
+    """A benchmark-shaped loop: wall-clock bound and scored through submissions."""
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger(budget_limits={"wall_time": 1800}, started_at=_started(900))
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-scored", "task-scored")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="find the flag",
+        planned_world_revision=world.snapshot.revision,
+        **kwargs,
+    )
+    return loop, progress, session
+
+
+def _started(elapsed_seconds: int) -> datetime:
+    return datetime.now(UTC) - timedelta(seconds=elapsed_seconds)
+
+
+def test_solver_loop_steers_for_a_missing_submission_once_past_halfway(
+    tmp_path: Path,
+) -> None:
+    loop, _progress, session = _scored_loop(tmp_path, submission_due_fraction=0.5)
+
+    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
+    due = [item for item in session.feedback if item.type == "solver.submission_due"]
+    assert len(due) == 1
+    assert due[0].data["threshold"] == 0.5
+    assert "HARNESS_SUBMISSION_INBOX" in due[0].data["message"]
+    assert due[0].data["elapsed_fraction"] > 0.5
+
+    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
+    assert len([item for item in session.feedback if item.type == "solver.submission_due"]) == 1
+
+
+def test_solver_loop_skips_the_submission_steer_when_a_candidate_was_sent(
+    tmp_path: Path,
+) -> None:
+    loop, progress, session = _scored_loop(tmp_path, submission_due_fraction=0.5)
+    progress.record_submission(accepted=False, completed=False)
+
+    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
+
+    assert [item for item in session.feedback if item.type == "solver.submission_due"] == []
+
+
+def _finalize_messages(tmp_path: Path, **kwargs) -> list[str]:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger(budget_limits={"max_tokens": 100})
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-finalize", "task-finalize")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="find the flag",
+        planned_world_revision=world.snapshot.revision,
+        **kwargs,
+    )
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(type="model.usage", data={"total_tokens": 120, "cost_usd": 0.0}),
+        )
+    )
+    asyncio.run(loop.process_event(session, AgentEvent(type="pi.agent_settled", data={})))
+    return [
+        item.data["message"]
+        for item in session.feedback
+        if item.type == "solver.finalize"
+    ]
+
+
+def test_finalize_asks_for_a_best_effort_submission_in_scored_runs(tmp_path: Path) -> None:
+    messages = _finalize_messages(tmp_path, finalize_requests_submission=True)
+
+    assert len(messages) == 2  # the soft-limit steer and the settle re-ask
+    for message in messages:
+        assert "HARNESS_SUBMISSION_INBOX" in message
+        assert "HARNESS_SUMMARY_FILE" in message
+
+
+def test_finalize_leaves_task_runs_without_a_submission_step(tmp_path: Path) -> None:
+    messages = _finalize_messages(tmp_path)
+
+    assert len(messages) == 2
+    for message in messages:
+        assert "HARNESS_SUBMISSION_INBOX" not in message
+        assert "HARNESS_SUMMARY_FILE" in message
+
+
+def test_solver_loop_quiet_mode_does_not_echo_agent_authored_world_changes(
+    tmp_path: Path,
+) -> None:
+    loop, _progress, session = _scored_loop(tmp_path, quiet_world_steers=True)
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="world.observe",
+                data={
+                    "id": "obs-quiet",
+                    "type": "web.endpoint",
+                    "summary": "endpoint found",
+                    "content": {"path": "/admin"},
+                    "confidence": 1.0,
+                },
+            ),
+        )
+    )
+
+    assert loop.world.revision > 0
+    assert [item for item in session.feedback if item.type == "world.state.updated"] == []
+
+
+def test_solver_loop_quiet_mode_still_steers_harness_authored_world_changes(
+    tmp_path: Path,
+) -> None:
+    from harness.hints import append_hint
+
+    append_hint(run_dir=tmp_path, text="try the admin panel")
+    loop, _progress, session = _scored_loop(tmp_path, quiet_world_steers=True)
+
+    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
+
+    steers = [item for item in session.feedback if item.type == "world.state.updated"]
+    assert len(steers) == 1
+    assert steers[0].data["revision_after"] > steers[0].data["revision_before"]
 def test_solver_loop_finalize_on_usage_exhaustion_holds_stop_in_grace(tmp_path: Path) -> None:
     world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     progress = ProgressLedger(budget_limits={"max_tokens": 100}, wall_time_grace_seconds=180)
@@ -635,3 +773,207 @@ def test_context_restart_uses_the_tool_call_count_trigger() -> None:
 
     progress.record_event(_tool_call("call-last", "bash:cmd-last", threshold))
     assert progress.context_restart_due() == "tool_calls"
+
+
+def _metrics_loop(tmp_path: Path, **kwargs) -> tuple[SolverLoop, ProgressLedger, FakeSession]:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger(**kwargs.pop("progress_kwargs", {}))
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-metrics", "task-metrics")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="find the flag",
+        planned_world_revision=world.snapshot.revision,
+        **kwargs,
+    )
+    return loop, progress, session
+
+
+def test_metrics_snapshot_reports_tool_cost_and_final_context(tmp_path: Path) -> None:
+    loop, _progress, session = _metrics_loop(tmp_path)
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="tool.result",
+                data={
+                    "tool": "bash",
+                    "tool_call_id": "call-slow",
+                    "duration_ms": 90000,
+                    "is_error": False,
+                    "exit_code": 0,
+                },
+            ),
+        )
+    )
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="model.usage",
+                data={
+                    "input_tokens": 3000,
+                    "cache_read_tokens": 10000,
+                    "total_tokens": 13100,
+                    "cost_usd": 0.0,
+                },
+            ),
+        )
+    )
+
+    metrics = loop.metrics_snapshot()
+    assert metrics["tool_calls"] == 1
+    assert metrics["tool_failures"] == 0
+    assert metrics["tool_time_ms"] == 90000
+    assert metrics["context_tokens_final"] == 13000
+    assert metrics["slow_tool_calls"] == [
+        {
+            "tool": "bash",
+            "tool_call_id": "call-slow",
+            "duration_ms": 90000,
+            "is_error": False,
+        }
+    ]
+
+
+def test_metrics_snapshot_counts_only_delivered_steers(tmp_path: Path) -> None:
+    """A quieted world echo is a trace event, not a steer the Agent received."""
+    loop, _progress, session = _metrics_loop(tmp_path, quiet_world_steers=True)
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="world.observe",
+                data={
+                    "id": "obs-metrics",
+                    "type": "web.endpoint",
+                    "summary": "endpoint found",
+                    "content": {"path": "/admin"},
+                    "confidence": 1.0,
+                },
+            ),
+        )
+    )
+
+    assert [item for item in session.feedback if item.type == "world.state.updated"] == []
+    assert loop.metrics_snapshot()["steer_counts"]["world"] == 0
+
+
+def test_metrics_snapshot_counts_a_harness_authored_world_steer(tmp_path: Path) -> None:
+    from harness.hints import append_hint
+
+    append_hint(run_dir=tmp_path, text="try the admin panel")
+    loop, _progress, session = _metrics_loop(tmp_path, quiet_world_steers=True)
+
+    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
+
+    assert len([item for item in session.feedback if item.type == "world.state.updated"]) == 1
+    assert loop.metrics_snapshot()["steer_counts"]["world"] == 1
+
+
+def test_metrics_snapshot_counts_the_finalize_steer_once(tmp_path: Path) -> None:
+    loop, _progress, session = _metrics_loop(
+        tmp_path,
+        progress_kwargs={"budget_limits": {"max_tokens": 100}, "wall_time_grace_seconds": 180},
+    )
+    usage = AgentEvent(type="model.usage", data={"total_tokens": 120, "cost_usd": 0.0})
+
+    asyncio.run(loop.process_event(session, usage))
+    asyncio.run(loop.process_event(session, usage))
+
+    assert len([item for item in session.feedback if item.type == "solver.finalize"]) == 1
+    assert loop.metrics_snapshot()["steer_counts"]["finalize"] == 1
+
+
+def test_written_context_carries_the_remaining_window(tmp_path: Path) -> None:
+    loop, _progress, session = _metrics_loop(
+        tmp_path,
+        progress_kwargs={"budget_limits": {"wall_time": 600, "max_tokens": 1000}},
+    )
+
+    asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
+
+    context = (tmp_path / "world.context.txt").read_text(encoding="utf-8")
+    assert "## Focus" in context
+    assert "budget: wall_time 100% left" in context
+    # A dimension appears only once it has been charged; the wall clock is
+    # always visible because it is the window every decision is paced by.
+    assert "max_tokens" not in context
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(type="model.usage", data={"total_tokens": 250, "cost_usd": 0.0}),
+        )
+    )
+
+    context = (tmp_path / "world.context.txt").read_text(encoding="utf-8")
+    assert "budget: max_tokens 75% left" in context
+
+
+def test_a_blocking_command_is_traced_and_surfaced_once(tmp_path: Path) -> None:
+    """One 927s call ate half a window in the 2026-10-16 sweep, silently."""
+    loop, _progress, session = _metrics_loop(tmp_path)
+    slow = AgentEvent(
+        type="tool.result",
+        data={
+            "tool": "bash",
+            "tool_call_id": "call-blocking",
+            "duration_ms": 814_000,
+            "is_error": False,
+            "exit_code": 0,
+        },
+    )
+
+    asyncio.run(loop.process_event(session, slow))
+    asyncio.run(loop.process_event(session, slow))
+
+    trace_types = [
+        json.loads(line)["type"]
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert trace_types.count("tool.slow") == 2
+    slow_steers = [item for item in session.feedback if item.type == "solver.tool_slow"]
+    assert len(slow_steers) == 1
+    assert "814s" in slow_steers[0].data["message"]
+    assert loop.metrics_snapshot()["tool_time_ms"] == 1_628_000
+
+
+def test_a_bounded_command_is_not_flagged(tmp_path: Path) -> None:
+    loop, _progress, session = _metrics_loop(tmp_path)
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="tool.result",
+                data={
+                    "tool": "bash",
+                    "tool_call_id": "call-bounded",
+                    "duration_ms": 4_000,
+                    "is_error": False,
+                    "exit_code": 0,
+                },
+            ),
+        )
+    )
+
+    trace = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert "tool.slow" not in trace
+    assert [item for item in session.feedback if item.type == "solver.tool_slow"] == []
+
+
+def test_closure_switches_default_off_for_task_runs(tmp_path: Path) -> None:
+    """A local task run must not inherit the benchmark closure behaviour."""
+    loop, _progress, _session = _metrics_loop(tmp_path)
+
+    assert loop.finalize_requests_submission is False
+    assert loop.submission_due_fraction is None
+    assert loop.quiet_world_steers is False
+    assert loop.verdict_steers_only is False

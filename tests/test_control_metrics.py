@@ -28,7 +28,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # whole-word summary-section marker check). Re-measured from the tree rather
 # than estimated.
 MAX_MODULES = 58
-MAX_SRC_LINES = 16_652
+MAX_SRC_LINES = 17_961
 
 
 def _module_names() -> set[str]:

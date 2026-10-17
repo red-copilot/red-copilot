@@ -26,7 +26,9 @@ from harness.benchmark.tsec_client import (
     TSecAdapterError,
     TSecClientAdapter,
     TSecConfig,
+    TSecPlatformError,
     _TokenBucket,
+    classify_platform_failure,
 )
 from harness.models import AgentSpec, BudgetSpec, load_agent, load_task
 from harness.preflight import run_preflight
@@ -339,6 +341,9 @@ class FakeRunnerClient:
 
     async def __aexit__(self, *_args) -> None:
         return None
+
+    async def check_vpn(self):
+        return SimpleNamespace(ok=True)
 
     async def list_challenges(self):
         return [
@@ -704,6 +709,7 @@ def test_run_tsec_challenges_retries_incomplete_cases_next_pass(
             runs_root=tmp_path,
             run_all=True,
             max_passes=2,
+                preflight=False,
         )
     )
 
@@ -737,6 +743,7 @@ def test_run_tsec_challenges_stops_when_a_pass_scores_nothing(
             runs_root=tmp_path,
             run_all=True,
             max_passes=5,
+                preflight=False,
         )
     )
 
@@ -881,7 +888,321 @@ def test_run_tsec_challenges_keeps_a_shorter_declared_wall_clock(
     assert FakeBenchmarkRunner.last_budgets.wall_time == 600
 
 
-def test_run_tsec_challenges_parallel_alias_bounds_concurrency(
+def _challenge(code: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        unique_code=code,
+        description="Authorized web challenge",
+        category="web",
+        flag_count=1,
+        correct_flag_count=0,
+        difficulty="easy",
+        level="L2",
+        total_score=100,
+        is_completed=False,
+    )
+
+
+class FakeMultiChallengeClient(FakeRunnerClient):
+    async def list_challenges(self):
+        return [_challenge("WEB-001"), _challenge("WEB-002"), _challenge("WEB-003")]
+
+    async def start_challenge(self, code):
+        return SimpleNamespace(container_addr=[f"10.0.0.{code[-1]}:8080"])
+
+    async def close_challenge(self, code):
+        self.closed = True
+        return SimpleNamespace(closed=True)
+
+
+# The SDK raises these two by class name; the harness classifies without
+# importing it, so the doubles only have to carry the same names and messages.
+VpnCheckError = type("VpnCheckError", (RuntimeError,), {})
+
+
+class NoVpnClient(FakeRunnerClient):
+    async def check_vpn(self):
+        raise VpnCheckError("VPN检测未通过,请检查靶场VPN网络配置")
+
+
+class InstanceConflictClient(FakeMultiChallengeClient):
+    """The platform refuses a new start while three instances are still open."""
+
+    async def start_challenge(self, code):
+        raise InvalidState("max active challenge instances reached (3)")
+
+
+class RecordingRunner(FakeBenchmarkRunner):
+    kwargs_by_case: ClassVar[dict[str, dict]] = {}
+
+    async def run_case(self, *, case, budgets, **kwargs):
+        type(self).kwargs_by_case[case.id] = kwargs
+        return await super().run_case(case=case, budgets=budgets, **kwargs)
+
+
+class ProvisioningRunner(FakeBenchmarkRunner):
+    """Exercises the adapter's provision path the way the real runner does."""
+
+    async def run_case(self, *, case, adapter, budgets, **kwargs):
+        await adapter.provision(case)
+        return await super().run_case(case=case, budgets=budgets, **kwargs)
+
+
+def test_sweep_stops_before_any_run_directory_when_the_platform_is_down(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", NoVpnClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+    summary = tmp_path / "sweep.json"
+
+    with pytest.raises(TSecPlatformError) as raised:
+        asyncio.run(
+            run_tsec_challenges(
+                config=TSecConfig(base_url="https://example.invalid", token="secret"),
+                agent=_runner_agent(),
+                budgets=BudgetSpec(wall_time=30),
+                runs_root=tmp_path / "runs",
+                run_all=True,
+                summary_out=summary,
+            )
+        )
+
+    assert raised.value.kind == "vpn_unreachable"
+    runs_root = tmp_path / "runs"
+    assert not runs_root.exists() or list(runs_root.iterdir()) == []
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "harness/tsec-sweep/v1"
+    assert payload["platform_error"]["kind"] == "vpn_unreachable"
+    assert payload["cases"] == []
+    assert payload["tallies"] == {"selected": 0, "completed": 0, "skipped": 0, "failed": 0}
+
+
+def test_sweep_records_a_case_local_failure_and_keeps_going(
+    monkeypatch, tmp_path: Path
+) -> None:
+    class OneBadCase(FakeMultiChallengeClient):
+        async def start_challenge(self, code):
+            if code == "WEB-002":
+                raise RuntimeError("challenge container refused to start")
+            return await super().start_challenge(code)
+
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", OneBadCase)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", ProvisioningRunner)
+    summary = tmp_path / "sweep.json"
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            runs_root=tmp_path,
+            run_all=True,
+            parallel=2,
+            summary_out=summary,
+        )
+    )
+
+    assert [item["benchmark"]["case_id"] for item in results] == [
+        "WEB-001",
+        "WEB-002",
+        "WEB-003",
+    ]
+    assert results[1]["status"] == "error"
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    assert payload["failures"] == [
+        {"case_id": "WEB-002", "failure_kind": "case_error", "error_type": "RuntimeError"}
+    ]
+    assert payload["tallies"]["completed"] == 2
+    assert payload["tallies"]["failed"] == 1
+
+
+def test_sweep_stops_dispatching_new_cases_after_an_instance_conflict(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", InstanceConflictClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", ProvisioningRunner)
+    summary = tmp_path / "sweep.json"
+
+    with pytest.raises(TSecPlatformError) as raised:
+        asyncio.run(
+            run_tsec_challenges(
+                config=TSecConfig(base_url="https://example.invalid", token="secret"),
+                agent=_runner_agent(),
+                budgets=BudgetSpec(wall_time=30),
+                runs_root=tmp_path,
+                run_all=True,
+                parallel=1,
+                summary_out=summary,
+            )
+        )
+
+    assert raised.value.kind == "instance_conflict"
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    assert payload["platform_error"]["kind"] == "instance_conflict"
+    kinds = {item["case_id"]: item["failure_kind"] for item in payload["failures"]}
+    assert kinds["WEB-001"] == "instance_conflict"
+    assert kinds["WEB-002"] == "dispatch_aborted"
+    assert kinds["WEB-003"] == "dispatch_aborted"
+
+
+def test_sweep_resume_skips_locally_solved_cases_and_seeds_the_rest(
+    monkeypatch, tmp_path: Path
+) -> None:
+    solved_run = tmp_path / "tsec_WEB-001_deadbeef"
+    solved_run.mkdir()
+    (solved_run / "result.json").write_text(
+        json.dumps({"status": "objective_completed", "success": True}), encoding="utf-8"
+    )
+    failed_run = tmp_path / "tsec_WEB-002_cafebabe"
+    (failed_run / "agent-workspace").mkdir(parents=True)
+    (failed_run / "agent-workspace" / "agent.summary.md").write_text(
+        "## Confirmed facts\nprior attempt\n", encoding="utf-8"
+    )
+    (failed_run / "result.json").write_text(
+        json.dumps({"status": "finished", "success": False}), encoding="utf-8"
+    )
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeMultiChallengeClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", RecordingRunner)
+    RecordingRunner.kwargs_by_case = {}
+    summary = tmp_path / "sweep.json"
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            runs_root=tmp_path,
+            run_all=True,
+            summary_out=summary,
+        )
+    )
+
+    assert [item["benchmark"]["case_id"] for item in results] == ["WEB-002", "WEB-003"]
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    assert payload["skipped"] == [
+        {"case_id": "WEB-001", "run_id": "tsec_WEB-001_deadbeef", "reason": "local-success"}
+    ]
+    assert (
+        RecordingRunner.kwargs_by_case["WEB-002"]["seed_notes_from"]
+        == tmp_path / "tsec_WEB-002_cafebabe"
+    )
+    assert RecordingRunner.kwargs_by_case["WEB-003"]["seed_notes_from"] is None
+
+
+def test_sweep_reruns_an_explicitly_named_challenge(monkeypatch, tmp_path: Path) -> None:
+    solved_run = tmp_path / "tsec_WEB-001_deadbeef"
+    solved_run.mkdir()
+    (solved_run / "result.json").write_text(
+        json.dumps({"status": "objective_completed", "success": True}), encoding="utf-8"
+    )
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeMultiChallengeClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+            summary_out=tmp_path / "sweep.json",
+        )
+    )
+
+    assert [item["benchmark"]["case_id"] for item in results] == ["WEB-001"]
+
+
+def test_platform_failure_classification_covers_the_three_operator_states() -> None:
+    assert classify_platform_failure(VpnCheckError("VPN检测未通过")) == "vpn_unreachable"
+    assert (
+        classify_platform_failure(InvalidState("max active challenge instances reached (3)"))
+        == "instance_conflict"
+    )
+    connection = type("TSecConnectionError", (RuntimeError,), {})
+    transport = connection("request failed: [Errno -3] Temporary failure in name resolution")
+    assert classify_platform_failure(transport) == "platform_unreachable"
+    assert classify_platform_failure(RuntimeError("challenge not found")) is None
+
+
+def _write_cli_agent(path: Path) -> Path:
+    path.write_text(
+        "apiVersion: harness/v1\n"
+        "id: pi-tsec\n"
+        "type: pi\n"
+        "image: pi:test\n"
+        "network: host\n"
+        "pi:\n"
+        "  provider: fake\n"
+        "  model: m\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_tsec_cli_separates_platform_outage_from_partial_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from typer.testing import CliRunner
+
+    from harness import cli
+
+    agent_path = _write_cli_agent(tmp_path / "agent.yaml")
+    runs_root = tmp_path / "runs"
+    monkeypatch.setenv("BENCHMARK_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("BENCHMARK_TOKEN", "secret")
+    runner = CliRunner()
+    args = [
+        "tsec",
+        "--agent",
+        str(agent_path),
+        "--runs-root",
+        str(runs_root),
+        "--all",
+    ]
+
+    async def platform_down(**_kwargs):
+        raise TSecPlatformError(kind="vpn_unreachable", detail="health check timed out")
+
+    monkeypatch.setattr(cli, "run_tsec_challenges", platform_down)
+    outage = runner.invoke(cli.app, args)
+    assert outage.exit_code == 3
+    assert "do not retry this sweep in a loop" in outage.stderr
+
+    async def partial_failure(*, summary_out, **_kwargs):
+        summary_out.parent.mkdir(parents=True, exist_ok=True)
+        summary_out.write_text(
+            json.dumps({"failures": [{"case_id": "WEB-001"}]}), encoding="utf-8"
+        )
+        return []
+
+    monkeypatch.setattr(cli, "run_tsec_challenges", partial_failure)
+    incomplete = runner.invoke(cli.app, args)
+    assert incomplete.exit_code == 4
+    assert "did not produce a run" in incomplete.stderr
+
+    async def clean(*, summary_out, **_kwargs):
+        summary_out.parent.mkdir(parents=True, exist_ok=True)
+        summary_out.write_text(json.dumps({"failures": []}), encoding="utf-8")
+        return []
+
+    monkeypatch.setattr(cli, "run_tsec_challenges", clean)
+    assert runner.invoke(cli.app, args).exit_code == 0
+
+
+class ConcurrentRunner(FakeBenchmarkRunner):
+    active = 0
+    peak = 0
+
+    async def run_case(self, *, case, budgets, **kwargs):
+        type(self).active += 1
+        type(self).peak = max(type(self).peak, type(self).active)
+        try:
+            await asyncio.sleep(0.01)
+            return await super().run_case(case=case, budgets=budgets, **kwargs)
+        finally:
+            type(self).active -= 1
+
+
+def test_run_tsec_challenges_bounds_concurrency_to_the_parallel_limit(
     monkeypatch, tmp_path: Path
 ) -> None:
     _reset_probe()
@@ -1216,3 +1537,79 @@ def test_tsec_adapter_immediate_hint_is_not_requested_again_by_the_threshold() -
         assert "hint_error" not in session.metadata
 
     asyncio.run(scenario())
+
+
+class MetricsRunner(FakeBenchmarkRunner):
+    """A runner whose result carries the run metric block the sweep aggregates."""
+
+    async def run_case(self, *, case, budgets, **kwargs):
+        result = await super().run_case(case=case, budgets=budgets, **kwargs)
+        result["metrics"] = {
+            "duration_ms": 600000,
+            "model_calls": 16,
+            "tool_calls": 20,
+            "submissions_attempted": 1,
+            "first_submission_ms": 594000,
+            "submitted_at_fraction": 0.99,
+            "steer_counts": {
+                "world": 3,
+                "verification": 0,
+                "repetition": 1,
+                "budget": 1,
+                "finalize": 0,
+            },
+            "tool_time_ms": 123456,
+            "context_tokens_final": 20583,
+        }
+        return result
+
+
+def test_sweep_summary_carries_the_run_metrics(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", MetricsRunner)
+    summary = tmp_path / "sweep.json"
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=600),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+            seed=1,
+            summary_out=summary,
+        )
+    )
+
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    case = payload["cases"][0]
+    assert case["first_submission_ms"] == 594000
+    assert case["submitted_at_fraction"] == 0.99
+    assert case["steer_counts"]["world"] == 3
+    assert case["tool_time_ms"] == 123456
+    assert case["context_tokens_final"] == 20583
+
+
+def test_sweep_summary_defaults_missing_metrics_to_zero(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+    summary = tmp_path / "sweep.json"
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=600),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+            seed=1,
+            summary_out=summary,
+        )
+    )
+
+    case = json.loads(summary.read_text(encoding="utf-8"))["cases"][0]
+    assert case["first_submission_ms"] is None
+    assert case["submitted_at_fraction"] is None
+    assert case["steer_counts"] == {}
+    assert case["tool_time_ms"] == 0
+    assert case["context_tokens_final"] == 0

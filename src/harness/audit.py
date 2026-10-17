@@ -385,6 +385,7 @@ def audit_run(run_dir: str | Path) -> AuditReport:
         "verified": 0,
         "contradicted": 0,
         "pending": 0,
+        "unavailable": 0,
         "untraceable_verdicts": 0,
         "objective_verdicts": 0,
         "events": len(unique),
@@ -454,7 +455,7 @@ def audit_run(run_dir: str | Path) -> AuditReport:
             )
         if kind == "action.verified":
             status = data.get("status")
-            if status in {"verified", "contradicted", "pending"}:
+            if status in {"verified", "contradicted", "pending", "unavailable"}:
                 counts[status] += 1
                 evidence = data.get("evidence")
                 if status == "verified" and (

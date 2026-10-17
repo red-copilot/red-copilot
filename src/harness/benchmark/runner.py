@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import contextlib
 import math
 import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,8 +22,9 @@ from ..session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
 from ..solver_loop import missing_summary_sections
 from .base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
+from ..verification import ObservationRecord
 from ..budget import FINALIZE_GRACE_SECONDS, UsageMetrics, enforced_budget_limits
-from ..progress import ProgressLedger
+from ..progress import SLOW_TOOL_CALLS, ProgressLedger, empty_steer_counts
 from ..runtime import SolverRuntime, bootstrap_solver
 from ..runtime.executors import (
     ExecutorSessionPlan,
@@ -36,7 +39,7 @@ from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
 from ..runtime.evidence import persist_objective_verdict
 from ..runtime.lifecycle import RunLifecycle, resolve_run_status
 from ..runtime.projections import finalize_world_goal, network_result, run_summary, world_result
-from ..runtime.results import persist_run_result
+from ..runtime.results import persist_run_result, submission_fraction
 from ..world import (
     Entity,
     Failure,
@@ -51,6 +54,11 @@ from .protocol import SubmissionInbox
 
 SubmissionExtractor = Callable[[AgentResult], list[Submission]]
 BENCHMARK_TEARDOWN_TIMEOUT_SECONDS = 30.0
+# Externally evaluated benchmarks score only through submitted candidates, so a
+# run that has burned half its wall clock without a single submission is steered
+# once to consolidate what it holds or change attack surface instead of grinding
+# the same path to the deadline.
+BENCHMARK_SUBMISSION_DUE_FRACTION = 0.5
 
 
 async def _evaluate_benchmark(
@@ -101,6 +109,7 @@ class _ExecutorRuntime:
     status: str = "pending"
     completed: bool = False
     submissions: int = 0
+    first_submission_at: float | None = None
     summary_missing_sections: list[str] = field(default_factory=list)
     retired_results: list[AgentResult] = field(default_factory=list)
     restarts: int = 0
@@ -114,6 +123,53 @@ def _summary_key(key: tuple[str | None, str | None, str | None]) -> tuple[str, s
         "" if provider is None else provider,
         "" if model is None else model,
     )
+
+
+def _first_submission_ms(
+    runtimes: Sequence[_ExecutorRuntime], started: float
+) -> int | None:
+    """Milliseconds from run start to the first submitted candidate, or ``None``."""
+    stamps = [
+        item.first_submission_at
+        for item in runtimes
+        if item.first_submission_at is not None
+    ]
+    if not stamps:
+        return None
+    return max(0, int((min(stamps) - started) * 1000))
+
+
+
+def _merged_loop_metrics(runtimes: Sequence[_ExecutorRuntime]) -> dict[str, Any]:
+    """Fold per-session solver metrics into the run-level metric block.
+
+    Competing sessions each own a loop; the run reports the sum of their tool
+    time and steer volume, the largest final context, and the slowest calls
+    across sessions. This is the vocabulary `harness report` and the sweep
+    summary read, so it stays flat and bounded.
+    """
+    steer_counts = empty_steer_counts()
+    tool_calls = tool_failures = tool_time_ms = context_tokens_final = 0
+    slow: list[dict[str, Any]] = []
+    for item in runtimes:
+        snapshot = item.runtime.loop.metrics_snapshot()
+        for bucket, count in snapshot["steer_counts"].items():
+            if bucket in steer_counts:
+                steer_counts[bucket] += count
+        tool_calls += int(snapshot["tool_calls"])
+        tool_failures += int(snapshot["tool_failures"])
+        tool_time_ms += int(snapshot["tool_time_ms"])
+        context_tokens_final = max(context_tokens_final, int(snapshot["context_tokens_final"]))
+        slow.extend(snapshot["slow_tool_calls"])
+    slow.sort(key=lambda entry: entry["duration_ms"], reverse=True)
+    return {
+        "steer_counts": steer_counts,
+        "tool_calls": tool_calls,
+        "tool_failures": tool_failures,
+        "tool_time_ms": tool_time_ms,
+        "slow_tool_calls": slow[:SLOW_TOOL_CALLS],
+        "context_tokens_final": context_tokens_final,
+    }
 
 
 def _executor_summary(runtimes: Sequence[_ExecutorRuntime]) -> list[dict[str, Any]]:
@@ -494,28 +550,32 @@ class BenchmarkRunner:
             )
         run_id = f"{case.benchmark}_{case.id}_{uuid.uuid4().hex[:8]}"
         run_dir = (self.runs_root / run_id).resolve()
-        run_dir.mkdir(parents=True, exist_ok=False)
-        plan = plan_executor_sessions(agent=agent, budgets=budgets, run_dir=run_dir)
-        prepare_executor_directories(plan)
-        if seed_notes_from is not None:
-            for planned_session in plan.sessions:
-                seed_notes_from_summary(
-                    workspace=planned_session.workspace,
-                    previous_run_dir=seed_notes_from,
-                )
-        shared_findings = prepare_shared_findings(plan)
-        archive = FindingsArchive(run_dir=run_dir) if plan.competing else None
-        trace = TraceRecorder(run_dir / "trace.jsonl", run_id, case.id)
+        # Provision before anything touches the disk. A refused start (platform
+        # outage, closed challenge, instance cap) must not leave an empty run
+        # directory behind, and a setup failure after a successful start must
+        # not leak the challenge instance.
+        session = await adapter.provision(case)
         try:
-            session = await adapter.provision(case)
-        except Exception as exc:
-            trace.emit(
-                "benchmark.provision.error",
-                data={
-                    "error_type": type(exc).__name__,
-                    "message": "benchmark provision failed; details omitted",
-                },
-            )
+            run_dir.mkdir(parents=True, exist_ok=False)
+            plan = plan_executor_sessions(agent=agent, budgets=budgets, run_dir=run_dir)
+            prepare_executor_directories(plan)
+            if seed_notes_from is not None:
+                for planned_session in plan.sessions:
+                    seed_notes_from_summary(
+                        workspace=planned_session.workspace,
+                        previous_run_dir=seed_notes_from,
+                    )
+            shared_findings = prepare_shared_findings(plan)
+            archive = FindingsArchive(run_dir=run_dir) if plan.competing else None
+            trace = TraceRecorder(run_dir / "trace.jsonl", run_id, case.id)
+        except BaseException:
+            # Bounded like the terminal teardown: a refused setup must not turn
+            # into a hung sweep, and the setup error is the one that matters.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    adapter.teardown(session),
+                    timeout=BENCHMARK_TEARDOWN_TIMEOUT_SECONDS,
+                )
             raise
         lifecycle = RunLifecycle()
         lifecycle.transition("running")
@@ -630,6 +690,10 @@ class BenchmarkRunner:
                     max_unconfirmed_progress=max_unconfirmed_progress,
                     hint_request=hint_request,
                     hint_threshold=hint_threshold,
+                    finalize_requests_submission=True,
+                    submission_due_fraction=BENCHMARK_SUBMISSION_DUE_FRACTION,
+                    quiet_world_steers=True,
+                    verdict_steers_only=True,
                     world_repository_factory=(
                         (lambda _path, shared=world: shared) if attach else SQLiteWorldRepository
                     ),
@@ -763,6 +827,8 @@ class BenchmarkRunner:
             if key in submitted_keys:
                 return False
             submitted_keys.add(key)
+            if executor is not None and executor.first_submission_at is None:
+                executor.first_submission_at = time.monotonic()
             evaluation = None
             trace.emit(
                 "benchmark.submission.proposed",
@@ -798,6 +864,35 @@ class BenchmarkRunner:
             data["value_sha256"] = submission_digest
             submission_results.append(data)
             trace.emit("benchmark.submission.result", data=data)
+            # The platform verdict is the one thing in a benchmark run that the
+            # Harness observes for itself. Recording it gives every session a
+            # comparison baseline for its next action verdict instead of the
+            # Agent's own expected-observation text (VER-05).
+            for observing in runtimes:
+                note_verdict = getattr(observing.runtime.loop, "note_observation", None)
+                if not callable(note_verdict):
+                    continue
+                try:
+                    note_verdict(
+                            ObservationRecord(
+                                observation_id=f"submission:{submission_digest[:16]}",
+                                run_id=trace.run_id,
+                                producer="benchmark_evaluator",
+                                captured_at=datetime.now(UTC),
+                                world_revision=world.snapshot.revision,
+                                kind="benchmark.submission.verdict",
+                                summary=(
+                                    "platform "
+                                    f"{'accepted' if submitted.accepted else 'rejected'} "
+                                    f"a {submission.type} candidate "
+                                    f"(score delta {submitted.score_delta}, "
+                                    f"completed={submitted.completed})"
+                                ),
+                            )
+                        )
+                except (TypeError, ValueError):
+                    # Telemetry for the next verdict, never a control path.
+                    continue
             submission_completed = False
             if submitted.completed:
                 # The submission response is an intermediate signal. Stop only
@@ -1182,6 +1277,8 @@ class BenchmarkRunner:
         report_executor = next(
             (item for item in runtimes if item.completed), runtimes[0]
         )
+        duration_ms = int((time.monotonic() - started) * 1000)
+        first_submission_ms = _first_submission_ms(runtimes, started)
         summary = run_summary(
             world=world,
             progress=progress,
@@ -1246,8 +1343,22 @@ class BenchmarkRunner:
             "network": network_result(agent),
             "progress": progress.model_dump(mode="json"),
             "metrics": {
-                "duration_ms": int((time.monotonic() - started) * 1000),
+                "duration_ms": duration_ms,
                 **agent_result.metrics.as_dict(),
+                # Attempted candidates, not accepted ones: a run that never
+                # submitted anything fails differently from a run whose guesses
+                # were rejected, and the sweep summary needs that distinction.
+                "submissions_attempted": sum(item.submissions for item in runtimes),
+                "first_submission_ms": first_submission_ms,
+                # Where in the wall clock the first candidate went out: the
+                # winning TSec runs of 2026-10-16 submitted at 0.99, i.e. the
+                # platform verdict arrived after their own window had closed.
+                "submitted_at_fraction": submission_fraction(
+                    first_submission_ms, duration_ms
+                ),
+                # Steer volume by bucket, tool time and the final prompt size:
+                # the three numbers the sweep review had to recompute by hand.
+                **_merged_loop_metrics(runtimes),
             },
         }
         restart_briefs = [

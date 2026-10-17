@@ -11,10 +11,70 @@ class TSecAdapterError(RuntimeError):
     pass
 
 
+# Platform-level failures the operator has to fix before a sweep can run: the
+# VPN is down, the control plane is unreachable (DNS or transport), or the team
+# already holds its three running instances. They are deliberately *not*
+# retried in a loop: the 2026-10-16 sweep burned thirty attempts on exactly
+# these three states, and each attempt still spawned run directories.
+PLATFORM_FAILURE_VPN = "vpn_unreachable"
+PLATFORM_FAILURE_UNREACHABLE = "platform_unreachable"
+PLATFORM_FAILURE_INSTANCES = "instance_conflict"
+
+# Transport-level exception class names reported by httpx/httpcore and the SDK.
+_TRANSPORT_ERROR_NAMES = frozenset(
+    {
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "ReadError",
+        "WriteError",
+        "RemoteProtocolError",
+        "TimeoutException",
+        "TransportError",
+        "gaierror",
+    }
+)
+
+
+class TSecPlatformError(TSecAdapterError):
+    """A platform-wide failure that a blind retry cannot clear."""
+
+    def __init__(self, *, kind: str, detail: str | None = None) -> None:
+        self.kind = kind
+        self.detail = detail
+        super().__init__(f"{kind}: {detail}" if detail else kind)
+
+
+def classify_platform_failure(exc: BaseException) -> str | None:
+    """Map an SDK failure onto a platform-wide kind, or ``None`` when case-local.
+
+    Matching is by exception class name and message text so the harness never
+    imports the optional SDK on a path that only classifies errors.
+    """
+    name = type(exc).__name__
+    text = str(exc)
+    if name == "VpnCheckError" or "VPN" in text:
+        return PLATFORM_FAILURE_VPN
+    if name == "InvalidState" and "max active challenge instances" in text:
+        return PLATFORM_FAILURE_INSTANCES
+    if name in {"TSecConnectionError"} or name in _TRANSPORT_ERROR_NAMES:
+        return PLATFORM_FAILURE_UNREACHABLE
+    if "name resolution" in text or "temporary failure in name resolution" in text.lower():
+        return PLATFORM_FAILURE_UNREACHABLE
+    return None
+
+
 TSEC_REQUESTS_PER_SECOND = 3.0
 TSEC_RATE_LIMIT_BURST = 3
 TSEC_INSTANCE_LIMIT = 3
 TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS = 1.0
+
+# Bound on the platform reachability gate that runs before any run directory
+# exists. The SDK's own VPN health check allows 10s; this leaves room for the
+# challenge listing on a slow tunnel.
+TSEC_PREFLIGHT_TIMEOUT_SECONDS = 45.0
 
 
 @dataclass(frozen=True)
@@ -89,8 +149,9 @@ class _InstanceRegistry:
                 f"challenge already has a running instance: {unique_code}"
             )
         if len(self._open) >= self._limit:
-            raise TSecAdapterError(
-                f"concurrent instance limit reached ({self._limit})"
+            raise TSecPlatformError(
+                kind=PLATFORM_FAILURE_INSTANCES,
+                detail=f"concurrent instance limit reached ({self._limit})",
             )
         self._open.add(unique_code)
 
@@ -158,6 +219,9 @@ class TSecClientAdapter:
 
     async def list_challenges(self):
         return await self._call(self._client.list_challenges)
+
+    async def check_vpn(self):
+        return await self._call(self._client.check_vpn)
 
     async def start_challenge(self, unique_code: str):
         self._registry.register(unique_code)

@@ -116,7 +116,7 @@ def test_benchmark_tears_down_provisioned_session_when_solver_bootstrap_fails(
 
     assert adapter.closed is True
     assert adapter.teardown_calls == 1
-def test_benchmark_provision_error_does_not_persist_exception_details(tmp_path: Path) -> None:
+def test_benchmark_provision_error_leaves_no_run_directory(tmp_path: Path) -> None:
     class FailingProvision(FakeBenchmarkAdapter):
         async def provision(self, _case):
             raise RuntimeError("sensitive opaque provider payload provision-secret-canary")
@@ -136,9 +136,14 @@ def test_benchmark_provision_error_does_not_persist_exception_details(tmp_path: 
             )
         )
 
-    trace = next(tmp_path.glob("fake_CASE-PROVISION-ERROR_*/trace.jsonl"))
-    assert "RuntimeError" in trace.read_text(encoding="utf-8")
-    assert "provision-secret-canary" not in trace.read_text(encoding="utf-8")
+    # A refused start must leave nothing behind: the 2026-10-16 TSec sweep
+    # accumulated one empty run directory per selected challenge per attempt.
+    assert list(tmp_path.glob("fake_CASE-PROVISION-ERROR_*")) == []
+    assert "provision-secret-canary" not in "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )
 
 
 def test_benchmark_teardown_error_does_not_persist_exception_details(
@@ -430,7 +435,27 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert result["progress"]["skipped_verifications"] >= 0
     assert result["progress"]["last_verification"] is None
     assert result["progress"]["accepted_submissions"] == 1
+    assert result["progress"]["submissions_attempted"] == 1
     assert result["progress"]["objective_completed"] is True
+    # A scored run has to be able to say "we never tried" apart from "we were
+    # wrong"; the sweep summary and the run metrics both read this pair.
+    assert result["metrics"]["submissions_attempted"] == 1
+    assert isinstance(result["metrics"]["first_submission_ms"], int)
+    # The run-level metric block answers "how much did the loop talk to the
+    # Agent, how long did tools block it, and how big was the final prompt"
+    # without re-parsing the trace.
+    assert result["metrics"]["steer_counts"] == {
+        "world": 0,
+        "verification": 0,
+        "repetition": 0,
+        "budget": 0,
+        "finalize": 0,
+    }
+    assert result["metrics"]["tool_calls"] == 0
+    assert result["metrics"]["tool_time_ms"] == 0
+    assert result["metrics"]["context_tokens_final"] == 0
+    assert result["metrics"]["slow_tool_calls"] == []
+    assert 0.0 <= result["metrics"]["submitted_at_fraction"] <= 1.0
     assert result["world"]["revision"] >= 2
     context = next(tmp_path.glob("fake_CASE-1_*/world.context.txt")).read_text(encoding="utf-8")
     assert "obs-live" in context
@@ -529,11 +554,29 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
     assert result["progress"]["objective_completed"] is False
     assert result["progress"]["completion_claims"] == ["goal:CASE-MALICIOUS:objective"]
     assert result["progress"]["objective_verdict"]["status"] == "contradicted"
-    assert result["progress"]["last_verification"]["status"] == "pending"
+    # A benchmark run has no independent observation to compare an action
+    # against, so the honest verdict is "unavailable": recorded, never steered,
+    # never mistaken for progress or for a stall (VER-05).
+    assert result["progress"]["last_verification"]["status"] == "unavailable"
+    assert result["progress"]["last_verification"]["replan_required"] is False
+    assert result["progress"]["unavailable_actions"] >= 1
     assert fake_agent.session is not None
+    # Steering on a non-verdict is noise; it stays recorded in the progress
+    # ledger and the trace but is no longer injected into the session.
+    assert not any(
+        item.type == "solver.verification" for item in fake_agent.session.feedback
+    )
+    verdicts = [
+        json.loads(line)
+        for line in (tmp_path / result["run_id"] / "trace.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
     assert any(
-        item.type == "solver.verification" and item.data["status"] == "pending"
-        for item in fake_agent.session.feedback
+        item.get("type") == "action.verified"
+        and item.get("data", {}).get("status") == "unavailable"
+        for item in verdicts
     )
     audit = audit_run(tmp_path / result["run_id"])
     assert audit.status == "incomplete"
@@ -594,3 +637,267 @@ def test_checkpoint_keeps_dispatched_action_pending_after_stream_crash(
         from harness.runtime.checkpoint import load_recovery_state
 
         load_recovery_state(run_dir)
+
+
+def test_gc_runs_reports_and_removes_only_artifact_free_run_directories(
+    tmp_path: Path,
+) -> None:
+    from typer.testing import CliRunner
+
+    from harness.cli import app
+    from harness.runtime.results import find_empty_run_dirs
+
+    empty_run = tmp_path / "tsec_a-01_deadbeef"
+    (empty_run / "agent-workspace" / "notes").mkdir(parents=True)
+    traced_run = tmp_path / "tsec_a-02_cafebabe"
+    traced_run.mkdir()
+    (traced_run / "trace.jsonl").write_text("", encoding="utf-8")
+    finished_run = tmp_path / "tsec_a-03_0123abcd"
+    finished_run.mkdir()
+    (finished_run / "result.json").write_text("{}", encoding="utf-8")
+
+    assert find_empty_run_dirs(tmp_path) == [empty_run]
+
+    runner = CliRunner()
+    dry = runner.invoke(app, ["gc-runs", "--root", str(tmp_path)])
+    assert dry.exit_code == 0
+    assert str(empty_run) in dry.stdout
+    assert "dry run" in dry.stderr
+    assert empty_run.exists()
+
+    applied = runner.invoke(app, ["gc-runs", "--root", str(tmp_path), "--apply"])
+    assert applied.exit_code == 0
+    assert not empty_run.exists()
+    assert traced_run.exists() and finished_run.exists()
+
+
+def test_report_prints_the_loop_health_block(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from harness.cli import app
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "harness/result/v2",
+                "run_id": "run-1",
+                "status": "finished",
+                "success": False,
+                "score": 0.0,
+                "metrics": {
+                    "duration_ms": 1800000,
+                    "submissions_attempted": 0,
+                    "first_submission_ms": None,
+                    "submitted_at_fraction": None,
+                    "steer_counts": {
+                        "world": 99,
+                        "verification": 39,
+                        "repetition": 3,
+                        "budget": 3,
+                        "finalize": 1,
+                    },
+                    "tool_time_ms": 813000,
+                    "tool_calls": 96,
+                    "tool_failures": 12,
+                    "context_tokens_final": 44311,
+                    "slow_tool_calls": [
+                        {"tool": "bash", "duration_ms": 900000, "tool_call_id": "c1"},
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output = CliRunner().invoke(app, ["report", str(run_dir)]).stdout
+
+    assert "run metrics:" in output
+    assert "candidates attempted: 0" in output
+    assert "submitted: never" in output
+    assert "world=99" in output
+    assert "verification=39" in output
+    assert "813000 ms over 96 calls (12 failed)" in output
+    assert "44311 tokens" in output
+    assert "bash 900000 ms" in output
+
+
+def test_report_tolerates_a_result_without_metrics(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from harness.cli import app
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "result.json").write_text(
+        json.dumps({"schema_version": "harness/result/v2", "run_id": "old"}),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["report", str(run_dir)])
+
+    assert result.exit_code == 0
+    assert "run metrics:" not in result.stdout
+
+
+def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path: Path) -> None:
+    """Pin the defaults the failure shape of 2026-10-16 depends on.
+
+    Fifteen losing runs submitted nothing and spent turns on feedback they could
+    not act on; the benchmark path has to keep asking for a submission at the
+    soft limit and stop echoing zero-information steers.
+    """
+    import harness.benchmark.runner as runner_module
+
+    captured: list[dict] = []
+    real_bootstrap = runner_module.bootstrap_solver
+
+    def spy(*args, **kwargs):
+        captured.append(kwargs)
+        return real_bootstrap(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "bootstrap_solver", spy)
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: FakeAgentAdapter(),
+    )
+
+    asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-SWITCHES", benchmark="fake"),
+            agent=AgentSpec.model_validate(
+                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
+            ),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+            allow_host_agent=True,
+        )
+    )
+
+    assert captured, "the benchmark run must compose a solver runtime"
+    for kwargs in captured:
+        assert kwargs["finalize_requests_submission"] is True
+        assert kwargs["submission_due_fraction"] == runner_module.BENCHMARK_SUBMISSION_DUE_FRACTION
+        assert kwargs["quiet_world_steers"] is True
+        assert kwargs["verdict_steers_only"] is True
+
+
+class RejectingBenchmarkAdapter(FakeBenchmarkAdapter):
+    """The platform refuses the candidate: the one real mid-run signal there is."""
+
+    async def submit(self, _session, submission):
+        self.submissions.append(submission.value)
+        return SubmissionResult(
+            accepted=False,
+            score_delta=0,
+            completed=False,
+            metadata={"correct_flag_count": 0, "total_flag_count": 1},
+        )
+
+
+class ObservationSession(FakeSession):
+    """Runs a tool call, submits a candidate, then keeps working."""
+
+    async def events(self):
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="action.intent",
+            data={
+                "description": "probe the admin endpoint",
+                "expected_observations": ["admin endpoint reachable"],
+            },
+        )
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="tool.call",
+            data={"tool": "bash", "tool_call_id": "call-obs", "args_family": "bash:curl"},
+        )
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="tool.result",
+            data={
+                "tool": "bash",
+                "tool_call_id": "call-obs",
+                "duration_ms": 10,
+                "is_error": False,
+                "exit_code": 0,
+            },
+        )
+        (self.run_dir / "submission.inbox.jsonl").write_text(
+            json.dumps({"type": "flag", "value": "flag{guess}"}) + "\n",
+            encoding="utf-8",
+        )
+        self.checkpoint_calls += 1
+        yield AgentEvent(type="progress.updated", data={"step": 2, "made_progress": True})
+        # Keep working after the rejected candidate: the next action is the one
+        # the platform verdict can speak for.
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="tool.call",
+            data={"tool": "bash", "tool_call_id": "call-obs-2", "args_family": "bash:curl"},
+        )
+        self.checkpoint_calls += 1
+        yield AgentEvent(
+            type="tool.result",
+            data={
+                "tool": "bash",
+                "tool_call_id": "call-obs-2",
+                "duration_ms": 20,
+                "is_error": False,
+                "exit_code": 0,
+            },
+        )
+
+
+class ObservationAgentAdapter(FakeAgentAdapter):
+    async def start_session(self, context, **_kwargs):
+        self.session = ObservationSession(context.run_dir)
+        return self.session
+
+
+def test_platform_verdict_is_the_comparison_baseline_for_the_next_action(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """VER-05: the Harness compares against what it saw, not what the Agent said."""
+    import harness.benchmark.runner as runner_module
+
+    fake_agent = ObservationAgentAdapter()
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: fake_agent,
+    )
+
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=RejectingBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-OBS", benchmark="fake"),
+            agent=AgentSpec.model_validate(
+                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
+            ),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+            allow_host_agent=True,
+        )
+    )
+
+    verification = result["progress"]["last_verification"]
+    assert verification is not None
+    assert verification["status"] == "pending"
+    assert verification["replan_required"] is False
+    assert "observation_recorded" in verification["replan_reasons"]
+    observation = verification["observation"]
+    assert observation["producer"] == "benchmark_evaluator"
+    assert observation["kind"] == "benchmark.submission.verdict"
+    assert "rejected" in observation["summary"]
+    assert verification["actual_observation"] == observation["summary"]
+    # A non-verdict is recorded, never steered.
+    assert fake_agent.session is not None
+    assert not any(
+        item.type == "solver.verification" for item in fake_agent.session.feedback
+    )

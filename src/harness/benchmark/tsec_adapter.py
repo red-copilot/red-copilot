@@ -8,6 +8,7 @@ import time
 import typing
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ..agent import AgentResult
@@ -25,7 +26,14 @@ from .base import (
     SubmissionResult,
 )
 from .runner import BenchmarkRunner
-from .tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig
+from .tsec_client import (
+    TSEC_PREFLIGHT_TIMEOUT_SECONDS,
+    TSecAdapterError,
+    TSecClientAdapter,
+    TSecConfig,
+    TSecPlatformError,
+    classify_platform_failure,
+)
 
 # One managed evaluation task may run for up to eight hours. The local wall
 # clock is capped at the platform's task limit (not the historical one-hour
@@ -40,6 +48,196 @@ DISPATCH_FLOOR_SECONDS = 300
 
 def _is_sdk_error(exc: Exception, name: str) -> bool:
     return type(exc).__name__ == name
+
+
+# Run-directory name shape used by ``BenchmarkRunner``: ``<benchmark>_<case>_<hex8>``.
+_RUN_ID_RE = re.compile(r"^(?P<benchmark>[a-z0-9]+)_(?P<case>.+)_(?P<digest>[0-9a-f]{8})$")
+_SWEEP_SUMMARY_SCHEMA = "harness/tsec-sweep/v1"
+
+
+def _write_sweep_summary(
+    path: str | Path | None,
+    *,
+    runs_root: Path,
+    selected: list[BenchmarkCase],
+    skipped: list[dict],
+    failures: list[dict],
+    results: dict[str, dict],
+    parallel: int,
+    started_at: datetime,
+    platform_error: TSecPlatformError | None,
+) -> None:
+    """Persist the per-case sweep tally the operator reads instead of the log.
+
+    The stdout JSON stays the run-result list; this artifact is what answers
+    "which cases ran, which were skipped, which failed and why" in one file.
+    Failure records carry a class or a classified kind and never carry the
+    platform message, so a credential-bearing payload cannot land here.
+    """
+    if path is None:
+        return
+    cases: list[dict[str, typing.Any]] = []
+    for case in selected:
+        result = results.get(case.id)
+        if result is None:
+            continue
+        metrics = result.get("metrics") or {}
+        cases.append(
+            {
+                "case_id": case.id,
+                "run_id": result.get("run_id"),
+                "status": result.get("status"),
+                "success": bool(result.get("success")),
+                "score": float(result.get("score") or 0.0),
+                "submissions_attempted": int(metrics.get("submissions_attempted") or 0),
+                # Timing and loop traffic travel with the case so the operator
+                # reads one file instead of re-deriving them from traces with
+                # hand-written jq, which is what the second review round did.
+                "first_submission_ms": metrics.get("first_submission_ms"),
+                "submitted_at_fraction": metrics.get("submitted_at_fraction"),
+                "steer_counts": metrics.get("steer_counts") or {},
+                "tool_time_ms": int(metrics.get("tool_time_ms") or 0),
+                "context_tokens_final": int(metrics.get("context_tokens_final") or 0),
+                "duration_s": round(float(metrics.get("duration_ms") or 0) / 1000, 1),
+                "model_calls": int(metrics.get("model_calls") or 0),
+                "tool_calls": int(metrics.get("tool_calls") or 0),
+            }
+        )
+    payload = {
+        "schema_version": _SWEEP_SUMMARY_SCHEMA,
+        "started_at": started_at.isoformat(),
+        "finished_at": datetime.now(UTC).isoformat(),
+        "runs_root": str(runs_root),
+        "parallel": parallel,
+        "selected": [case.id for case in selected],
+        "cases": cases,
+        "skipped": skipped,
+        "failures": failures,
+        "platform_error": (
+            {"kind": platform_error.kind, "detail": platform_error.detail}
+            if platform_error is not None
+            else None
+        ),
+        "tallies": {
+            "selected": len(selected),
+            "completed": sum(
+                1 for result in results.values() if result.get("success") is True
+            ),
+            "skipped": len(skipped),
+            "failed": len(failures),
+        },
+    }
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(target)
+
+
+async def _platform_preflight(
+    client: TSecClientAdapter,
+    *,
+    timeout: float = TSEC_PREFLIGHT_TIMEOUT_SECONDS,
+) -> None:
+    """Fail closed on a platform-wide outage before any run directory exists.
+
+    The SDK's own context entry already checks the VPN; this gate re-checks it
+    under one bound and adds the challenge listing every sweep needs anyway, so
+    a dead tunnel or a broken resolver costs one bounded attempt instead of one
+    empty run directory per selected challenge.
+    """
+    try:
+        async with asyncio.timeout(timeout):
+            await client.check_vpn()
+            await client.list_challenges()
+    except TimeoutError as exc:
+        raise TSecPlatformError(
+            kind="platform_unreachable",
+            detail=f"platform preflight exceeded {timeout:.0f}s",
+        ) from exc
+    except Exception as exc:
+        kind = classify_platform_failure(exc)
+        if kind is None:
+            raise
+        raise TSecPlatformError(kind=kind, detail=_platform_error_detail(exc)) from exc
+
+
+def _platform_error_detail(exc: BaseException) -> str:
+    """A short, credential-free summary of a platform failure."""
+    text = str(exc).strip().splitlines()
+    return (text[0] if text else type(exc).__name__)[:200]
+
+
+def _case_from_run_id(name: str) -> str | None:
+    match = _RUN_ID_RE.match(name)
+    return match.group("case") if match else None
+
+
+def _read_result_summary(path: Path) -> dict[str, typing.Any] | None:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if len(text) > 4 * 1024 * 1024:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def locally_solved_cases(runs_root: str | Path, benchmark: str = "tsec") -> dict[str, str]:
+    """Map case ids with a completed local run to the run directory that solved them.
+
+    A sweep restarted after an outage must not re-spend an hour re-solving a
+    challenge that already has an authoritative ``objective_completed`` result.
+    """
+    solved: dict[str, str] = {}
+    root = Path(runs_root)
+    if not root.is_dir():
+        return solved
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        case_id = _case_from_run_id(entry.name)
+        if case_id is None or not entry.name.startswith(f"{benchmark}_"):
+            continue
+        payload = _read_result_summary(entry / "result.json")
+        if payload is None:
+            continue
+        if payload.get("status") == "objective_completed" or payload.get("success") is True:
+            solved.setdefault(case_id, entry.name)
+    return solved
+
+
+def _latest_attempt_summary(
+    runs_root: str | Path,
+    case_id: str,
+    benchmark: str = "tsec",
+) -> Path | None:
+    """Newest previous attempt directory for a case that left an Agent report."""
+    root = Path(runs_root)
+    if not root.is_dir():
+        return None
+    candidates: list[tuple[float, Path]] = []
+    for entry in root.iterdir():
+        if not entry.is_dir() or not entry.name.startswith(f"{benchmark}_"):
+            continue
+        if _case_from_run_id(entry.name) != case_id:
+            continue
+        summary = entry / "agent-workspace" / "agent.summary.md"
+        if not summary.is_file():
+            continue
+        try:
+            candidates.append((summary.stat().st_mtime, entry))
+        except OSError:
+            continue
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 class TSecBenchmarkAdapter(BenchmarkAdapter):
@@ -431,8 +629,17 @@ async def run_tsec_challenges(
     max_passes: int = 1,
     max_wall_time_seconds: int | None = None,
     seed_notes_from: str | Path | None = None,
+    preflight: bool = True,
+    resume: bool = True,
+    summary_out: str | Path | None = None,
 ) -> list[dict]:
-    """Run selected TSec challenges through the generic benchmark runtime."""
+    """Run selected TSec challenges through the generic benchmark runtime.
+
+    A declared wall clock is honoured up to the managed evaluation ceiling.
+    ``max_wall_time_seconds`` remains an optional operator safety valve.
+    Multi-pass retries incomplete cases, while a platform-wide failure stops
+    further dispatch and still writes the partial sweep summary.
+    """
 
     if parallel is not None:
         if parallel < 1:
@@ -453,33 +660,91 @@ async def run_tsec_challenges(
     if max_wall_time_seconds is not None and max_wall_time_seconds < 1:
         raise TSecAdapterError("max_wall_time_seconds must be at least 1")
 
-    results: list[dict] = []
     wall_time = min(budgets.wall_time, MAX_EVALUATION_WALL_TIME_SECONDS)
     if max_wall_time_seconds is not None:
         wall_time = min(wall_time, max_wall_time_seconds)
-    effective_budgets = budgets.model_copy(
-        update={"wall_time": wall_time}
-    )
-    runner = BenchmarkRunner(runs_root=runs_root)
+    effective_budgets = budgets.model_copy(update={"wall_time": wall_time})
+    root = Path(runs_root)
+    runner = BenchmarkRunner(runs_root=root)
+    started_at_dt = datetime.now(UTC)
+    started_at = time.monotonic()
+    skipped: list[dict] = []
+    failures: list[dict] = []
+    selected: list[BenchmarkCase] = []
+    raw_by_case: dict[str, dict] = {}
+    results: list[dict] = []
+    platform_failure: TSecPlatformError | None = None
+
+    def emit_summary(platform_error: TSecPlatformError | None) -> None:
+        _write_sweep_summary(
+            summary_out,
+            runs_root=root,
+            selected=selected,
+            skipped=skipped,
+            failures=failures,
+            results=raw_by_case,
+            parallel=concurrency,
+            started_at=started_at_dt,
+            platform_error=platform_error,
+        )
+
+    def attempt_seed(case_id: str) -> Path | None:
+        if seed_notes_from is not None:
+            return Path(seed_notes_from)
+        return _latest_attempt_summary(root, case_id)
+
     try:
         async with _tsec_client(config) as client:
+            if preflight:
+                await _platform_preflight(client)
             adapter = TSecBenchmarkAdapter(
                 client,
                 use_hint=use_hint,
                 start_retries=start_retries,
                 retry_delay=retry_delay,
             )
-            # Multi-pass: a failed or timed-out attempt does not forfeit the
-            # challenge for the whole evaluation. After each pass the case
-            # list is re-fetched (completed flags move server-side), and any
-            # still-open cases are retried until the window runs out.
-            started_at = time.monotonic()
-            zero_score_passes = 0
+            discovered = await adapter.discover()
+            if challenge_code and not any(
+                case.id == challenge_code for case in discovered
+            ):
+                raise TSecAdapterError(f"challenge not found: {challenge_code}")
+
+            selected = [
+                case
+                for case in discovered
+                if not bool(case.metadata.get("is_completed"))
+                and (run_all or challenge_code is None or case.id == challenge_code)
+            ]
+            if not run_all and challenge_code is None:
+                selected = selected[:1]
+
+            # An explicitly named challenge is an explicit request to run it
+            # now; a sweep skips cases already solved locally.
+            solved_cases: dict[str, str] = {}
+            if resume and challenge_code is None:
+                solved_cases = locally_solved_cases(root)
+                remaining: list[BenchmarkCase] = []
+                for case in selected:
+                    run_id = solved_cases.get(case.id)
+                    if run_id is None:
+                        remaining.append(case)
+                        continue
+                    skipped.append(
+                        {"case_id": case.id, "run_id": run_id, "reason": "local-success"}
+                    )
+                selected = remaining
+
+            if not selected:
+                emit_summary(None)
+                return results
+
             slots = asyncio.Semaphore(max(1, concurrency))
+            zero_score_passes = 0
 
             async def _run_case(index: int, case, pass_seed: int) -> dict:
+                nonlocal platform_failure
                 async with slots:
-                    budgets = effective_budgets
+                    case_budgets = effective_budgets
                     if total_wall_time is not None:
                         remaining = total_wall_time - (time.monotonic() - started_at)
                         if remaining <= DISPATCH_FLOOR_SECONDS + FINALIZE_GRACE_SECONDS:
@@ -491,8 +756,8 @@ async def run_tsec_challenges(
                                 "score": 0.0,
                                 "message": "evaluation window exhausted before dispatch",
                             }
-                        if budgets.wall_time > int(remaining):
-                            budgets = budgets.model_copy(
+                        if case_budgets.wall_time > int(remaining):
+                            case_budgets = case_budgets.model_copy(
                                 update={"wall_time": int(remaining)}
                             )
                     try:
@@ -500,19 +765,36 @@ async def run_tsec_challenges(
                             adapter=adapter,
                             case=case,
                             agent=agent,
-                            budgets=budgets,
+                            budgets=case_budgets,
                             seed=pass_seed + index,
                             submission_extractor=_extract_submissions,
                             allow_host_agent=allow_host_agent,
                             max_unconfirmed_progress=max_unconfirmed_progress,
                             hint_threshold=hint_threshold,
-                            seed_notes_from=(
-                                Path(seed_notes_from) if seed_notes_from else None
-                            ),
+                            seed_notes_from=attempt_seed(case.id),
                         )
-                    except Exception as exc:
-                        if _is_sdk_error(exc, "VpnCheckError"):
-                            raise
+                    except Exception as exc:  # noqa: BLE001 - classified below
+                        kind = classify_platform_failure(exc)
+                        failures.append(
+                            {
+                                "case_id": case.id,
+                                "failure_kind": kind or "case_error",
+                                "error_type": type(exc).__name__,
+                            }
+                        )
+                        if kind is not None:
+                            if platform_failure is None:
+                                platform_failure = TSecPlatformError(
+                                    kind=kind, detail=_platform_error_detail(exc)
+                                )
+                            return {
+                                "run_id": None,
+                                "benchmark": {"challenge": case.id, "case_id": case.id},
+                                "status": "error",
+                                "success": False,
+                                "score": 0.0,
+                                "message": f"platform failure: {kind}",
+                            }
                         return {
                             "run_id": None,
                             "benchmark": {"challenge": case.id, "case_id": case.id},
@@ -521,6 +803,7 @@ async def run_tsec_challenges(
                             "score": 0.0,
                             "message": f"case failed: {type(exc).__name__}",
                         }
+
                     evaluation = result.get("evaluation", {})
                     session_meta = result.get("benchmark", {}).get("session", {})
                     result["benchmark"].update(
@@ -549,46 +832,85 @@ async def run_tsec_challenges(
                     <= DISPATCH_FLOOR_SECONDS + FINALIZE_GRACE_SECONDS
                 ):
                     break
-                cases = await adapter.discover()
+                if pass_index:
+                    discovered = await adapter.discover()
                 if challenge_code and not any(
-                    case.id == challenge_code for case in cases
+                    case.id == challenge_code for case in discovered
                 ):
                     raise TSecAdapterError(f"challenge not found: {challenge_code}")
-
-                selected = [
+                pass_cases = [
                     case
-                    for case in cases
+                    for case in discovered
                     if not bool(case.metadata.get("is_completed"))
                     and (run_all or challenge_code is None or case.id == challenge_code)
                 ]
                 if not run_all and challenge_code is None:
-                    selected = selected[:1]
-                if not selected:
+                    pass_cases = pass_cases[:1]
+                if resume and challenge_code is None:
+                    pass_cases = [
+                        case for case in pass_cases if case.id not in solved_cases
+                    ]
+                if not pass_cases:
                     break
-                pass_results = list(
-                    await asyncio.gather(
-                        *(
-                            _run_case(index, case, seed + pass_index * 10_000)
-                            for index, case in enumerate(selected)
+                if concurrency == 1:
+                    pass_results = []
+                    dispatch_closed = False
+                    for index, case in enumerate(pass_cases):
+                        if dispatch_closed:
+                            failures.append(
+                                {
+                                    "case_id": case.id,
+                                    "failure_kind": "dispatch_aborted",
+                                }
+                            )
+                            pass_results.append(
+                                {
+                                    "run_id": None,
+                                    "benchmark": {
+                                        "challenge": case.id,
+                                        "case_id": case.id,
+                                    },
+                                    "status": "skipped",
+                                    "success": False,
+                                    "score": 0.0,
+                                    "message": "dispatch aborted after a platform failure",
+                                }
+                            )
+                            continue
+                        result = await _run_case(
+                            index, case, seed + pass_index * 10_000
+                        )
+                        pass_results.append(result)
+                        if platform_failure is not None:
+                            dispatch_closed = True
+                else:
+                    pass_results = list(
+                        await asyncio.gather(
+                            *(
+                                _run_case(index, case, seed + pass_index * 10_000)
+                                for index, case in enumerate(pass_cases)
+                            )
                         )
                     )
-                )
                 results.extend(pass_results)
+                for result in pass_results:
+                    case_id = (result.get("benchmark") or {}).get("challenge")
+                    if case_id:
+                        raw_by_case[case_id] = result
+                if platform_failure is not None:
+                    emit_summary(platform_failure)
+                    raise platform_failure
                 completed_now = sum(
                     1 for result in pass_results if result.get("success")
                 )
                 print(
                     f"[tsec] pass {pass_index + 1}/{max_passes}: "
-                    f"{len(selected)} cases, {completed_now} newly completed",
+                    f"{len(pass_cases)} cases, {completed_now} newly completed",
                     file=sys.stderr,
                     flush=True,
                 )
                 if completed_now == 0:
                     zero_score_passes += 1
-                    # One zero-score pass can be a transient burst (a model
-                    # rate-limit window, a platform hiccup) killing every
-                    # in-flight case at once; only stop after two consecutive
-                    # scoreless passes while the window still allows a retry.
                     if zero_score_passes >= 2:
                         print(
                             "[tsec] two consecutive scoreless passes; stopping",
@@ -598,12 +920,21 @@ async def run_tsec_challenges(
                         break
                 else:
                     zero_score_passes = 0
+    except TSecPlatformError as exc:
+        emit_summary(exc)
+        raise
     except Exception as exc:
+        kind = classify_platform_failure(exc)
+        if kind is not None:
+            platform_error = TSecPlatformError(
+                kind=kind, detail=_platform_error_detail(exc)
+            )
+            emit_summary(platform_error)
+            raise platform_error from exc
         if _is_sdk_error(exc, "VpnCheckError"):
-            reason = getattr(exc, "detail", None)
             raise TSecAdapterError(
-                f"TSec VPN preflight failed: {getattr(exc, 'message', str(exc))}; "
-                f"detail={reason}"
+                f"TSec VPN preflight failed: {getattr(exc, 'message', str(exc))}"
             ) from exc
         raise
+    emit_summary(None)
     return results

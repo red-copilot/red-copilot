@@ -55,6 +55,10 @@ def bootstrap_solver(
     hint_request: Callable[[], Awaitable[str | None]] | None = None,
     hint_threshold: int = 0,
     context_token_budget: int | None = None,
+    finalize_requests_submission: bool = False,
+    submission_due_fraction: float | None = None,
+    quiet_world_steers: bool = False,
+    verdict_steers_only: bool = False,
 ) -> SolverRuntime:
     """Initialize a solver run without coupling it to a benchmark or agent.
 
@@ -136,6 +140,10 @@ def bootstrap_solver(
         max_unconfirmed_progress=max_unconfirmed_progress,
         hint_request=hint_request,
         hint_threshold=hint_threshold,
+        finalize_requests_submission=finalize_requests_submission,
+        submission_due_fraction=submission_due_fraction,
+        quiet_world_steers=quiet_world_steers,
+        verdict_steers_only=verdict_steers_only,
         processed_event_ids=processed_event_ids,
     )
     return SolverRuntime(

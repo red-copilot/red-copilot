@@ -54,5 +54,16 @@ still derives evidence-tier facts from tool output for the world projection.
 Descoped: the catalog is no longer a Harness projection. `skills/` is mounted read-only under
 `/knowledge/<name>` and discovered by the Agent with `ls` / `cat`.
 
+### PLN-08 [ ] P2 — Tool and memory discipline (markdown only)
+Deliver: `prompts/tsec-solver.md` says what the tool budget is per call and when to write
+conclusions back into notes; `skills/offensive/*` carries ffuf rate/recursion guidance and the
+fallback path when a scanner is unavailable; `knowledge/methodology/*` says when to abandon a
+path. Nothing is parsed, ranked or injected by the Harness.
+Accept: the knowledge catalogue and docs consistency tests pass; the next live sweep reports
+slow-call counts and notes bytes as observations, not gates.
+State: pending. Evidence: the prompt asked for ffuf/gobuster while the Agent hand-rolled 287
+`echo`, 191 `cat` and 99 `for` invocations; notes stayed at a 344-byte median and a-16 ended with
+"Findings: (none yet)" after 2000s.
+
 **Non-goals:** required task DAG, harness-authored chain-of-thought, a learnable planner as the
 main spine, harness-computed skill ranking.

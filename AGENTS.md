@@ -53,6 +53,10 @@ module:
   next event.
 - `harness subagent --objective "..."` - dispatch one isolated Pi sub-agent and print
   its report; sub-agent text remains unverified input.
+- `harness tsec --help`, `harness gc-runs --root .harness/tsec-runs` - a TSec sweep gates
+  itself on the platform before creating run directories and exits 3 when the VPN or control
+  plane is unusable (fix the platform; never wrap the sweep in a retry loop), 4 when some case
+  produced no run; `gc-runs` reports artifact-free run directories (dry run unless `--apply`).
 
 Prerequisites: Docker for Docker agents, sidecar Gateway, and Docker verifiers;
 `sudo apt-get install -y bubblewrap` for the verifier sandbox; Pi 1.0.4 via

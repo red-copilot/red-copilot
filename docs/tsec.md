@@ -86,6 +86,27 @@ harness tsec \
 allows each team three running instances). Each challenge runs in its own run directory with
 its own budgets, so one slow challenge cannot starve the others.
 
+## Sweep behaviour
+
+Before selecting cases, `harness tsec` runs a bounded platform preflight (VPN health check plus
+the challenge listing, 45s total). A platform-wide failure exits with code 3, prints the
+classified kind (`vpn_unreachable`, `platform_unreachable`, `instance_conflict`) and creates no
+run directories; do not retry in a shell loop, fix the platform instead. Exit code 4 means the
+sweep ran but some cases produced no run, and the per-case detail is in the summary artifact.
+
+Every sweep writes `sweep-summary-<UTC>.json` under the runs root (`--summary-out` overrides the
+path) with the selected cases, per-case status, score, submissions attempted, duration and
+tallies, plus the skipped cases and the classified failures. Run directories are created only
+after the challenge is provisioned, so a refused start leaves nothing behind;
+`harness gc-runs --root .harness/tsec-runs` reports (and with `--apply` deletes) directories
+that hold no artifact at all.
+
+`--resume` (default) skips cases that already have a completed local result and seeds a retried
+case with the previous attempt's `agent.summary.md`; `--rerun` ignores local history, and an
+explicitly named `--challenge` is always run. One case failing to start is recorded and the
+remaining cases still run; a platform-wide failure stops new dispatches while the runs already in
+flight keep their artifacts.
+
 `--wall-time` is a soft deadline: at that point Harness steers the Agent to write
 `agent.summary.md` (facts, ruled-out hypotheses, unfinished intents) and grants a
 `FINALIZE_GRACE_SECONDS` (180s) window before the container is killed. The
@@ -93,6 +114,13 @@ its own budgets, so one slow challenge cannot starve the others.
 same soft way: the first crossing records a `budget.exceeded` trace event, steers finalize
 (`solver.finalize`, `reason=soft_budget_limit`) and only ends the run if the grace window
 elapses without the summary.
+
+Because a TSec run is scored only through submitted candidates, the finalize steer also asks the
+Agent to append its best current candidate to `$HARNESS_SUBMISSION_INBOX` before writing the
+report, and a benchmark run that reaches half its wall clock without a single submission is
+steered once (`solver.submission_due`) to consolidate or change attack surface. Benchmark runs
+also stop echoing the Agent's own world revisions back as `world.state.updated` steers and only
+inject `verified`/`contradicted` verdicts, keeping the context for work instead of bookkeeping.
 
 When a TSec challenge is provisioned, `bootstrap_solver()` seeds each `benchmark.target` entity alongside an `evidence`-level `network.reachability` capability scoped to the target address, so the Agent's world context starts from a verified reachability fact. The Agent decides what to do with it; the Harness publishes no plan.
 

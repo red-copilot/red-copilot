@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from .focus import DEFAULT_FOCUS_CLAIM_THRESHOLD, FocusBuilder, FocusItem, FocusRequest, FocusSet
-from .models import WorldSnapshot
+from .models import WorldSnapshot, is_bookkeeping_record
 from .retrieval import WorldRetriever
 
 # Offline token estimate: deterministic ASCII-equivalent heuristic with no
@@ -13,6 +15,12 @@ from .retrieval import WorldRetriever
 # for English/tooling text; the estimate only bounds context assembly, never
 # billing (usage accounting stays on provider telemetry).
 CHARS_PER_TOKEN = 4
+
+# Per-action lines are a bounded tail, not a full log: the 2026-10-16 projection
+# rendered every command with its full provenance blob and reached ~18KB of
+# bookkeeping that crowded out the findings. Semantic observations are listed in
+# full (bounded by ``max_observations``); Harness bookkeeping is summarised.
+RECENT_ACTION_LINES = 8
 
 
 def estimate_tokens(text: str) -> int:
@@ -105,23 +113,23 @@ class WorldContextBuilder:
 
     @staticmethod
     def _state_meta(item: Any) -> dict:
+        """Bounded metadata for the Agent-facing line.
+
+        The full provenance record belongs in the trace and the audit, not in
+        the projection: actor, event and source ids were the bulk of the ~18KB
+        context the 2026-10-16 runs carried. The trust tier stays, because
+        "claim" versus "evidence" is the part a decision depends on.
+        """
         metadata = item.model_dump(
             mode="json",
-            include={
-                "provenance",
-                "observed_at",
-                "valid_from",
-                "expires_at",
-                "supersedes",
-                "contradicts",
-            },
+            include={"observed_at", "valid_from", "expires_at", "supersedes", "contradicts"},
             exclude_none=True,
             exclude_defaults=True,
         )
         provenance = getattr(item, "provenance", None)
         trust = getattr(provenance, "epistemic_status", "unclassified")
         if trust != "unclassified":
-            metadata.setdefault("provenance", {})["epistemic_status"] = trust
+            metadata["epistemic_status"] = trust
         return metadata
 
     @staticmethod
@@ -135,6 +143,7 @@ class WorldContextBuilder:
         *,
         query: str | None = None,
         focus: FocusSet | None = None,
+        budget: Sequence[str] | None = None,
     ) -> str:
         """Render the Agent context, optionally prefixed by a bounded focus block.
 
@@ -146,9 +155,11 @@ class WorldContextBuilder:
         body = self._render_body(snapshot, query=query)
         if focus is None or not self.focus_enabled:
             return body
-        return self._render_focus(focus) + "\n" + body
+        return self._render_focus(focus, budget_lines=budget) + "\n" + body
 
-    def _render_focus(self, focus: FocusSet) -> str:
+    def _render_focus(
+        self, focus: FocusSet, *, budget_lines: Sequence[str] | None = None
+    ) -> str:
         budget = max(1, self.focus_max_chars)
         marker = "[focus truncated to character budget]"
         lines: list[str] = []
@@ -179,6 +190,10 @@ class WorldContextBuilder:
 
         add("## Focus")
         add(f"reference: {_clip(focus.reference, 300) or 'none'}")
+        # Budget sits with the reference because it qualifies every next move:
+        # a run at 10% wall clock should consolidate, not widen.
+        for line in budget_lines or ():
+            add(f"budget: {_clip(line, 200)}")
         add(f"subgoal: {_clip(focus.subgoal, 300) if focus.subgoal else 'none'}")
         add_section("Established facts", focus.established)
         add_section("Open unknowns", focus.unknowns)
@@ -332,11 +347,19 @@ class WorldContextBuilder:
         else:
             lines.append("- none")
 
+        # Observations come from the snapshot rather than the retrieval slice:
+        # bookkeeping (one ``tool.execution`` per command) is the bulk of the
+        # record and would otherwise fill the limit and hide the findings.
+        all_observations = [
+            item for item in self._valid_values(snapshot.observations)
+        ]
+        semantic = [item for item in all_observations if not is_bookkeeping_record(item)]
+        bookkeeping = [item for item in all_observations if is_bookkeeping_record(item)]
         lines.extend(["", "## Observations"])
-        observations = sorted(selected["observations"], key=lambda item: item.id)
-        observations = observations[-self.max_observations :]
-        if observations:
-            for observation in observations:
+        semantic.sort(key=lambda item: item.id)
+        semantic = semantic[-self.max_observations :]
+        if semantic:
+            for observation in semantic:
                 lines.append(
                     self._line(
                         "observation",
@@ -352,19 +375,48 @@ class WorldContextBuilder:
                 )
         else:
             lines.append("- none")
+        if bookkeeping:
+            failed = sum(
+                1
+                for item in bookkeeping
+                if str((item.content or {}).get("status")) == "failed"
+            )
+            lines.append(
+                f"- ({len(bookkeeping)} tool executions omitted; {failed} failed. "
+                "See Actions for the call tally.)"
+            )
 
         lines.extend(["", "## Actions"])
-        actions = sorted(selected["actions"], key=lambda item: item.id)
+        # The tally is sourced from the snapshot, not the retrieval slice, so it
+        # counts what actually happened; only the tail is bounded.
+        actions = sorted(self._valid_values(snapshot.actions), key=lambda item: item.id)
         if actions:
-            for action in actions:
+            tally = Counter(action.status for action in actions)
+            lines.append(
+                "- {total} recorded: {tally}".format(
+                    total=len(actions),
+                    tally=", ".join(
+                        f"{count} {status}" for status, count in sorted(tally.items())
+                    ),
+                )
+            )
+            for action in actions[-RECENT_ACTION_LINES:]:
+                payload = {"target": action.target}
+                duration = (action.attributes or {}).get("duration_ms")
+                if duration is not None:
+                    payload["duration_ms"] = duration
                 lines.append(
                     self._line(
                         action.status,
                         action.id,
                         action.type,
-                        {"target": action.target, **action.attributes, **self._state_meta(action)},
+                        {k: v for k, v in payload.items() if v is not None}
+                        | self._state_meta(action),
                     )
                 )
+            omitted = len(actions) - RECENT_ACTION_LINES
+            if omitted > 0:
+                lines.append(f"- ({omitted} earlier calls omitted; the tally above counts them)")
         else:
             lines.append("- none")
 

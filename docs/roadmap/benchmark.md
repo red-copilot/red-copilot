@@ -18,5 +18,40 @@ Per-domain pass@k reporting lived in the removed suite tooling. Nine synthetic o
 ### BEN-04 [!] P2 — Reproducibility (descoped 2026-10-13)
 Manifest and artifact-hash reporting lived in the removed evaluation tooling. Output sanitization for benchmark adapters, reduction of run-result exceptions to a class plus a details-omitted marker, and TSec flag extraction that no longer harvests prompt placeholders remain in the runtime and are covered by `tests/test_tsec_adapter.py`.
 
+### BEN-05 [~] P1 — Sweep orchestration reliability
+Deliver: a TSec sweep that fails fast and cleanly on a platform-wide outage, keeps one bad case from aborting the rest, never leaves an empty run directory behind, resumes past locally solved cases, and writes one summary artifact per run.
+Accept: platform outage exits 3 inside a bounded window with zero run directories; a case-local start failure records itself and the remaining cases still run; a platform-level failure stops new dispatches while in-flight cases keep their artifacts; locally solved cases are skipped; the summary carries per-case status and tallies; `harness gc-runs` reports artifact-free directories.
+State: implemented. `TSecPlatformError` classifies `vpn_unreachable` / `platform_unreachable` / `instance_conflict`, `run_tsec_challenges` runs a bounded preflight (`check_vpn` + `list_challenges`, 45s) before selecting cases, dispatches through a worker queue that stops on a platform-level failure, and writes `sweep-summary-<UTC>.json`; `BenchmarkRunner.run_case` provisions before creating the run directory; `--preflight/--no-preflight`, `--resume/--rerun`, `--summary-out` and exit codes 0/3/4 exist; `harness gc-runs` cleans artifact-free directories (dry run by default). Evidence: [2026-10-16 sweep review](../tsec-run-review-2026-10-16.md), coverage in `tests/test_tsec_adapter.py`, `tests/test_benchmark_streaming.py`. Measured on the live platform while the VPN health check was failing: exit 3 after 5.0s with 0 run directories, versus 28 blind retries leaving 43 empty directories in the same state on the same day. Outstanding: the acceptance re-run of the 10 unsolved/never-run challenges once the platform is reachable.
+
+### BEN-06 [~] P1 — Run and sweep metric coverage
+Deliver: one metric vocabulary shared by `result.json`, `sweep-summary-<UTC>.json` and
+`harness report` covering submission timing (`submissions_attempted`, `first_submission_ms`,
+`submitted_at_fraction`), steer volume by kind, tool time and the slowest calls, and the final
+context size, so "never tried" is distinguishable from "tried and rejected" without hand-written
+`jq`.
+Accept: every field is reproducible offline from a checked-in trace fixture; a run that never
+submitted reports `submissions_attempted=0` with a null first-submission time.
+State: implemented. `progress.py` owns the steer vocabulary and `runtime/results.py` the
+offline replay (`steer_counts`, `derive_run_metrics`, `submission_fraction`); `SolverLoop` counts
+only the observations it actually delivers (so a quieted world echo is absent from both the
+counter and `agent.feedback.jsonl`), records tool time with a bounded top-five slow list and the
+final prompt size, and `BenchmarkRunner` folds the per-session counters into `result.json:metrics`
+together with `submitted_at_fraction`. The TSec sweep summary carries the same fields per case and
+`harness report` prints them as a loop-health block. Evidence: `tests/test_run_metrics.py`
+(checked-in trace and feedback fixtures under `tests/fixtures/run_metrics/`), the counter and
+counter-vs-delivery tests in `tests/test_solver_loop.py`, the run-level assertions in
+`tests/test_benchmark_streaming.py`, and the sweep-summary tests in `tests/test_tsec_adapter.py`.
+Outstanding: the same fields on a live sweep. Evidence base: the 2026-10-16 analysis in
+[tsec-improvement-plan-2026-10-16.md](../tsec-improvement-plan-2026-10-16.md) §1.
+
+### BEN-07 [ ] P1 — Post-recovery re-run acceptance
+Deliver: the acceptance re-run of the ten unsolved or never-run challenges (`b-03`,
+`c-02`..`c-06`, `a-03`, `a-05`, `e2-04`, `e3-04`) plus four solved controls once the platform is
+reachable, compared on submission rate, time to first submission, wall clock, steer counts and
+tokens.
+Accept: each landed item either improves its metric or is rolled back; RUN-07 (steer quieting)
+and VER-05 (`unavailable` semantics) are checked first because they can hide real feedback.
+State: pending platform availability; the VPN health check still fails as of 2026-10-16.
+
 **Non-goals:** hiding task-specific heuristics in the universal solver; evaluation that relies on unverified Agent self-reports.
 
