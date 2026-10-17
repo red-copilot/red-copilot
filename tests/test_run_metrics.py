@@ -26,24 +26,22 @@ def test_steer_counts_group_delivered_feedback_by_bucket() -> None:
     counts = steer_counts(records)
 
     assert counts == {
-        "world": 3,
-        "verification": 2,
-        "repetition": 1,
-        "budget": 1,
+        "hint": 0,
         "finalize": 0,
         "submission": 0,
+        "verification": 0,
     }
 
 
-def test_steer_counts_match_the_informational_split_of_a_real_failing_run() -> None:
-    """A failing TSec run was mostly zero-information world-update echoes."""
+def test_legacy_unmapped_steers_are_ignored() -> None:
+    """Old heuristic steer records do not inflate the new four-bucket metric."""
     records = _read_jsonl(FIXTURES / "agent_feedback_excerpt.jsonl")
 
     counts = steer_counts(records)
     mapped = sum(counts.values())
 
-    assert mapped == 7  # aci.feedback is not a steer and is not counted
-    assert counts["world"] + counts["verification"] == 5
+    assert mapped == 0
+    assert sum(counts.values()) == 0
 
 
 def test_derive_run_metrics_replays_trace_and_feedback() -> None:
@@ -52,7 +50,7 @@ def test_derive_run_metrics_replays_trace_and_feedback() -> None:
 
     metrics = derive_run_metrics(trace=trace, feedback=feedback)
 
-    assert metrics["steer_counts"]["world"] == 3
+    assert metrics["steer_counts"]["verification"] == 0
     assert metrics["tool_calls"] == 2
     assert metrics["tool_failures"] == 1
     assert metrics["tool_time_ms"] == 95000
@@ -69,12 +67,10 @@ def test_derive_run_metrics_is_empty_safe() -> None:
     metrics = derive_run_metrics()
 
     assert metrics["steer_counts"] == {
-        "world": 0,
-        "verification": 0,
-        "repetition": 0,
-        "budget": 0,
+        "hint": 0,
         "finalize": 0,
         "submission": 0,
+        "verification": 0,
     }
     assert metrics["tool_calls"] == 0
     assert metrics["tool_time_ms"] == 0
@@ -124,8 +120,10 @@ def test_derive_run_metrics_ignores_malformed_records() -> None:
     assert metrics["context_tokens_final"] == 5
 
 
-def test_submission_steers_have_their_own_bucket() -> None:
+def test_new_steer_buckets_are_exact() -> None:
     records = [
+        {"type": "solver.hint"},
+        {"type": "benchmark.feedback"},
         {"type": "solver.submission_due"},
         {"type": "solver.submission_reask"},
         {"type": "solver.closing_session"},
@@ -134,5 +132,7 @@ def test_submission_steers_have_their_own_bucket() -> None:
 
     counts = steer_counts(records)
 
+    assert counts["hint"] == 1
+    assert counts["verification"] == 1
     assert counts["submission"] == 3
     assert counts["finalize"] == 1

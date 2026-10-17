@@ -14,8 +14,6 @@ from .hints import HINTS_FILE, HintCursor, HintRecord
 from .progress import SLOW_TOOL_CALLS, ProgressLedger, empty_steer_counts
 from .session import AgentEvent, AgentObservation, AgentSession
 from .solver_policy import (
-    DEFAULT_MAX_NO_PROGRESS,
-    DEFAULT_MAX_UNCONFIRMED_PROGRESS,
     SolverAction,
     SolverDecision,
     decide_solver_action,
@@ -111,8 +109,6 @@ class SolverLoop:
         context_query: str,
         planned_world_revision: int,
         context_builder: WorldContextBuilder | None = None,
-        max_no_progress: int = DEFAULT_MAX_NO_PROGRESS,
-        max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
         finalize_requests_submission: bool = False,
         submission_due_fraction: float | None = None,
         processed_event_ids: dict[str, str] | None = None,
@@ -141,8 +137,6 @@ class SolverLoop:
         self.summary_path = summary_path or (run_dir / "agent.summary.md")
         self.notes_dir = notes_dir
         self.sync_agent_views = sync_agent_views
-        self.max_no_progress = max_no_progress
-        self.max_unconfirmed_progress = max_unconfirmed_progress
         # Externally evaluated runs score through submitted candidates, so the
         # finalize instruction has to ask for one and the loop has to notice a
         # run that reached the halfway mark without submitting anything.
@@ -277,6 +271,7 @@ class SolverLoop:
         for hint in self.hint_cursor.poll():
             if not self._absorb_operator_hint(hint):
                 continue
+            self._count_steer("hint")
             await session.observe(
                 AgentObservation(
                     type="solver.hint",
@@ -305,7 +300,7 @@ class SolverLoop:
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
         await self._maybe_reask_submission(session, event_type=event.type)
-        decision = self.decide(event_type=event.type)
+        decision = self.decide()
         decision = self._hold_stop_for_budget_grace(decision)
         if decision.action is SolverAction.STOP:
             await session.observe(
@@ -429,7 +424,6 @@ class SolverLoop:
                 "event_type": event_type,
                 "event_id": event_id,
                 "world_revision": self.world.revision,
-                "no_progress_count": self.progress.no_progress_count,
                 "remaining_budget_fraction": self.progress.remaining_budget_fraction,
             },
         )
@@ -657,18 +651,9 @@ class SolverLoop:
             )
         )
 
-    def decide(
-        self,
-        *,
-        event_type: str | None = None,
-    ) -> SolverDecision:
+    def decide(self) -> SolverDecision:
         return decide_solver_action(
-            event_type=event_type,
-            no_progress_count=self.progress.no_progress_count,
-            unconfirmed_progress=self.progress.unconfirmed_progress,
             remaining_budget_fraction=self.progress.remaining_budget_fraction,
-            max_no_progress=self.max_no_progress,
-            max_unconfirmed_progress=self.max_unconfirmed_progress,
         )
 
     def _absorb_operator_hint(self, hint: HintRecord, *, late: bool = False) -> bool:
@@ -733,7 +718,7 @@ class SolverLoop:
             "",
             "## Established facts",
         ]
-        facts: list[str] = list(self.progress.confirmed_facts)
+        facts: list[str] = []
         for observation in sorted(snapshot.observations.values(), key=lambda item: item.id):
             trust = getattr(observation.provenance, "epistemic_status", "unclassified")
             if trust not in {"evidence", "verified"}:
@@ -762,14 +747,8 @@ class SolverLoop:
         if not ruled_out and not failures:
             lines.append("- none recorded")
 
-        lines.extend(["", "## Open intents"])
+        lines.extend(["", "## Open questions"])
         intents: list[str] = []
-        if self.progress.current_subgoal:
-            intents.append(f"subgoal: {self.progress.current_subgoal}")
-        intent = self.progress.action_intent or {}
-        description = intent.get("description")
-        if isinstance(description, str) and description:
-            intents.append(f"last declared intent: {description}")
         for hypothesis in sorted(snapshot.hypotheses.values(), key=lambda item: item.id):
             if hypothesis.status in {"open", "supported"}:
                 intents.append(f"[{hypothesis.status}] {hypothesis.statement}")

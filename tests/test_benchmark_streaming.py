@@ -408,10 +408,6 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert benchmark_feedback.data["accepted"] is True
     assert benchmark_feedback.data["completed"] is True
     assert benchmark_feedback.data["world_revision"] >= 1
-    assert result["progress"]["verified_actions"] == 0
-    assert result["progress"]["pending_actions"] == 0
-    assert result["progress"]["skipped_verifications"] >= 0
-    assert result["progress"]["last_verification"] is None
     assert result["progress"]["accepted_submissions"] == 1
     assert result["progress"]["submissions_attempted"] == 1
     assert result["progress"]["objective_completed"] is True
@@ -423,12 +419,10 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     # Agent, how long did tools block it, and how big was the final prompt"
     # without re-parsing the trace.
     assert result["metrics"]["steer_counts"] == {
-        "world": 0,
-        "verification": 0,
-        "repetition": 0,
-        "budget": 0,
+        "hint": 0,
         "finalize": 0,
         "submission": 0,
+        "verification": 1,
     }
     assert result["metrics"]["tool_calls"] == 0
     assert result["metrics"]["tool_time_ms"] == 0
@@ -515,7 +509,6 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
 
     assert result["success"] is False
     assert result["progress"]["objective_completed"] is False
-    assert result["progress"]["completion_claims"] == ["goal:CASE-MALICIOUS:objective"]
     assert result["progress"]["objective_verdict"]["status"] == "contradicted"
     assert fake_agent.session is not None
     assert not any(

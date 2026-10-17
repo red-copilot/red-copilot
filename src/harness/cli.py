@@ -11,7 +11,6 @@ from typing import Annotated
 import typer
 from pydantic import ValidationError
 
-from .benchmark.base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from .benchmark.tsec_adapter import (
     MAX_EVALUATION_WALL_TIME_SECONDS,
     MAX_PARALLEL_CHALLENGES,
@@ -350,9 +349,6 @@ def tsec(
             help="Allow a trusted CLI agent to execute on the host.",
         ),
     ] = False,
-    max_unconfirmed_progress: Annotated[
-        int, typer.Option("--max-unconfirmed-progress", min=1)
-    ] = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     concurrency: Annotated[
         int,
         typer.Option(
@@ -471,7 +467,6 @@ def tsec(
                 start_retries=start_retries,
                 retry_delay=retry_delay,
                 allow_host_agent=allow_host_agent,
-                max_unconfirmed_progress=max_unconfirmed_progress,
                 parallel=parallel,
                 concurrency=concurrency,
                 total_wall_time=total_wall_time,

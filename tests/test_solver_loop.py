@@ -72,7 +72,6 @@ def test_typed_agent_events_are_not_ingested_and_actions_are_not_verified(
     asyncio.run(run())
 
     assert "obs-admin" not in world.snapshot.observations
-    assert progress.last_verification is None
     assert not [item for item in session.feedback if item.type == "aci.feedback"]
     trace_types = [
         json.loads(line)["type"] for line in trace.path.read_text(encoding="utf-8").splitlines()
@@ -170,12 +169,12 @@ def test_solver_loop_deduplicates_identical_event_ids_and_rejects_conflicts(
 
     asyncio.run(run())
 
-    assert progress.claims == ["the host is reachable"]
+    assert progress.event_count == 1
     assert loop.stats.duplicate_events == 1
     assert loop.stats.conflicting_event_ids == 1
 
 
-def test_solver_loop_stops_after_the_bounded_no_progress_limit(tmp_path: Path) -> None:
+def test_solver_loop_does_not_stop_after_repeated_failures(tmp_path: Path) -> None:
     world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     progress = ProgressLedger()
     trace = TraceRecorder(tmp_path / "trace.jsonl", "run-bounded", "task-bounded")
@@ -209,16 +208,8 @@ def test_solver_loop_stops_after_the_bounded_no_progress_limit(tmp_path: Path) -
 
     decision = asyncio.run(run())
 
-    assert decision.action is SolverAction.STOP
-    assert decision.reason == "no_progress_limit"
-    assert progress.no_progress_count == 6
-    assert any(item.type == "solver.stop" for item in session.feedback)
-    decisions = [
-        item
-        for item in trace.path.read_text(encoding="utf-8").splitlines()
-        if '"type":"solver.decision"' in item
-    ]
-    assert '"action":"stop"' in decisions[-1]
+    assert decision.action is SolverAction.CONTINUE
+    assert not any(item.type == "solver.stop" for item in session.feedback)
 
 
 def test_operator_hints_use_a_steered_event_type() -> None:

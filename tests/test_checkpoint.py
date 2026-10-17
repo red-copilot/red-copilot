@@ -138,7 +138,7 @@ def test_checkpoint_disk_full_during_sync_preserves_previous_record(
     assert not list(tmp_path.glob("*.tmp"))
 def test_progress_ledger_write_is_atomic_on_replace_failure(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "progress.json"
-    prior = ProgressLedger(verified_actions=1)
+    prior = ProgressLedger(tool_calls=1)
     prior.write(path)
     original = path.read_bytes()
 
@@ -147,10 +147,10 @@ def test_progress_ledger_write_is_atomic_on_replace_failure(tmp_path: Path, monk
 
     monkeypatch.setattr("harness.progress.os.replace", fail_replace)
     with pytest.raises(OSError, match="injected progress"):
-        ProgressLedger(verified_actions=2).write(path)
+        ProgressLedger(tool_calls=2).write(path)
 
     assert path.read_bytes() == original
-    assert ProgressLedger.model_validate_json(path.read_bytes()).verified_actions == 1
+    assert ProgressLedger.model_validate_json(path.read_bytes()).tool_calls == 1
     assert not list(tmp_path.glob(".progress.json.*.tmp"))
 @pytest.mark.parametrize(
     "values",
@@ -243,10 +243,10 @@ def test_recovery_restores_progress(tmp_path: Path) -> None:
     FileCheckpointStore(run_dir / "checkpoint.json").save(
         RunCheckpoint(run_id="safe-run", world_revision=2, event_offset=19, feedback_offset=0)
     )
-    ProgressLedger(verified_actions=2).write(run_dir / "progress.json")
+    ProgressLedger(tool_calls=2).write(run_dir / "progress.json")
     checkpoint, progress = load_recovery_state(run_dir)
     assert checkpoint.event_offset == 19
-    assert progress.verified_actions == 2
+    assert progress.tool_calls == 2
 
 
 def test_recovery_refuses_unresolved_actions(tmp_path: Path) -> None:
@@ -304,8 +304,6 @@ def test_pending_action_reconciliation_is_explicit_and_idempotent(tmp_path: Path
     assert resolved.outcomes == {"call-2": "succeeded"}
     assert FileCheckpointStore(run_dir / "checkpoint.json").load().pending_actions == []
     assert progress.last_action["status"] == "succeeded"
-    assert progress.execution_succeeded == 2
-    assert progress.verified_actions == 0
     assert progress.reconciled_actions == {"call-1": "succeeded", "call-2": "succeeded"}
     assert (run_dir / "action.reconciliation.json").is_file()
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file locking is required")

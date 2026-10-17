@@ -133,11 +133,8 @@ def run_summary(
         "exploration": {
             "model_calls": progress.model_calls,
             "tool_calls": progress.tool_calls,
-            "failed_skills": dict(progress.failed_skill_counts),
             "submissions_accepted": progress.accepted_submissions,
             "submissions_rejected": progress.rejected_submissions,
-            "blocked_subgoals": list(progress.blocked_subgoals)[:MAX_SUMMARY_ITEMS],
-            "no_progress_count": progress.no_progress_count,
             "wall_time_expired": progress.wall_time_expired,
         },
         "agent_report": {

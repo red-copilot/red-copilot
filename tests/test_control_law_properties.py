@@ -15,84 +15,33 @@ from pydantic import ValidationError
 from harness.runtime.checkpoint import RunCheckpoint
 from harness.solver_policy import SolverAction, decide_solver_action
 
-_EVENT_TYPES = st.sampled_from(
-    [None, "tool.result", "tool.call", "progress.updated", "world.observe", "unrelated"]
-)
-
 
 @settings(max_examples=300, deadline=None)
 @given(
-    event_type=_EVENT_TYPES,
-    no_progress_count=st.integers(min_value=0, max_value=500),
-    unconfirmed_progress=st.integers(min_value=0, max_value=500),
     remaining_budget_fraction=st.floats(
         min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False
     ),
-    max_no_progress=st.integers(min_value=1, max_value=64),
-    max_unconfirmed_progress=st.integers(min_value=1, max_value=64),
 )
-def test_decision_is_deterministic_bounded_and_stops_only_at_a_bound(
-    event_type: str | None,
-    no_progress_count: int,
-    unconfirmed_progress: int,
+def test_decision_is_deterministic_and_stops_only_on_exhausted_budget(
     remaining_budget_fraction: float,
-    max_no_progress: int,
-    max_unconfirmed_progress: int,
 ) -> None:
-    kwargs = {
-        "event_type": event_type,
-        "no_progress_count": no_progress_count,
-        "unconfirmed_progress": unconfirmed_progress,
-        "remaining_budget_fraction": remaining_budget_fraction,
-        "max_no_progress": max_no_progress,
-        "max_unconfirmed_progress": max_unconfirmed_progress,
-    }
+    kwargs = {"remaining_budget_fraction": remaining_budget_fraction}
     decision = decide_solver_action(**kwargs)
 
-    # Determinism and totality.
     assert decision == decide_solver_action(**kwargs)
     assert decision.action in set(SolverAction)
-
-    # Hard limits always stop, in the documented precedence order (the first
-    # tripped bound wins), regardless of the other inputs.
-    if no_progress_count >= max_no_progress:
-        assert (decision.action, decision.reason) == (
-            SolverAction.STOP,
-            "no_progress_limit",
-        )
-    elif unconfirmed_progress >= max_unconfirmed_progress:
-        assert (decision.action, decision.reason) == (
-            SolverAction.STOP,
-            "unconfirmed_progress_limit",
-        )
-    elif remaining_budget_fraction <= 0:
+    if remaining_budget_fraction <= 0:
         assert (decision.action, decision.reason) == (
             SolverAction.STOP,
             "budget_exhausted",
         )
-    elif decision.action is SolverAction.STOP:
-        # No bound tripped, so the only legal stop is the low-budget guard.
-        assert decision.reason == "low_budget_without_progress"
-        assert no_progress_count > 0
+    else:
+        assert decision.action is SolverAction.CONTINUE
 
 
 @settings(max_examples=100, deadline=None)
-@given(
-    negative=st.integers(min_value=-1000, max_value=-1),
-    non_positive_bound=st.integers(min_value=-1000, max_value=0),
-    non_finite=st.sampled_from([float("nan"), float("inf"), float("-inf")]),
-)
-def test_invalid_control_inputs_fail_closed(
-    negative: int, non_positive_bound: int, non_finite: float
-) -> None:
-    with pytest.raises(ValueError):
-        decide_solver_action(no_progress_count=negative)
-    with pytest.raises(ValueError):
-        decide_solver_action(unconfirmed_progress=negative)
-    with pytest.raises(ValueError):
-        decide_solver_action(max_no_progress=non_positive_bound)
-    with pytest.raises(ValueError):
-        decide_solver_action(max_unconfirmed_progress=non_positive_bound)
+@given(non_finite=st.sampled_from([float("nan"), float("inf"), float("-inf")]))
+def test_invalid_control_inputs_fail_closed(non_finite: float) -> None:
     with pytest.raises(ValueError):
         decide_solver_action(remaining_budget_fraction=non_finite)
 

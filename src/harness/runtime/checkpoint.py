@@ -413,12 +413,6 @@ def _reconcile_pending_actions_locked(
         progress.reconciled_actions[call_id] = outcome
         if call_id == last_id:
             progress.last_action = {**last_action, "status": outcome}
-        if outcome == "succeeded":
-            progress.execution_succeeded += 1
-            progress.no_progress_count += 1
-        elif outcome == "failed":
-            progress.failure_count += 1
-            progress.no_progress_count += 1
 
     reconciliation = ActionReconciliation(run_id=checkpoint.run_id, outcomes=outcomes)
     progress.write(progress_path)

@@ -7,10 +7,6 @@ from pydantic import BaseModel, Field
 
 from ..models import ObjectiveSpec
 
-# Externally evaluated 1-hour benchmarks (such as TSecBench) have no local
-# action-level verifier, so they use a wider exploration horizon before stopping.
-BENCHMARK_MAX_UNCONFIRMED_PROGRESS = 160
-
 
 class BenchmarkCase(BaseModel):
     id: str = Field(min_length=1)

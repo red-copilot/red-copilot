@@ -1,4 +1,4 @@
-"""Replay the two historical failure shapes that motivated the closing changes."""
+"""Replay historical control excerpts through the v5 thin ledger."""
 from __future__ import annotations
 
 import json
@@ -31,18 +31,17 @@ def _replay(name: str) -> ProgressLedger:
     return progress
 
 
-def test_successful_same_family_commands_do_not_trigger_repetition() -> None:
+def test_successful_replay_has_no_heuristic_control_state() -> None:
     progress = _replay("success_generic_families.jsonl")
 
-    assert progress.repetition_action() is None
-    assert progress.steered_tool_families == {}
+    assert progress.tool_calls == 4
+    assert not hasattr(progress, "repetition_action")
+    assert not hasattr(progress, "tool_family_failures")
 
 
-def test_failed_same_family_commands_trigger_one_targeted_signal() -> None:
+def test_failed_replay_has_no_heuristic_control_state() -> None:
     progress = _replay("failure_family.jsonl")
 
-    action = progress.repetition_action()
-    assert action is not None
-    assert action[0] == "bash:curl"
-    assert action[2] == 1
-    assert action[3] == "failure_family"
+    assert progress.tool_calls == 3
+    assert progress.schema_version == "harness/progress/v5"
+    assert not hasattr(progress, "steered_tool_families")

@@ -329,7 +329,6 @@ def test_fold_session_progress_sums_session_counters_and_budget() -> None:
     first.tool_calls = 2
     first.model_calls = 1
     first.budget_used = {"tokens": 100.0}
-    first.failed_skill_counts = {"web-crawl": 1}
     first.record_submission(accepted=True, completed=False)
     second = ProgressLedger()
     second.tool_calls = 3
@@ -342,25 +341,8 @@ def test_fold_session_progress_sums_session_counters_and_budget() -> None:
     assert run_progress.tool_calls == 5
     assert run_progress.model_calls == 5
     assert run_progress.budget_used == {"tokens": 150.0}
-    assert run_progress.failed_skill_counts == {"web-crawl": 1}
     assert run_progress.accepted_submissions == 1
     assert run_progress.rejected_submissions == 1
-
-
-def test_fold_session_progress_keeps_the_worst_stall_not_the_sum() -> None:
-    """No single session stalled for the summed length, so the run reports the max."""
-    run_progress = ProgressLedger(active_goal="goal:1")
-    first = ProgressLedger()
-    first.no_progress_count = 4
-    first.unconfirmed_progress = 7
-    second = ProgressLedger()
-    second.no_progress_count = 5
-    second.unconfirmed_progress = 2
-
-    fold_session_progress(run_progress, (first, second))
-
-    assert run_progress.no_progress_count == 5
-    assert run_progress.unconfirmed_progress == 7
 
 
 def test_competing_sessions_share_one_provision_and_dedupe_submissions(
@@ -886,7 +868,7 @@ def test_long_session_is_restarted_with_a_carry_forward_brief(
     assert metrics[0]["empty_sections"] == [
         "Established facts",
         "Ruled out",
-        "Open intents",
+        "Open questions",
     ]
 
 

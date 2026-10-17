@@ -15,7 +15,6 @@ from ..agent import AgentResult
 from ..budget import FINALIZE_GRACE_SECONDS
 from ..models import AgentSpec, BudgetSpec, ObjectiveSpec
 from .base import (
-    BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     AdapterSessionState,
     BenchmarkAdapter,
     BenchmarkCase,
@@ -584,7 +583,6 @@ async def run_tsec_challenges(
     start_retries: int = 2,
     retry_delay: float = 2.0,
     allow_host_agent: bool = False,
-    max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     parallel: int | None = None,
     concurrency: int = 1,
     total_wall_time: int | None = None,
@@ -729,7 +727,6 @@ async def run_tsec_challenges(
                             seed=pass_seed + index,
                             submission_extractor=_extract_submissions,
                             allow_host_agent=allow_host_agent,
-                            max_unconfirmed_progress=max_unconfirmed_progress,
                             seed_notes_from=attempt_seed(case.id),
                         )
                     except Exception as exc:  # noqa: BLE001 - classified below

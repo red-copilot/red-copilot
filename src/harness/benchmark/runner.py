@@ -19,7 +19,6 @@ from ..agent import AgentResult, AgentRunContext, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
 from ..solver_loop import missing_summary_sections
-from .base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
 from ..budget import FINALIZE_GRACE_SECONDS, UsageMetrics, enforced_budget_limits
 from ..progress import SLOW_TOOL_CALLS, ProgressLedger, empty_steer_counts
@@ -241,7 +240,7 @@ def _archive_session_transcript(*, workspace: Path, attempt: int) -> None:
         shutil.copyfile(source, workspace / archived)
 
 
-_CONTEXT_BRIEF_SECTIONS = ("Established facts", "Ruled out", "Open intents")
+_CONTEXT_BRIEF_SECTIONS = ("Established facts", "Ruled out", "Open questions")
 
 
 def _empty_brief_sections(brief: str) -> list[str]:
@@ -638,7 +637,6 @@ class BenchmarkRunner:
         seed: int,
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
-        max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
         seed_notes_from: Path | None = None,
     ) -> dict:
         if agent.type in {"docker", "pi"} and agent.network == "environment":
@@ -781,7 +779,6 @@ class BenchmarkRunner:
                     target_actor=f"benchmark:{session.benchmark}",
                     budget_limits=enforced_budget_limits(planned.budgets),
                     agent_workspace=planned.workspace,
-                    max_unconfirmed_progress=max_unconfirmed_progress,
                     finalize_requests_submission=True,
                     submission_due_fraction=BENCHMARK_SUBMISSION_DUE_FRACTION,
                     world_repository_factory=(
@@ -1005,6 +1002,7 @@ class BenchmarkRunner:
             # Only the submitting session gets the immediate feedback pointer; the
             # other sessions see the new world revision through their own context.
             if deliver_feedback and executor is not None and executor.session is not None:
+                executor.runtime.loop.note_delivered_steer("verification")
                 await executor.session.observe(
                     AgentObservation(
                         type="benchmark.feedback",

@@ -421,7 +421,6 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
             runs_root=tmp_path,
             challenge_code="WEB-001",
             seed=1,
-            max_unconfirmed_progress=200,
         )
     )
 
@@ -438,8 +437,6 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
     }
     assert result["benchmark"]["challenge"] == "WEB-001"
     assert result["benchmark"]["level"] == "L2"
-    assert FakeBenchmarkRunner.last_kwargs is not None
-    assert FakeBenchmarkRunner.last_kwargs["max_unconfirmed_progress"] == 200
 
 
 def test_run_tsec_challenges_allows_the_full_evaluation_window(
@@ -1492,12 +1489,10 @@ class MetricsRunner(FakeBenchmarkRunner):
             "first_submission_ms": 594000,
             "submitted_at_fraction": 0.99,
             "steer_counts": {
-                "world": 3,
-                "verification": 0,
-                "repetition": 1,
-                "budget": 1,
+                "hint": 2,
                 "finalize": 0,
-                "submission": 0,
+                "submission": 1,
+                "verification": 1,
             },
             "tool_time_ms": 123456,
             "context_tokens_final": 20583,
@@ -1526,7 +1521,12 @@ def test_sweep_summary_carries_the_run_metrics(monkeypatch, tmp_path: Path) -> N
     case = payload["cases"][0]
     assert case["first_submission_ms"] == 594000
     assert case["submitted_at_fraction"] == 0.99
-    assert case["steer_counts"]["world"] == 3
+    assert case["steer_counts"] == {
+        "hint": 2,
+        "finalize": 0,
+        "submission": 1,
+        "verification": 1,
+    }
     assert case["tool_time_ms"] == 123456
     assert case["context_tokens_final"] == 20583
 
