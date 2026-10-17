@@ -53,5 +53,27 @@ Accept: each landed item either improves its metric or is rolled back; RUN-07 (s
 and VER-05 (`unavailable` semantics) are checked first because they can hide real feedback.
 State: pending platform availability; the VPN health check still fails as of 2026-10-16.
 
+### BEN-08 [ ] P1 — Hosted-run compliance
+Deliver: whatever the platform runs has to satisfy rules that the local sweep never exercised, so
+each one is stated as an acceptance line before any packaging work: the container must **start
+solving on launch** (the platform injects `BENCHMARK_BASE_URL` and `BENCHMARK_TOKEN` and does not
+drive a solve loop from outside); model traffic must go through the platform gateway, whose rule is
+"append `.tsecbench.gw` to the provider domain and use `http://`", against a fixed 22-provider
+allowlist; the uploaded image is capped at 3 GB; the whole submission gets 8 vCPU and 16 GB; and
+nothing task-specific may be baked in - no previous flags, answers or per-challenge notes.
+State: pending, and deliberately unspecified: this records the constraints, not the design. The
+known gaps, measured against the tree on 2026-10-17: the competition configs point at
+`opencode-go` and `openai`, neither of which is on the allowlist and neither of which has an
+env-driven endpoint (only `env_passthrough` for the key); `harness run`/`harness tsec` drive the
+container from outside, so "starts solving on launch" needs an in-image entrypoint that owns the
+loop; the Pi container asks for 4 CPU and 8 GB, and `src/spike_swarm` defaults to three concurrent
+challenges with three solvers each, which does not fit one 8 vCPU / 16 GB submission; the
+`--seed-notes-from` continuity channel must not ship inside an uploaded image. The image side is
+already inside the limit: 2,983,477,199 bytes on disk, 766,589,952 bytes as `docker save` output
+(763,061,574 gzipped). Decision needed before implementation: what exactly the uploaded artifact
+contains (agent only, or agent plus the benchmark client and loop).
+Accept: a locally built image starts solving with only `BENCHMARK_BASE_URL`/`BENCHMARK_TOKEN`
+injected and no public egress, and the packaging contains no per-challenge state.
+
 **Non-goals:** hiding task-specific heuristics in the universal solver; evaluation that relies on unverified Agent self-reports.
 
