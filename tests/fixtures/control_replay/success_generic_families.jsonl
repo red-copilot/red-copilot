@@ -1,0 +1,9 @@
+{"type":"tool.call","data":{"tool":"bash","tool_call_id":"success-1","args_family":"bash:curl","args_fingerprint":"hash-1"}}
+{"type":"tool.result","data":{"tool":"bash","tool_call_id":"success-1","is_error":false,"exit_code":0}}
+{"type":"tool.call","data":{"tool":"bash","tool_call_id":"success-2","args_family":"bash:curl","args_fingerprint":"hash-2"}}
+{"type":"tool.result","data":{"tool":"bash","tool_call_id":"success-2","is_error":false,"exit_code":0}}
+{"type":"tool.call","data":{"tool":"bash","tool_call_id":"success-3","args_family":"bash:curl","args_fingerprint":"hash-3"}}
+{"type":"tool.result","data":{"tool":"bash","tool_call_id":"success-3","is_error":false,"exit_code":0}}
+{"type":"tool.call","data":{"tool":"bash","tool_call_id":"success-4","args_family":"bash:curl","args_fingerprint":"hash-4"}}
+{"type":"tool.result","data":{"tool":"bash","tool_call_id":"success-4","is_error":false,"exit_code":0}}
+{"type":"pi.agent_settled","data":{}}

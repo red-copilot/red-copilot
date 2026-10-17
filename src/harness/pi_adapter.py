@@ -24,14 +24,43 @@ from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 
-# Leading commands that say nothing about what the attempt is actually doing.
+# Commands and shell syntax that say nothing about what the attempt is doing.
+# Generic text utilities are deliberately excluded from the family identity:
+# a run that inspects notes and a run that attacks a target cannot share the
+# "same repeated action" just because both used cat or echo.
 _FAMILY_NOISE_HEADS = frozenset(
-    {"cd", "export", "set", "sudo", "env", "rm", "mkdir", "timeout", "sleep"}
+    {
+        "awk",
+        "cat",
+        "cd",
+        "echo",
+        "export",
+        "false",
+        "find",
+        "grep",
+        "head",
+        "ls",
+        "mkdir",
+        "printf",
+        "pwd",
+        "rm",
+        "sed",
+        "set",
+        "tail",
+        "test",
+        "true",
+        "wc",
+        "which",
+    }
 )
+_FAMILY_LOOP_HEADS = frozenset({"case", "for", "function", "if", "until", "while"})
+_FAMILY_STRUCTURAL_HEADS = frozenset({"do", "else", "elif", "then"})
+_FAMILY_END_HEADS = frozenset({"done", "esac", "fi"})
+_FAMILY_WRAPPER_HEADS = frozenset({"command", "exec", "nohup", "sleep", "sudo", "timeout"})
 
 
 def _command_family(tool: str, arguments: object) -> str | None:
-    """Coarse identity of a shell command, e.g. ``bash:for`` or ``bash:curl``.
+    """Coarse identity of a shell command, e.g. ``bash:curl`` or ``bash:ffuf``.
 
     Repeated near-identical attempts (the same loop with a different wordlist or
     path) share a family even when their exact arguments differ, which is the
@@ -42,31 +71,35 @@ def _command_family(tool: str, arguments: object) -> str | None:
     command = arguments.get("command") or arguments.get("cmd")
     if not isinstance(command, str) or not command.strip():
         return None
-    lines = [
-        line
-        for line in command.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
-    tokens = [
-        token
-        for line in lines
-        for segment in re.split(r"[;&|]+", line)
-        for token in segment.split()
-    ]
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token.startswith("#"):
-            index += 1  # inline comment
+    for line in command.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        if "=" in token and not token.startswith(("/", "-", ".")):
-            index += 1  # leading VAR=value assignment
-            continue
-        head = token.strip("'\"").rsplit("/", 1)[-1]
-        if head in _FAMILY_NOISE_HEADS:
-            index += 2  # drop the command and its argument
-            continue
-        return f"{tool}:{head[:16]}"
+        for segment in re.split(r"[;&|]+", stripped):
+            tokens = segment.split()
+            index = 0
+            while index < len(tokens):
+                token = tokens[index]
+                if token.startswith("#"):
+                    break
+                if "=" in token and not token.startswith(("/", "-", ".")):
+                    index += 1  # leading VAR=value assignment
+                    continue
+                head = token.strip("'\"").rsplit("/", 1)[-1]
+                if head in _FAMILY_LOOP_HEADS or head in _FAMILY_END_HEADS:
+                    break
+                if head in _FAMILY_STRUCTURAL_HEADS:
+                    index += 1
+                    continue
+                if head == "env":
+                    index += 1
+                    continue
+                if head in _FAMILY_WRAPPER_HEADS:
+                    index += 2  # wrapper plus the wrapped command's first token
+                    continue
+                if head in _FAMILY_NOISE_HEADS:
+                    break  # generic utility: its arguments are not an action
+                return f"{tool}:{head[:16]}"
     return None
 
 

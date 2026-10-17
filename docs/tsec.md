@@ -121,6 +121,11 @@ report, and a benchmark run that reaches half its wall clock without a single su
 steered once (`solver.submission_due`) to consolidate or change attack surface. Benchmark runs
 also stop echoing the Agent's own world revisions back as `world.state.updated` steers and only
 inject `verified`/`contradicted` verdicts, keeping the context for work instead of bookkeeping.
+If the Agent settles without submitting, `solver.submission_reask` asks once for the best
+candidate already in its notes; if the process has ended and at least 60 seconds remain,
+`BenchmarkRunner` starts one closing session that is restricted to that submission or a final
+summary. Both paths are counted in the `submission` steer bucket; no submission attempt means
+no new probing turn.
 
 When a TSec challenge is provisioned, `bootstrap_solver()` seeds each `benchmark.target` entity alongside an `evidence`-level `network.reachability` capability scoped to the target address, so the Agent's world context starts from a verified reachability fact. The Agent decides what to do with it; the Harness publishes no plan.
 

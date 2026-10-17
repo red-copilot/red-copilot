@@ -36,8 +36,11 @@ offline replay (`steer_counts`, `derive_run_metrics`, `submission_fraction`); `S
 only the observations it actually delivers (so a quieted world echo is absent from both the
 counter and `agent.feedback.jsonl`), records tool time with a bounded top-five slow list and the
 final prompt size, and `BenchmarkRunner` folds the per-session counters into `result.json:metrics`
-together with `submitted_at_fraction`. The TSec sweep summary carries the same fields per case and
-`harness report` prints them as a loop-health block. Evidence: `tests/test_run_metrics.py`
+together with `submitted_at_fraction`. The vocabulary now has a dedicated `submission` bucket for
+the submission-due, re-ask and closing-session steers, and scored runs record `closing_attempt` /
+`closing_outcome` when the zero-submission closure path is considered. The TSec sweep summary
+carries the same fields per case and `harness report` prints them as a loop-health block. Evidence:
+`tests/test_run_metrics.py`
 (checked-in trace and feedback fixtures under `tests/fixtures/run_metrics/`), the counter and
 counter-vs-delivery tests in `tests/test_solver_loop.py`, the run-level assertions in
 `tests/test_benchmark_streaming.py`, and the sweep-summary tests in `tests/test_tsec_adapter.py`.
@@ -52,6 +55,9 @@ tokens.
 Accept: each landed item either improves its metric or is rolled back; RUN-07 (steer quieting)
 and VER-05 (`unavailable` semantics) are checked first because they can hide real feedback.
 State: pending platform availability; the VPN health check still fails as of 2026-10-16.
+Offline prerequisite landed under RUN-08: replay fixtures cover the successful same-family
+and failed same-family shapes, and the zero-submission closure path has deterministic tests.
+The live comparator remains the authority.
 
 ### BEN-08 [ ] P1 — Hosted-run compliance
 Deliver: whatever the platform runs has to satisfy rules that the local sweep never exercised, so

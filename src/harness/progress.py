@@ -17,6 +17,8 @@ from .verification import AuthorizedObjectiveVerdict, VerifierRegistry
 # the streak at which it stops nudging and asks for convergence instead.
 REPETITION_STEER_STREAK = 3
 REPETITION_ESCALATE_STREAK = 6
+REPETITION_FAMILY_FAILURES = REPETITION_STEER_STREAK
+REPETITION_FINGERPRINT_STREAK = REPETITION_STEER_STREAK
 # Repetition bookkeeping is bounded so a long run cannot grow it without limit.
 MAX_TRACKED_TOOL_FAMILIES = 200
 
@@ -39,6 +41,9 @@ STEER_BUCKETS: dict[str, str] = {
     "solver.repetition_steer": "repetition",
     "solver.budget": "budget",
     "solver.finalize": "finalize",
+    "solver.submission_due": "submission",
+    "solver.submission_reask": "submission",
+    "solver.closing_session": "submission",
 }
 STEER_BUCKET_NAMES: tuple[str, ...] = (
     "world",
@@ -46,6 +51,7 @@ STEER_BUCKET_NAMES: tuple[str, ...] = (
     "repetition",
     "budget",
     "finalize",
+    "submission",
 )
 # Slow-call telemetry is a bounded top-N list, not a per-call log: the run
 # result must stay small enough to aggregate a whole sweep.
@@ -126,6 +132,13 @@ class ProgressLedger(BaseModel):
     last_tool_family: str | None = None
     tool_family_totals: dict[str, int] = Field(default_factory=dict)
     steered_tool_families: dict[str, int] = Field(default_factory=dict)
+    # Repetition is a signal only when a family keeps failing or the exact
+    # same arguments repeat. Distinct commands in one broad family (many
+    # different curl requests, for example) are exploration, not grinding.
+    tool_family_failures: dict[str, int] = Field(default_factory=dict)
+    last_failed_tool_family: str | None = None
+    tool_fingerprint_streak: int = 0
+    last_tool_fingerprint: str | None = None
     # Session restarts performed after the context grew long: the counter and
     # the tool-call mark let the next threshold be measured from the restart
     # instead of the run start.
@@ -179,6 +192,9 @@ class ProgressLedger(BaseModel):
             family = event.data.get("args_family")
             if isinstance(family, str) and family:
                 action["args_family"] = family
+            fingerprint = event.data.get("args_fingerprint")
+            if isinstance(fingerprint, str) and fingerprint:
+                action["args_fingerprint"] = fingerprint
             self._record_tool_family(family)
             self.last_action = action
             call_id = action["tool_call_id"]
@@ -188,7 +204,12 @@ class ProgressLedger(BaseModel):
             if isinstance(expected, str) and expected:
                 self.expected_observation = expected
         elif event.type == "tool.result":
-            failed = bool(event.data.get("is_error", False))
+            exit_code = event.data.get("exit_code")
+            failed = bool(event.data.get("is_error", False)) or (
+                isinstance(exit_code, int)
+                and not isinstance(exit_code, bool)
+                and exit_code != 0
+            )
             call_id = event.data.get("tool_call_id")
             active_action = self.active_actions.pop(call_id, {}) if isinstance(call_id, str) else {}
             action = {
@@ -201,6 +222,9 @@ class ProgressLedger(BaseModel):
             family = active_action.get("args_family")
             if isinstance(family, str) and family:
                 action["args_family"] = family
+            fingerprint = active_action.get("args_fingerprint")
+            if isinstance(fingerprint, str) and fingerprint:
+                action["args_fingerprint"] = fingerprint
             self.last_action = action
             actual = event.data.get("observation")
             if isinstance(actual, str) and actual:
@@ -220,6 +244,11 @@ class ProgressLedger(BaseModel):
             if failed:
                 self.no_progress_count += 1
             self.unconfirmed_progress += 1
+            self._record_repetition_outcome(
+                family,
+                fingerprint,
+                failed=failed,
+            )
         elif event.type == "progress.updated":
             self._record_progress_update(event.data)
         elif event.type == "goal.completed":
@@ -255,21 +284,68 @@ class ProgressLedger(BaseModel):
         while len(self.tool_family_totals) > MAX_TRACKED_TOOL_FAMILIES:
             self.tool_family_totals.pop(next(iter(self.tool_family_totals)))
 
-    def repetition_action(self) -> tuple[str, int, int] | None:
+    def _record_repetition_outcome(
+        self,
+        family: str | None,
+        fingerprint: str | None,
+        *,
+        failed: bool,
+    ) -> None:
+        if isinstance(fingerprint, str) and fingerprint:
+            if fingerprint == self.last_tool_fingerprint:
+                self.tool_fingerprint_streak += 1
+            else:
+                self.last_tool_fingerprint = fingerprint
+                self.tool_fingerprint_streak = 1
+        else:
+            self.last_tool_fingerprint = None
+            self.tool_fingerprint_streak = 0
+
+        if failed and isinstance(family, str) and family:
+            self.tool_family_failures[family] = (
+                self.tool_family_failures.get(family, 0) + 1
+            )
+            self.last_failed_tool_family = family
+            while len(self.tool_family_failures) > MAX_TRACKED_TOOL_FAMILIES:
+                self.tool_family_failures.pop(next(iter(self.tool_family_failures)))
+        elif not failed:
+            self.last_failed_tool_family = None
+
+    def repetition_action(self) -> tuple[str, int, int, str, str | None] | None:
         """Return the pending intervention for the current family, if any.
 
-        The tuple is ``(family, streak, level)`` where level 1 is a targeted
-        nudge and level 2 asks the Agent to converge and write its summary.
-        Each level fires at most once per family per run.
+        The tuple is ``(identity, streak, level, basis, fingerprint)`` where
+        level 1 is a targeted nudge and level 2 asks the Agent to converge and
+        write its summary. The basis distinguishes accumulated family failures
+        from an exact argument repeat. Each level fires at most once per
+        identity per run.
         """
-        family = self.last_tool_family
-        if not family:
+        family = self.last_failed_tool_family or self.last_tool_family
+        identity = family
+        fingerprint = self.last_tool_fingerprint
+        if identity is None and fingerprint:
+            identity = f"fingerprint:{fingerprint[:8]}"
+        if identity is None:
             return None
-        emitted = self.steered_tool_families.get(family, 0)
-        if self.tool_family_streak >= REPETITION_ESCALATE_STREAK and emitted < 2:
-            return family, self.tool_family_streak, 2
-        if self.tool_family_streak >= REPETITION_STEER_STREAK and emitted < 1:
-            return family, self.tool_family_streak, 1
+        emitted = self.steered_tool_families.get(identity, 0)
+        if (
+            fingerprint
+            and self.tool_fingerprint_streak >= REPETITION_ESCALATE_STREAK
+            and emitted < 2
+        ):
+            return identity, self.tool_fingerprint_streak, 2, "identical_args", fingerprint
+        if (
+            fingerprint
+            and self.tool_fingerprint_streak >= REPETITION_FINGERPRINT_STREAK
+            and emitted < 1
+        ):
+            return identity, self.tool_fingerprint_streak, 1, "identical_args", fingerprint
+
+        failures = self.tool_family_failures.get(family or "", 0)
+        if failures >= REPETITION_ESCALATE_STREAK and emitted < 2:
+            return identity, failures, 2, "failure_family", fingerprint
+        if failures >= REPETITION_FAMILY_FAILURES and emitted < 1:
+            return identity, failures, 1, "failure_family", fingerprint
         return None
 
     def note_repetition_steer(self, family: str, *, level: int) -> None:
@@ -284,6 +360,10 @@ class ProgressLedger(BaseModel):
         self.tool_family_streak = 0
         self.last_tool_family = None
         self.tool_family_totals.clear()
+        self.tool_family_failures.clear()
+        self.last_failed_tool_family = None
+        self.tool_fingerprint_streak = 0
+        self.last_tool_fingerprint = None
 
     def context_restart_due(self) -> str | None:
         """Return why the session context should be reset, or ``None``.

@@ -450,11 +450,13 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
         "repetition": 0,
         "budget": 0,
         "finalize": 0,
+        "submission": 0,
     }
     assert result["metrics"]["tool_calls"] == 0
     assert result["metrics"]["tool_time_ms"] == 0
     assert result["metrics"]["context_tokens_final"] == 0
     assert result["metrics"]["slow_tool_calls"] == []
+    assert "closing_attempt" not in result
     assert 0.0 <= result["metrics"]["submitted_at_fraction"] <= 1.0
     assert result["world"]["revision"] >= 2
     context = next(tmp_path.glob("fake_CASE-1_*/world.context.txt")).read_text(encoding="utf-8")
@@ -697,6 +699,7 @@ def test_report_prints_the_loop_health_block(tmp_path: Path) -> None:
                         "repetition": 3,
                         "budget": 3,
                         "finalize": 1,
+                        "submission": 0,
                     },
                     "tool_time_ms": 813000,
                     "tool_calls": 96,

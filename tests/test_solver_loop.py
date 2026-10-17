@@ -516,6 +516,7 @@ def test_solver_loop_steers_for_a_missing_submission_once_past_halfway(
     assert due[0].data["threshold"] == 0.5
     assert "HARNESS_SUBMISSION_INBOX" in due[0].data["message"]
     assert due[0].data["elapsed_fraction"] > 0.5
+    assert loop.metrics_snapshot()["steer_counts"]["submission"] == 1
 
     asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
     assert len([item for item in session.feedback if item.type == "solver.submission_due"]) == 1
@@ -577,6 +578,107 @@ def test_finalize_leaves_task_runs_without_a_submission_step(tmp_path: Path) -> 
     for message in messages:
         assert "HARNESS_SUBMISSION_INBOX" not in message
         assert "HARNESS_SUMMARY_FILE" in message
+
+
+def _settle_loop(
+    tmp_path: Path, **kwargs
+) -> tuple[SolverLoop, ProgressLedger, FakeSession]:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger(
+        budget_limits={"wall_time": 1800},
+        started_at=_started(100),
+    )
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-settle", "task-settle")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="find the flag",
+        planned_world_revision=world.snapshot.revision,
+        finalize_requests_submission=True,
+        **kwargs,
+    )
+    return loop, progress, session
+
+
+def test_settle_without_submission_asks_for_a_candidate_once(tmp_path: Path) -> None:
+    loop, _progress, session = _settle_loop(tmp_path)
+    (tmp_path / "agent.summary.md").write_text("summary\n", encoding="utf-8")
+
+    settled = AgentEvent(type="pi.agent_settled", data={})
+    asyncio.run(loop.process_event(session, settled))
+    asyncio.run(loop.process_event(session, settled))
+
+    reasks = [item for item in session.feedback if item.type == "solver.submission_reask"]
+    assert len(reasks) == 1
+    assert "HARNESS_SUBMISSION_INBOX" in reasks[0].data["message"]
+    assert "no more" in reasks[0].data["message"].lower()
+    assert loop.metrics_snapshot()["steer_counts"]["submission"] == 1
+
+
+def test_settle_without_submission_also_requests_a_missing_summary(
+    tmp_path: Path,
+) -> None:
+    loop, _progress, session = _settle_loop(tmp_path)
+
+    asyncio.run(
+        loop.process_event(session, AgentEvent(type="pi.agent_settled", data={}))
+    )
+
+    reasks = [item for item in session.feedback if item.type == "solver.submission_reask"]
+    assert len(reasks) == 1
+    assert "HARNESS_SUMMARY_FILE" in reasks[0].data["message"]
+
+
+def test_settle_without_submission_does_not_reask_after_a_candidate(
+    tmp_path: Path,
+) -> None:
+    loop, progress, session = _settle_loop(tmp_path)
+    progress.record_submission(accepted=False, completed=False)
+
+    asyncio.run(
+        loop.process_event(session, AgentEvent(type="pi.agent_settled", data={}))
+    )
+
+    assert [item for item in session.feedback if item.type == "solver.submission_reask"] == []
+
+
+def test_settle_without_submission_stays_off_for_task_runs(tmp_path: Path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger(budget_limits={"wall_time": 1800}, started_at=_started(100))
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-task-settle", "task-settle")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="find the flag",
+        planned_world_revision=world.snapshot.revision,
+    )
+
+    asyncio.run(
+        loop.process_event(session, AgentEvent(type="pi.agent_settled", data={}))
+    )
+
+    assert [item for item in session.feedback if item.type == "solver.submission_reask"] == []
+
+
+def test_settle_without_submission_stays_off_after_objective_completion(
+    tmp_path: Path,
+) -> None:
+    loop, progress, session = _settle_loop(tmp_path)
+    progress.objective_completed = True
+
+    asyncio.run(
+        loop.process_event(session, AgentEvent(type="pi.agent_settled", data={}))
+    )
+
+    assert [item for item in session.feedback if item.type == "solver.submission_reask"] == []
 
 
 def test_solver_loop_quiet_mode_does_not_echo_agent_authored_world_changes(
@@ -686,11 +788,43 @@ def _tool_call(call_id: str, family: str, index: int) -> AgentEvent:
     )
 
 
+def _record_failed_tool(
+    loop: SolverLoop,
+    session: FakeSession,
+    *,
+    call_id: str,
+    family: str,
+    index: int,
+) -> None:
+    asyncio.run(loop.process_event(session, _tool_call(call_id, family, index)))
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="tool.result",
+                event_id=f"result-{index}",
+                data={
+                    "tool": "bash",
+                    "tool_call_id": call_id,
+                    "is_error": True,
+                    "exit_code": 1,
+                },
+            ),
+        )
+    )
+
+
 def test_solver_loop_intervenes_once_per_repeated_command_family(tmp_path: Path) -> None:
     loop, progress, session = _repetition_loop(tmp_path)
 
     for index in range(3):
-        asyncio.run(loop.process_event(session, _tool_call(f"call-{index}", "bash:curl", index)))
+        _record_failed_tool(
+            loop,
+            session,
+            call_id=f"call-{index}",
+            family="bash:curl",
+            index=index,
+        )
 
     steers = [item for item in session.feedback if item.type == "solver.repetition_steer"]
     assert len(steers) == 1
@@ -699,7 +833,13 @@ def test_solver_loop_intervenes_once_per_repeated_command_family(tmp_path: Path)
     assert progress.steered_tool_families["bash:curl"] == 1
 
     # A fourth call in the same family does not re-nudge at level 1.
-    asyncio.run(loop.process_event(session, _tool_call("call-3", "bash:curl", 3)))
+    _record_failed_tool(
+        loop,
+        session,
+        call_id="call-3",
+        family="bash:curl",
+        index=3,
+    )
     assert len([item for item in session.feedback if item.type == "solver.repetition_steer"]) == 1
 
 
@@ -707,7 +847,13 @@ def test_solver_loop_escalates_a_family_that_keeps_repeating(tmp_path: Path) -> 
     loop, progress, session = _repetition_loop(tmp_path)
 
     for index in range(6):
-        asyncio.run(loop.process_event(session, _tool_call(f"call-{index}", "bash:nmap", index)))
+        _record_failed_tool(
+            loop,
+            session,
+            call_id=f"call-{index}",
+            family="bash:nmap",
+            index=index,
+        )
 
     steers = [item for item in session.feedback if item.type == "solver.repetition_steer"]
     levels = [item.data["level"] for item in steers]
@@ -715,7 +861,13 @@ def test_solver_loop_escalates_a_family_that_keeps_repeating(tmp_path: Path) -> 
     assert progress.steered_tool_families["bash:nmap"] == 2
 
     # Level 2 also fires at most once per family.
-    asyncio.run(loop.process_event(session, _tool_call("call-6", "bash:nmap", 6)))
+    _record_failed_tool(
+        loop,
+        session,
+        call_id="call-6",
+        family="bash:nmap",
+        index=6,
+    )
     assert len([item for item in session.feedback if item.type == "solver.repetition_steer"]) == 2
 
 

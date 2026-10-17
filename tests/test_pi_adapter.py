@@ -1224,19 +1224,21 @@ def test_pi_rpc_normalizes_a_coarse_command_family() -> None:
     from harness.pi_adapter import _command_family
 
     assert _command_family("bash", {"command": "for id in ../../etc/passwd; do curl $id; done"}) == (
-        "bash:for"
+        "bash:curl"
     )
     assert _command_family("bash", {"command": "TARGET=x ffuf -w /w -u http://$TARGET"}) == (
         "bash:ffuf"
     )
     assert _command_family("bash", {"command": "/usr/bin/curl -s http://x"}) == "bash:curl"
     assert _command_family("bash", {"command": "cd /tmp; for id in a b; do curl $id; done"}) == (
-        "bash:for"
+        "bash:curl"
     )
     assert _command_family("bash", {"command": "timeout 60 curl -s http://x"}) == "bash:curl"
     assert _command_family(
         "bash", {"command": "cd /tmp\n# enumerate endpoints\nffuf -u http://x/FUZZ -w /w"}
     ) == "bash:ffuf"
+    assert _command_family("bash", {"command": "echo hello > /tmp/a"}) is None
+    assert _command_family("bash", {"command": "cat notes.txt | grep admin"}) is None
     assert _command_family("read", {}) is None
 
 

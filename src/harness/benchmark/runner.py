@@ -54,6 +54,7 @@ from .protocol import SubmissionInbox
 
 SubmissionExtractor = Callable[[AgentResult], list[Submission]]
 BENCHMARK_TEARDOWN_TIMEOUT_SECONDS = 30.0
+CLOSING_SESSION_MIN_SECONDS = 60.0
 # Externally evaluated benchmarks score only through submitted candidates, so a
 # run that has burned half its wall clock without a single submission is steered
 # once to consolidate what it holds or change attack surface instead of grinding
@@ -114,6 +115,8 @@ class _ExecutorRuntime:
     retired_results: list[AgentResult] = field(default_factory=list)
     restarts: int = 0
     restart_briefs: list[dict[str, Any]] = field(default_factory=list)
+    closing_attempts: int = 0
+    closing_outcome: str | None = None
 
 
 def _summary_key(key: tuple[str | None, str | None, str | None]) -> tuple[str, str, str]:
@@ -272,6 +275,7 @@ async def _restart_session(
     adapter_instance: Any,
     reason: str,
     trace: TraceRecorder,
+    closing: bool = False,
 ) -> bool:
     """Reset the Agent session and hand it the carry-forward brief.
 
@@ -289,7 +293,7 @@ async def _restart_session(
     }
     previous = executor.session
     from_session = await _session_identity(previous)
-    attempt = executor.restarts + 1
+    attempt = executor.restarts + executor.closing_attempts + 1
     degraded: dict[str, Any] = {
         "reason": reason,
         "from_session": from_session,
@@ -298,33 +302,46 @@ async def _restart_session(
         **brief_metrics,
     }
     try:
-        await previous.close(f"context-restart:{reason}")
+        await previous.close(
+            f"closing-session:{reason}" if closing else f"context-restart:{reason}"
+        )
         retired = await previous.result()
     except Exception as exc:  # noqa: BLE001 - keep the run, lose only the reset
         trace.emit(
-            "solver.context_restart",
+            "solver.closing_session" if closing else "solver.context_restart",
             actor="harness",
             data={**degraded, "error_type": type(exc).__name__, "stage": "close"},
         )
+        if closing:
+            executor.closing_outcome = "unsupported"
         return False
     executor.retired_results.append(retired)
-    progress.record_context_restart()
+    if not closing:
+        progress.record_context_restart()
     _archive_session_transcript(workspace=executor.plan.workspace, attempt=attempt)
     try:
         executor.session = await adapter_instance.start_session(run_context)
     except Exception as exc:  # noqa: BLE001
         trace.emit(
-            "solver.context_restart",
+            "solver.closing_session" if closing else "solver.context_restart",
             actor="harness",
             data={**degraded, "error_type": type(exc).__name__, "stage": "start"},
         )
+        if closing:
+            executor.closing_outcome = "unsupported"
         return False
-    executor.restarts = attempt
-    executor.restart_briefs.append(
-        {"index": attempt, "reason": reason, **brief_metrics}
-    )
+    if closing:
+        executor.closing_attempts += 1
+        executor.closing_outcome = "no_candidate"
+        loop.note_delivered_steer("submission")
+    else:
+        executor.restarts = attempt
+        executor.restart_briefs.append(
+            {"index": attempt, "reason": reason, **brief_metrics}
+        )
+    event_type = "solver.closing_session" if closing else "solver.context_restart"
     trace.emit(
-        "solver.context_restart",
+        event_type,
         actor="harness",
         data={
             "reason": reason,
@@ -332,6 +349,7 @@ async def _restart_session(
             "to_session": await _session_identity(executor.session),
             "degraded": False,
             "restart": attempt,
+            "closing": closing,
             **brief_metrics,
         },
     )
@@ -339,12 +357,25 @@ async def _restart_session(
     # process together with the objective instead of mid-turn.
     await executor.session.observe(
         AgentObservation(
-            type="solver.context_restart",
+            type=event_type,
             data={
                 "reason": reason,
                 "brief_file": "carry-forward.md",
                 "brief_chars": len(brief),
-                "message": brief,
+                "message": (
+                    brief
+                    if not closing
+                    else (
+                        "Closing session: the previous session ended without submission. "
+                        "Run no more commands and start no new probes. Read the carry-forward "
+                        "brief, your notes, the world context and shared findings. If you "
+                        "hold a candidate, append the best one to $HARNESS_SUBMISSION_INBOX "
+                        "as one JSON line now; a rejected candidate is evidence, while an "
+                        "unsubmitted one scores nothing. If you hold no candidate, record "
+                        "that fact. Write $HARNESS_SUMMARY_FILE if it is missing, then stop.\n\n"
+                        + brief
+                    )
+                ),
             },
         )
     )
@@ -477,6 +508,7 @@ class BenchmarkRunner:
         submit_candidate: Callable[
             [Submission, _ExecutorRuntime | None], Awaitable[bool]
         ],
+        allow_context_restart: bool = True,
     ) -> bool:
         """Consume one Agent session stream.
 
@@ -504,7 +536,11 @@ class BenchmarkRunner:
                 archive.snapshot()
             if executor.completed:
                 return False
-            restart_reason = executor.runtime.progress.context_restart_due()
+            restart_reason = (
+                executor.runtime.progress.context_restart_due()
+                if allow_context_restart
+                else None
+            )
             if restart_reason is not None:
                 restarted = await _restart_session(
                     executor=executor,
@@ -528,6 +564,71 @@ class BenchmarkRunner:
                 await session.close(f"solver-stop:{decision.reason}")
                 return False
         return False
+
+    async def _maybe_start_closing_session(
+        self,
+        *,
+        executor: _ExecutorRuntime,
+        run_context: AgentRunContext,
+        adapter_instance: Any,
+        trace: TraceRecorder,
+        submit_candidate: Callable[
+            [Submission, _ExecutorRuntime | None], Awaitable[bool]
+        ],
+        started: float,
+        budgets: BudgetSpec,
+    ) -> bool:
+        """Try one bounded closing session for a scored executor that never submitted."""
+        if executor.completed or executor.submissions > 0 or executor.closing_attempts > 0:
+            return False
+
+        # A session that writes a candidate without emitting another event still
+        # gets its submission before we decide whether another turn is needed.
+        for submission in executor.submission_inbox.poll():
+            executor.submissions += 1
+            if await submit_candidate(submission, executor, deliver_feedback=False):
+                executor.completed = True
+                return False
+        if executor.completed or executor.submissions > 0:
+            return False
+
+        remaining = budgets.wall_time - (time.monotonic() - started)
+        if remaining < CLOSING_SESSION_MIN_SECONDS:
+            executor.closing_outcome = "no_time"
+            trace.emit(
+                "solver.closing_session",
+                actor="harness",
+                data={
+                    "reason": "submission_missing",
+                    "outcome": "no_time",
+                    "remaining_seconds": max(0.0, remaining),
+                    "closing": False,
+                },
+            )
+            return False
+
+        if not callable(getattr(adapter_instance, "start_session", None)):
+            executor.closing_outcome = "unsupported"
+            trace.emit(
+                "solver.closing_session",
+                actor="harness",
+                data={
+                    "reason": "submission_missing",
+                    "outcome": "unsupported",
+                    "remaining_seconds": remaining,
+                    "closing": False,
+                },
+            )
+            return False
+
+        return await _restart_session(
+            executor=executor,
+            run_context=run_context,
+            adapter_instance=adapter_instance,
+            reason="submission_missing",
+            trace=trace,
+            closing=True,
+        )
 
     async def run_case(
         self,
@@ -821,6 +922,8 @@ class BenchmarkRunner:
         async def submit_candidate(
             submission: Submission,
             executor: _ExecutorRuntime | None = None,
+            *,
+            deliver_feedback: bool = True,
         ) -> bool:
             nonlocal evaluation
             key = (submission.type, submission.value)
@@ -948,7 +1051,7 @@ class BenchmarkRunner:
             }
             # Only the submitting session gets the immediate feedback pointer; the
             # other sessions see the new world revision through their own context.
-            if executor is not None and executor.session is not None:
+            if deliver_feedback and executor is not None and executor.session is not None:
                 await executor.session.observe(
                     AgentObservation(
                         type="benchmark.feedback",
@@ -1060,6 +1163,33 @@ class BenchmarkRunner:
                             )
                             if not restarted:
                                 break
+                    closing_started = await self._maybe_start_closing_session(
+                        executor=executor,
+                        run_context=run_context,
+                        adapter_instance=adapter_instance,
+                        trace=trace,
+                        submit_candidate=submit_candidate,
+                        started=started,
+                        budgets=budgets,
+                    )
+                    if closing_started:
+                        while True:
+                            restarted = await self._consume_session(
+                                executor=executor,
+                                planned=planned,
+                                run_context=run_context,
+                                adapter_instance=adapter_instance,
+                                trace=trace,
+                                world=world,
+                                archive=archive,
+                                submit_candidate=submit_candidate,
+                                allow_context_restart=False,
+                            )
+                            if not restarted:
+                                break
+                        executor.closing_outcome = (
+                            "submitted" if executor.submissions > 0 else "no_candidate"
+                        )
                     executor.result = await executor.session.result()
                     if executor.retired_results:
                         executor.result = _merge_results(
@@ -1215,6 +1345,16 @@ class BenchmarkRunner:
                     },
                 )
             progress.write(progress_path)
+            for item in runtimes:
+                if (
+                    item.submissions == 0
+                    and not item.completed
+                    and item.closing_outcome is None
+                ):
+                    # Adapters without a restartable session cannot receive a
+                    # closing turn; make that limitation visible instead of
+                    # silently presenting the run as if no remedy existed.
+                    item.closing_outcome = "unsupported"
         except asyncio.CancelledError:
             if not lifecycle.terminal:
                 lifecycle.settle(succeeded=False, cancelled=True)
@@ -1361,6 +1501,9 @@ class BenchmarkRunner:
                 **_merged_loop_metrics(runtimes),
             },
         }
+        if runtimes[0].closing_outcome is not None:
+            result["closing_attempt"] = runtimes[0].closing_attempts > 0
+            result["closing_outcome"] = runtimes[0].closing_outcome
         restart_briefs = [
             {
                 "executor_id": item.plan.executor_id,
@@ -1395,6 +1538,14 @@ class BenchmarkRunner:
                         item.plan.workspace / "agent.summary.md"
                     ).is_file(),
                     "summary_sections_missing": list(item.summary_missing_sections),
+                    **(
+                        {
+                            "closing_attempt": item.closing_attempts > 0,
+                            "closing_outcome": item.closing_outcome,
+                        }
+                        if item.closing_outcome is not None
+                        else {}
+                    ),
                     **(
                         {"restart_briefs": item.restart_briefs}
                         if item.restart_briefs

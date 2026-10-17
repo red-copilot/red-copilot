@@ -71,3 +71,21 @@ BEN-07 re-run. Evidence: 2,261 of 3,154 agent feedback records were zero-informa
 
 **Non-goals:** distributed workflow orchestrator, required DAG, reimplementation of Pi's internal reasoning loop.
 
+### RUN-08 [~] P1 — Zero-submission closure and repetition precision
+Deliver: a scored run that ends without submitting gets one bounded chance to hand in
+the candidate it already holds, and repetition steering fires only on repeated failures
+or identical arguments rather than on every command in a broad family.
+Accept: a settled benchmark session with zero submissions receives one
+`solver.submission_reask`; if the process has already ended, the runner starts at most
+one closing session and skips it when less than 60 seconds remain; local task runs and
+runs with an existing submission are unchanged. A successful run that issues different
+commands in one family receives no repetition steer; three failures in one family or
+three identical argument fingerprints trigger one, and trusted progress resets the
+counters. `steer_counts.submission` records submission-due, re-ask and closing-session
+steers.
+State: implemented offline. Evidence: the 2026-10-16 sweep had 15/15 losing runs with
+zero submissions (11 ended voluntarily), and 56 repetition steers landed on 17 of 21
+successful runs. Coverage: `tests/test_control_replay.py`, `tests/test_control_properties.py`,
+`tests/test_solver_loop.py`, `tests/test_executors.py`, `tests/test_benchmark_streaming.py`.
+Outstanding: the BEN-07 live same-case A/B run.
+

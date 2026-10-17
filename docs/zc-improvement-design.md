@@ -87,17 +87,19 @@ B 段随 A 段之后；C 段在 maintainer 复核通过前不动。
 ### A3 重复动作打断（ZCP-06）
 
 - 目标：把"同一招磨到预算烧完"从观察变成干预。
-- 设计：在 `src/harness/progress.py` 维护"按 family 的连续无进展计数"与"已提醒过的 family 集合"；
-  连续 3 次同 family 且期间没有确认进展，就注入一次定向 steer（每个 family 每次运行只提醒一次）；
-  同一 family 累计到 6 次时升级为 finalize 级 steer（要求收敛并写摘要），不硬杀进程。
+- 设计：在 `src/harness/progress.py` 维护"按 family 的失败计数"、"相同参数连续计数"与"已提醒过的 family 集合"；
+  同一 family 累计 3 次失败、或连续 3 次参数哈希完全相同，就注入一次定向 steer（每个 family 每次运行只提醒一次）；
+  累计到 6 次时升级为 finalize 级 steer（要求收敛并写摘要），不硬杀进程。不同成功命令即使共享 `curl`/`ffuf`
+  这类宽泛 family，也不再误报为重复动作。
 - 状态落点：计数与冷却集合进 progress ledger（随 `progress.json` 落盘，崩溃后可恢复）。
 - 进展重置：任何确认进展（接受提交、验证裁决、trusted progress）清零该 family 的计数。
-- 可观测：新增 trace 事件 `solver.repetition_steer`，字段含 `family`、`consecutive`、`escalated`。
+- 可观测：新增 trace 事件 `solver.repetition_steer`，字段含 `family`、`consecutive`、`escalated`、
+  `basis`、`args_fingerprint`。
 - 失败模式：不同 family 的正常轮换不能被误伤；命令族识别不到的命令（非 bash）不计数。
 - 验收：合成同 family 连续事件只触发一次 steer；累计到阈值会升级；不同 family 的连续重试不触发；
   有确认进展后计数归零。
 - 实现说明：阈值为 `REPETITION_STEER_STREAK = 3` 与 `REPETITION_ESCALATE_STREAK = 6`，计数随
-  `progress.json` 落盘；证据见 `tests/test_solver_loop.py`。
+  `progress.json` 落盘；证据见 `tests/test_solver_loop.py`、`tests/test_control_replay.py`。
 
 ### A4 知识库填充（ZCP-07）
 
@@ -172,7 +174,7 @@ B 段随 A 段之后；C 段在 maintainer 复核通过前不动。
 | `executor_sessions[]` 增加 `prompt` / `provider` | 结果契约扩展 | 仅竞争会话路径出现，单会话不变 |
 | 新增 `executor_summary` | 结果契约扩展 | 仅竞争会话路径出现 |
 | 新增 `summary_present` / `summary_sections_missing` | 结果契约扩展 | 附加字段 |
-| 新增 trace 事件 `solver.context_restart` / `solver.repetition_steer` / `solver.summary_incomplete` | 事件扩展 | 只增不改，audit 与 trace 校验保持向前兼容 |
+| 新增 trace 事件 `solver.context_restart` / `solver.repetition_steer` / `solver.summary_incomplete` / `solver.submission_reask` / `solver.closing_session` | 事件扩展 | 只增不改，audit 与 trace 校验保持向前兼容 |
 
 ## 6. 工程量与天花板策略
 

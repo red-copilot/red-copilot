@@ -27,8 +27,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # brief renderer, the window-relative restart trigger in `progress.py`, and the
 # whole-word summary-section marker check). Re-measured from the tree rather
 # than estimated.
+#
+# RUN-08 added no module. The zero-submission re-ask/closing path, the more
+# precise repetition accounting, and the submission metric bucket live in the
+# existing solver/runner/progress modules. Measured after: 18,311 lines, up
+# 345 from the previous 17,966 ceiling; re-measured from the tree.
 MAX_MODULES = 58
-MAX_SRC_LINES = 17_966
+MAX_SRC_LINES = 18_311
 
 
 def _module_names() -> set[str]:

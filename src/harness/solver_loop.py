@@ -199,6 +199,7 @@ class SolverLoop:
         self._budget_steers_fired: set[float] = set()
         self._finalize_steered = False
         self._finalize_prompted = False
+        self._submission_reasked = False
         self._submission_due_steered = False
         self._tool_slow_steered = False
         self._observations: list[ObservationRecord] = []
@@ -534,6 +535,7 @@ class SolverLoop:
         await self._maybe_steer_submission_due(session)
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
+        await self._maybe_reask_submission(session, event_type=event.type)
         decision = self.decide(event_type=event.type)
         decision = self._hold_stop_for_budget_grace(decision)
         if decision.action is SolverAction.STOP:
@@ -567,6 +569,12 @@ class SolverLoop:
         counts = self.stats.steer_counts
         if bucket in counts:
             counts[bucket] += 1
+
+    def note_delivered_steer(self, bucket: str) -> None:
+        """Account for a steer delivered by a Harness-owned composition point."""
+        if bucket not in self.stats.steer_counts:
+            raise ValueError(f"unknown steer bucket: {bucket}")
+        self._count_steer(bucket)
 
     def _record_tool_metrics(self, event: AgentEvent) -> None:
         """Per-call tool telemetry, bounded to a top-N slow list.
@@ -732,7 +740,7 @@ class SolverLoop:
         action = self.progress.repetition_action()
         if action is None:
             return
-        family, streak, level = action
+        family, streak, level, basis, fingerprint = action
         self.progress.note_repetition_steer(family, level=level)
         self.trace.emit(
             "solver.repetition_steer",
@@ -742,21 +750,32 @@ class SolverLoop:
                 "consecutive": streak,
                 "level": level,
                 "escalated": level > 1,
+                "basis": basis,
+                "args_fingerprint": fingerprint,
             },
         )
-        if level > 1:
-            message = (
-                f"{streak} calls in a row share the command family {family} without "
-                "confirmed progress. Stop repeating it: consolidate what is already "
-                "verified, record what this path ruled out, then either widen or "
-                "write your summary."
+        if basis == "identical_args":
+            detail = (
+                "The exact same command arguments repeated without confirmed progress. "
+                "Change the input or hypothesis; rerunning the identical command is not "
+                "a new test."
+            )
+        elif level > 1:
+            detail = (
+                "Stop repeating that path: consolidate what is already verified, "
+                "record what it ruled out, then either widen or write your summary."
             )
         else:
-            message = (
-                f"{streak} calls in a row share the command family {family} without "
-                "confirmed progress. Change the hypothesis or the input class before "
-                "calling it again; the same command with new arguments is the same path."
+            detail = (
+                "Change the hypothesis or the input class before calling it again; "
+                "repeating the same failing path is not a new test."
             )
+        prefix = (
+            f"{streak} identical command calls in {family} produced no confirmed progress"
+            if basis == "identical_args"
+            else f"{streak} attempts in {family} have failed without confirmed progress"
+        )
+        message = f"{prefix}. {detail}"
         self._count_steer("repetition")
         await session.observe(
             AgentObservation(
@@ -765,6 +784,8 @@ class SolverLoop:
                     "family": family,
                     "consecutive": streak,
                     "level": level,
+                    "basis": basis,
+                    "args_fingerprint": fingerprint,
                     "message": message,
                 },
             )
@@ -900,6 +921,7 @@ class SolverLoop:
             "remaining_budget_fraction": remaining,
         }
         self.trace.emit("solver.submission_due", actor="harness", data=data)
+        self._count_steer("submission")
         await session.observe(
             AgentObservation(
                 type="solver.submission_due",
@@ -950,6 +972,8 @@ class SolverLoop:
         if self.summary_path.is_file():
             return
         self._finalize_prompted = True
+        if self.finalize_requests_submission:
+            self._submission_reasked = True
         self.trace.emit(
             "solver.finalize", actor="harness", data={"reason": "summary_missing"}
         )
@@ -973,6 +997,60 @@ class SolverLoop:
                         "$HARNESS_SUMMARY_FILE now, based only on what you already confirmed: "
                         "confirmed facts with their evidence, unconfirmed hypotheses, what you "
                         "tried and ruled out, and unfinished intents. Then stop."
+                    ),
+                },
+            )
+        )
+
+    async def _maybe_reask_submission(self, session: AgentSession, *, event_type: str) -> None:
+        """Ask a settled scored run to hand in the candidate it already has.
+
+        A benchmark can only score a submitted candidate. The 2026-10-16 sweep
+        ended 15 losing runs with zero submissions; eleven of them finished
+        voluntarily rather than at the wall clock. This is one bounded prompt,
+        not a new planning turn: it asks the Agent to consolidate existing
+        notes, world state and shared findings, submit if it holds a candidate,
+        and otherwise say so in the summary.
+        """
+        if (
+            event_type != "pi.agent_settled"
+            or not self.finalize_requests_submission
+            or self._submission_reasked
+            or self.progress.objective_completed
+            or self.progress.submissions_attempted > 0
+        ):
+            return
+        self._submission_reasked = True
+        summary_present = self.summary_path.is_file()
+        data = {
+            "reason": "agent_settled_without_submission",
+            "summary_present": summary_present,
+            "tool_calls": self.progress.tool_calls,
+            "model_calls": self.progress.model_calls,
+            "remaining_budget_fraction": self.progress.remaining_budget_fraction,
+        }
+        self.trace.emit("solver.submission_reask", actor="harness", data=data)
+        self._count_steer("submission")
+        summary_instruction = (
+            "Write $HARNESS_SUMMARY_FILE if it is missing, using only what you "
+            "already confirmed. Then stop."
+            if not summary_present
+            else "Do not start new work; stop after the submission attempt."
+        )
+        await session.observe(
+            AgentObservation(
+                type="solver.submission_reask",
+                data={
+                    **data,
+                    "message": (
+                        "Your round ended without submitting any candidate. This is the "
+                        "bounded closing prompt: run no more commands and start no new "
+                        "probes. Read your existing notes, $HARNESS_WORLD_CONTEXT and any "
+                        "shared findings. If you hold a candidate, append your best one "
+                        "to $HARNESS_SUBMISSION_INBOX as one JSON line now; a rejected "
+                        "candidate is evidence, while an unsubmitted one scores nothing. "
+                        "If you hold no candidate, record that fact. "
+                        f"{summary_instruction}"
                     ),
                 },
             )

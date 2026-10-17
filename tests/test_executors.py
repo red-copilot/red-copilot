@@ -946,3 +946,185 @@ def test_context_restart_gives_up_after_the_cap(
         )
     )
     assert progress["context_restarts"] == 2
+
+
+class ClosingSession:
+    """A scripted session whose second instance may submit from existing notes."""
+
+    def __init__(self, *, workspace: Path, index: int, submit: bool) -> None:
+        self.workspace = workspace
+        self.index = index
+        self.submit = submit
+        self.feedback: list = []
+        self.closed_reason: str | None = None
+
+    async def events(self):
+        if self.submit:
+            self.workspace.mkdir(parents=True, exist_ok=True)
+            (self.workspace / "submission.inbox.jsonl").write_text(
+                json.dumps({"type": "flag", "value": "flag{closing}"}) + "\n",
+                encoding="utf-8",
+            )
+            yield AgentEvent(type="progress.updated", data={"step": 1})
+
+    async def checkpoint(self) -> AgentCheckpoint:
+        return AgentCheckpoint(
+            id=f"closing-checkpoint-{self.index}",
+            event_offset=0,
+            feedback_offset=0,
+            session_id=f"closing-{self.index}",
+        )
+
+    async def observe(self, observation) -> None:
+        self.feedback.append(observation)
+
+    async def close(self, reason: str) -> None:
+        self.closed_reason = reason
+
+    async def result(self) -> AgentResult:
+        return AgentResult(
+            returncode=0,
+            timed_out=False,
+            budget_exceeded=None,
+            stdout="",
+            stderr="",
+            metrics=UsageMetrics(model_calls=1),
+        )
+
+
+class ClosingAgentAdapter:
+    def __init__(self, *, second_session_submits: bool) -> None:
+        self.second_session_submits = second_session_submits
+        self.sessions: list[ClosingSession] = []
+
+    async def start_session(self, context):
+        index = len(self.sessions)
+        session = ClosingSession(
+            workspace=Path(context.run_dir),
+            index=index,
+            submit=index == 1 and self.second_session_submits,
+        )
+        self.sessions.append(session)
+        return session
+
+
+class OneShotOnlyAdapter:
+    def run(self, _context):
+        return AgentResult(
+            returncode=0,
+            timed_out=False,
+            budget_exceeded=None,
+            stdout="",
+            stderr="",
+            metrics=UsageMetrics(),
+        )
+
+
+def _run_closing_case(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    wall_time: int,
+    second_session_submits: bool,
+) -> tuple[dict, ClosingAgentAdapter]:
+    import harness.benchmark.runner as runner_module
+
+    agent_adapter = ClosingAgentAdapter(second_session_submits=second_session_submits)
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: agent_adapter,
+    )
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-CLOSING", benchmark="fake"),
+            agent=_pi_agent(),
+            budgets=BudgetSpec(wall_time=wall_time),
+            seed=1,
+            submission_extractor=lambda _result: [],
+        )
+    )
+    return result, agent_adapter
+
+
+def test_zero_submission_session_gets_one_closing_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, agent_adapter = _run_closing_case(
+        monkeypatch,
+        tmp_path,
+        wall_time=300,
+        second_session_submits=True,
+    )
+
+    assert len(agent_adapter.sessions) == 2
+    assert result["closing_attempt"] is True
+    assert result["closing_outcome"] == "submitted"
+    assert result["metrics"]["steer_counts"]["submission"] == 1
+    closing_prompts = [
+        item
+        for item in agent_adapter.sessions[1].feedback
+        if item.type == "solver.closing_session"
+    ]
+    assert len(closing_prompts) == 1
+    assert "HARNESS_SUBMISSION_INBOX" in closing_prompts[0].data["message"]
+    trace = (tmp_path / result["run_id"] / "trace.jsonl").read_text(encoding="utf-8")
+    assert "solver.closing_session" in trace
+
+
+def test_closing_session_is_not_repeated_when_no_candidate_is_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, agent_adapter = _run_closing_case(
+        monkeypatch,
+        tmp_path,
+        wall_time=300,
+        second_session_submits=False,
+    )
+
+    assert len(agent_adapter.sessions) == 2
+    assert result["closing_attempt"] is True
+    assert result["closing_outcome"] == "no_candidate"
+    assert result["metrics"]["steer_counts"]["submission"] == 1
+
+
+def test_closing_session_is_skipped_without_enough_wall_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, agent_adapter = _run_closing_case(
+        monkeypatch,
+        tmp_path,
+        wall_time=1,
+        second_session_submits=True,
+    )
+
+    assert len(agent_adapter.sessions) == 1
+    assert result["closing_attempt"] is False
+    assert result["closing_outcome"] == "no_time"
+    assert result["metrics"]["steer_counts"]["submission"] == 0
+
+
+def test_one_shot_adapter_reports_unsupported_closing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import harness.benchmark.runner as runner_module
+
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: OneShotOnlyAdapter(),
+    )
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-ONE-SHOT", benchmark="fake"),
+            agent=_pi_agent(),
+            budgets=BudgetSpec(wall_time=300),
+            seed=1,
+            submission_extractor=lambda _result: [],
+        )
+    )
+
+    assert result["closing_attempt"] is False
+    assert result["closing_outcome"] == "unsupported"

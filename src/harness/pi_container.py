@@ -105,6 +105,9 @@ class ContainerPiRpcSession:
             "solver.budget",
             "solver.finalize",
             "solver.repetition_steer",
+            "solver.submission_due",
+            "solver.submission_reask",
+            "solver.closing_session",
             "solver.context_restart",
             "solver.hint",
         }

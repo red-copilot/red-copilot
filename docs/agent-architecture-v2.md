@@ -65,6 +65,11 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
   `events.jsonl`、`agent.events.jsonl`、`agent.summary.md`。
 - checkpoint 只记录控制游标与已用量，不含角色/计划字段（v3 记录仍可读）。
 
+零提交收尾也属于控制律，而不是认知层：Agent 自行结束且从未提交时，Harness 只补一次
+有界提醒；进程已经结束时，runner 最多启动一个复用笔记与接力简报的 closing session，
+只允许提交已有候选或补写摘要，并要求不开启新探测。它不挑选候选、不规划攻击路径，
+也不改变提交权威。
+
 ## 5. 接口
 
 | 变更 | 内容 |
@@ -81,6 +86,7 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 | 新增 | 长会话重启：自上次重启起工具调用 300 次或又用掉 `max_tool_calls` 的 60% 时触发，最多 2 次；接力简报写在会话根的 `carry-forward.md`，事件为 `solver.context_restart` |
 | 新增 | 结果契约：`agent_report.present` / `agent_report.sections_missing`；竞争运行的 `executor_sessions[].prompt`、`provider`、`summary_sections_missing` 与顶层 `executor_summary` |
 | 新增 | trace 事件 `solver.repetition_steer`、`solver.context_restart`、`solver.summary_incomplete` |
+| 新增 | 零提交收尾：`solver.submission_reask`、`solver.closing_session`，结果字段 `closing_attempt` / `closing_outcome`；`steer_counts.submission` 记录提交类提示 |
 
 ## 6. 消融基线
 

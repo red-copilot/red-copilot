@@ -1557,6 +1557,7 @@ class MetricsRunner(FakeBenchmarkRunner):
                 "repetition": 1,
                 "budget": 1,
                 "finalize": 0,
+                "submission": 0,
             },
             "tool_time_ms": 123456,
             "context_tokens_final": 20583,

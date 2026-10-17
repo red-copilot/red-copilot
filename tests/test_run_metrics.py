@@ -31,6 +31,7 @@ def test_steer_counts_group_delivered_feedback_by_bucket() -> None:
         "repetition": 1,
         "budget": 1,
         "finalize": 0,
+        "submission": 0,
     }
 
 
@@ -73,6 +74,7 @@ def test_derive_run_metrics_is_empty_safe() -> None:
         "repetition": 0,
         "budget": 0,
         "finalize": 0,
+        "submission": 0,
     }
     assert metrics["tool_calls"] == 0
     assert metrics["tool_time_ms"] == 0
@@ -120,3 +122,17 @@ def test_derive_run_metrics_ignores_malformed_records() -> None:
     assert metrics["tool_calls"] == 1
     assert metrics["tool_time_ms"] == 0
     assert metrics["context_tokens_final"] == 5
+
+
+def test_submission_steers_have_their_own_bucket() -> None:
+    records = [
+        {"type": "solver.submission_due"},
+        {"type": "solver.submission_reask"},
+        {"type": "solver.closing_session"},
+        {"type": "solver.finalize"},
+    ]
+
+    counts = steer_counts(records)
+
+    assert counts["submission"] == 3
+    assert counts["finalize"] == 1
