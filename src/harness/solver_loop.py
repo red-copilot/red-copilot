@@ -922,18 +922,11 @@ class SolverLoop:
             self._absorb_operator_hint(hint, late=True)
 
     def _write_context(self) -> None:
-        # One snapshot for focus and render keeps the written context
-        # revision-consistent instead of two reloads apart.
+        # One snapshot per render keeps the written context revision-consistent.
         snapshot = self.world.snapshot
-        focus = self.context_builder.build_focus(
-            snapshot,
-            reference=self.context_query,
-            subgoal=self.progress.current_subgoal,
-        )
         rendered = self.context_builder.render(
             snapshot,
             query=self.context_query,
-            focus=focus,
             budget=self.progress.agent_budget_lines(),
         )
         (self.run_dir / "world.context.txt").write_text(rendered, encoding="utf-8")

@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from .focus import DEFAULT_FOCUS_CLAIM_THRESHOLD, FocusBuilder, FocusItem, FocusRequest, FocusSet
 from .models import WorldSnapshot, is_bookkeeping_record
 from .retrieval import WorldRetriever
 
@@ -30,21 +29,6 @@ def estimate_tokens(text: str) -> int:
     return (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
 
 
-def _clip(text: str | None, limit: int) -> str:
-    if not text:
-        return ""
-    return text if len(text) <= limit else text[:limit].rstrip() + " ..."
-
-
-def _focus_line(item: FocusItem, *, with_reason: bool = False) -> str:
-    confidence = f" conf={item.confidence:.2f}" if item.confidence is not None else ""
-    reason = f" ({item.reason})" if with_reason and item.reason else ""
-    return (
-        f"- [{item.epistemic_status}] {item.kind}:{item.type} {item.label}"
-        f"{confidence}{reason}"
-    )
-
-
 class WorldContextBuilder:
     """Build a compact, deterministic Agent-facing projection of world state."""
 
@@ -56,55 +40,24 @@ class WorldContextBuilder:
         max_ruled_out: int = 10,
         max_relations: int = 20,
         max_chars: int = 16000,
-        focus_max_chars: int = 2000,
-        focus_claim_threshold: float = DEFAULT_FOCUS_CLAIM_THRESHOLD,
-        focus_enabled: bool = True,
         token_budget: int | None = None,
         retriever: WorldRetriever | None = None,
-        focus_builder: FocusBuilder | None = None,
     ) -> None:
         self.max_observations = max_observations
         self.max_failures = max_failures
         self.max_ruled_out = max_ruled_out
         self.max_relations = max_relations
         self.max_chars = max_chars
-        self.focus_max_chars = focus_max_chars
-        self.focus_claim_threshold = focus_claim_threshold
-        self.focus_enabled = focus_enabled
         if token_budget is not None:
             if token_budget < 1:
                 raise ValueError("token_budget must be a positive number of tokens")
-            # A token budget tightens the character budgets instead of
-            # replacing them: the focus block keeps up to a quarter of the
-            # budget, the state projection gets the rest. ``None`` keeps the
-            # legacy character-only budgets byte-identical.
-            total_chars = token_budget * CHARS_PER_TOKEN
-            self.focus_max_chars = min(self.focus_max_chars, total_chars // 4)
-            self.max_chars = min(self.max_chars, total_chars - self.focus_max_chars)
-        self.focus_builder = focus_builder or FocusBuilder()
+            self.max_chars = min(self.max_chars, token_budget * CHARS_PER_TOKEN)
         self.retriever = retriever or WorldRetriever(
             limits={
                 "observations": max_observations,
                 "failures": max_failures,
                 "relations": max_relations,
             }
-        )
-
-    def build_focus(
-        self,
-        snapshot: WorldSnapshot,
-        *,
-        reference: str,
-        subgoal: str | None = None,
-    ) -> FocusSet:
-        """Derive the bounded working set for one solver round."""
-        return self.focus_builder.build(
-            snapshot,
-            FocusRequest(
-                reference=reference,
-                subgoal=subgoal,
-                claim_threshold=self.focus_claim_threshold,
-            ),
         )
 
     @staticmethod
@@ -142,72 +95,16 @@ class WorldContextBuilder:
         snapshot: WorldSnapshot,
         *,
         query: str | None = None,
-        focus: FocusSet | None = None,
         budget: Sequence[str] | None = None,
     ) -> str:
-        """Render the Agent context, optionally prefixed by a bounded focus block.
-
-        The focus block is rendered first and owns its own character budget, so
-        it can never be truncated away by the wider state projection. When
-        ``focus`` is ``None`` or focus rendering is disabled the output is
-        byte-identical to the body-only projection.
-        """
+        """Render the Harness fact view and the remaining-budget header."""
         body = self._render_body(snapshot, query=query)
-        if focus is None or not self.focus_enabled:
+        if not budget:
             return body
-        return self._render_focus(focus, budget_lines=budget) + "\n" + body
-
-    def _render_focus(
-        self, focus: FocusSet, *, budget_lines: Sequence[str] | None = None
-    ) -> str:
-        budget = max(1, self.focus_max_chars)
-        marker = "[focus truncated to character budget]"
-        lines: list[str] = []
-        used = 0
-        truncated = False
-
-        def add(line: str, *, is_marker: bool = False) -> bool:
-            nonlocal used, truncated
-            addition = len(line) + 1
-            reserve = 0 if is_marker else len(marker) + 1
-            if used + addition + reserve > budget:
-                if not is_marker:
-                    truncated = True
-                return False
-            lines.append(line)
-            used += addition
-            return True
-
-        def add_section(title: str, items: list[FocusItem]) -> None:
-            if not add("") or not add(f"### {title}"):
-                return
-            if not items:
-                add("- none")
-                return
-            for item in items:
-                if not add(_focus_line(item)):
-                    return
-
-        add("## Focus")
-        add(f"reference: {_clip(focus.reference, 300) or 'none'}")
-        # Budget sits with the reference because it qualifies every next move:
-        # a run at 10% wall clock should consolidate, not widen.
-        for line in budget_lines or ():
-            add(f"budget: {_clip(line, 200)}")
-        add(f"subgoal: {_clip(focus.subgoal, 300) if focus.subgoal else 'none'}")
-        add_section("Established facts", focus.established)
-        add_section("Open unknowns", focus.unknowns)
-        if add("") and add("### Next focus"):
-            if focus.next_focus is None:
-                add("- none")
-            else:
-                add(_focus_line(focus.next_focus, with_reason=True))
-        if focus.missing:
-            add("")
-            add("missing: " + ", ".join(focus.missing))
-        if truncated:
-            add(marker, is_marker=True)
-        return "\n".join(lines) + "\n"
+        budget_lines = [
+            f"budget: {' '.join(str(line).split())[:200]}" for line in budget if str(line).strip()
+        ]
+        return "\n".join(("## Budget", *budget_lines, "", body))
 
     def _render_body(self, snapshot: WorldSnapshot, *, query: str | None = None) -> str:
         selected = self.retriever.retrieve(snapshot, query=query)

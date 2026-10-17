@@ -896,7 +896,9 @@ def test_written_context_carries_the_remaining_window(tmp_path: Path) -> None:
     asyncio.run(loop.process_event(session, AgentEvent(type="tool.result", data={})))
 
     context = (tmp_path / "world.context.txt").read_text(encoding="utf-8")
-    assert "## Focus" in context
+    assert "## Budget" in context
+    assert "## Focus" not in context
+    assert "subgoal:" not in context
     assert "budget: wall_time 100% left" in context
     # A dimension appears only once it has been charged; the wall clock is
     # always visible because it is the window every decision is paced by.

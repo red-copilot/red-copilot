@@ -1,10 +1,7 @@
-"""Deterministic focus set: the bounded working set for the next solver round.
+"""Frozen copy of the retired deterministic focus projection.
 
-The focus set is a derived projection of authoritative World state. It selects a
-small, goal-relevant subset of established facts and open unknowns so the next
-Agent round starts from a narrowed working set instead of the full projection.
-It never mutates World state, is recomputed on demand, and stays deterministic
-so the same snapshot always yields the same focus.
+The production Harness no longer ranks a working set. This snapshot keeps the
+offline v1 ablation reproducible without leaving the deleted module importable.
 """
 
 from __future__ import annotations
@@ -15,22 +12,16 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import KIND_COLLECTIONS, TRUST_RANK, WorldSnapshot
+from harness.world.models import KIND_COLLECTIONS, TRUST_RANK, WorldSnapshot
 
 DEFAULT_FOCUS_CLAIM_THRESHOLD = 0.7
 DEFAULT_MAX_ESTABLISHED = 8
 DEFAULT_MAX_UNKNOWNS = 5
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
-# Record kinds that can be treated as established facts of the current state.
 _ESTABLISHED_KINDS = ("observation", "capability", "artifact", "entity", "relation")
-# Record kinds that represent an open question the next round could resolve.
 _UNKNOWN_KINDS = ("hypothesis", "constraint", "failure")
-# Below-threshold claims are not established facts, but they are still worth
-# surfacing: they are unverified leads the next round can confirm or discard.
 _LEAD_KINDS = _ESTABLISHED_KINDS
-# Only records the Harness or an independent producer authored can displace a
-# record from the established set. Agent claims never displace established facts.
 _DISPLACING_STATUSES = frozenset({"evidence", "verified"})
 _UNKNOWN_KIND_WEIGHT = {"constraint": 1.5, "hypothesis": 1.0, "failure": 0.8}
 _LEAD_KIND_WEIGHT = {
@@ -43,8 +34,6 @@ _LEAD_KIND_WEIGHT = {
 
 
 class FocusRequest(BaseModel):
-    """Immutable inputs that scope the working set for one solver round."""
-
     model_config = ConfigDict(frozen=True)
 
     reference: str = ""
@@ -55,8 +44,6 @@ class FocusRequest(BaseModel):
 
 
 class FocusItem(BaseModel):
-    """One ranked record inside the focus set."""
-
     model_config = ConfigDict(frozen=True)
 
     id: str
@@ -71,8 +58,6 @@ class FocusItem(BaseModel):
 
 
 class FocusSet(BaseModel):
-    """The derived working set for one solver round."""
-
     model_config = ConfigDict(frozen=True)
 
     reference: str = ""
@@ -176,8 +161,6 @@ def _focus_item(kind: str, record: Any, *, score: float, reason: str = "") -> Fo
 
 
 class FocusBuilder:
-    """Rank established facts and open unknowns into a small working set."""
-
     def build(self, snapshot: WorldSnapshot, request: FocusRequest) -> FocusSet:
         query_tokens = _tokens(f"{request.reference} {request.subgoal or ''}")
         displaced = _displaced_ids(snapshot)
@@ -216,9 +199,6 @@ class FocusBuilder:
                     continue
                 status = record.provenance.epistemic_status
                 confidence = getattr(record, "confidence", None)
-                # Agent-authored facts only enter the working set when they carry
-                # a high enough self-reported confidence. They still render with
-                # the `claim` label, so the Agent can see they are unverified.
                 if status == "claim" and (
                     confidence is None or confidence < request.claim_threshold
                 ):

@@ -33,9 +33,8 @@ def finalize_world_goal(
     goal.status = "completed" if success else "failed"
     goal.attributes.update({"run_status": status, "score": score, "success": success})
     world.upsert("goal", goal)
-    focus = context_builder.build_focus(world.snapshot, reference=goal.description)
     (run_dir / "world.context.txt").write_text(
-        context_builder.render(world.snapshot, focus=focus),
+        context_builder.render(world.snapshot, query=goal.description),
         encoding="utf-8",
     )
 

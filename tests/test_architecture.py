@@ -65,7 +65,6 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.verification",
         "harness.world",
         "harness.world.context",
-        "harness.world.focus",
         "harness.world.live",
         "harness.world.models",
         "harness.world.protocol",
@@ -100,6 +99,7 @@ DELETED_SUBSYSTEMS: frozenset[str] = frozenset(
         "harness.agent_events",
         "harness.action_verifier",
         "harness.telemetry",
+        "harness.world.focus",
     }
 )
 

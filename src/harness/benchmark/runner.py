@@ -902,15 +902,10 @@ class BenchmarkRunner:
             """Re-render the world projection for the run and every session."""
             for planned in runtimes:
                 builder = planned.runtime.context_builder
-                focus = builder.build_focus(
-                    world.snapshot,
-                    reference=session.objective.description,
-                )
                 (planned.plan.root / "world.context.txt").write_text(
                     builder.render(
                         world.snapshot,
                         query=session.objective.description,
-                        focus=focus,
                     ),
                     encoding="utf-8",
                 )

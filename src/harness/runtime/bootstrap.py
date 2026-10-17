@@ -93,12 +93,7 @@ def bootstrap_solver(
 
     context_builder = WorldContextBuilder(token_budget=context_token_budget)
     snapshot = world.snapshot
-    focus = context_builder.build_focus(snapshot, reference=context_query)
-    initial_context = context_builder.render(
-        snapshot,
-        query=context_query,
-        focus=focus,
-    )
+    initial_context = context_builder.render(snapshot, query=context_query)
     (run_dir / "world.context.txt").write_text(initial_context, encoding="utf-8")
     progress = (
         ProgressLedger.model_validate_json(

@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 
 from harness.progress import ProgressLedger
 from harness.world import TRUST_RANK, WorldSnapshot
-from harness.world.focus import FocusBuilder, FocusItem, FocusRequest, FocusSet
 
+from .focus import FocusBuilder, FocusItem, FocusRequest, FocusSet
 from .skills import SkillSpec, StateSelector
 
 
