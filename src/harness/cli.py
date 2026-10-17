@@ -389,7 +389,7 @@ def tsec(
         typer.Option(
             "--max-passes",
             min=1,
-            max=5,
+            max=20,
             help="Retry still-incomplete challenges this many passes over the set.",
         ),
     ] = 1,
