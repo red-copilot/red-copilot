@@ -543,6 +543,34 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             },
         )
 
+    async def reap_unclosed_sessions(self) -> int:
+        """Retry closes that previously gave up, so a leaked instance does
+        not occupy one of the team's three slots until the platform's own
+        reaper notices (observed: 80 minutes on the live run)."""
+        reaped = 0
+        for session_id, state in list(self._sessions.items()):
+            if state.closed:
+                continue
+            probe = BenchmarkSession(
+                id=session_id,
+                benchmark="tsec",
+                case_id=state.case.id,
+                objective=ObjectiveSpec(description="reap"),
+                targets=[],
+                metadata={},
+            )
+            await self.teardown(probe)
+            if self._sessions[session_id].closed:
+                reaped += 1
+        if reaped:
+            print(
+                f"[tsec] re-closed {reaped} leaked challenge instance(s) at the "
+                "pass boundary",
+                file=sys.stderr,
+                flush=True,
+            )
+        return reaped
+
     async def teardown(self, session: BenchmarkSession) -> None:
         # Closing must never raise: an exception here would surface from the
         # runner's finally block and can mask an otherwise solved case, and a
@@ -935,6 +963,7 @@ async def run_tsec_challenges(
                 ):
                     break
                 if pass_index:
+                    await adapter.reap_unclosed_sessions()
                     discovered = await _discover_with_retry(adapter)
                 if challenge_code and not any(
                     case.id == challenge_code for case in discovered

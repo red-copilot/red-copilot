@@ -1763,3 +1763,25 @@ def test_persistent_conflicts_cool_dispatch_instead_of_burning_the_queue(
     assert len(results) == 3
     cooldowns = [s for s in sleeps if s > tsec_adapter.CONFLICT_COOLDOWN_SECONDS - 10]
     assert len(cooldowns) >= 1
+
+
+def test_pass_boundary_reaps_leaked_challenge_instances(monkeypatch) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", no_sleep)
+    _FlakyCloseClient.failures = 99  # every close fails in pass 1
+    _FlakyCloseClient.calls = 0
+    _FlakyCloseClient.raise_invalid_state = False
+    adapter, session = _teardown_adapter(_FlakyCloseClient())
+
+    asyncio.run(adapter.teardown(session))  # gives up; instance leaks
+    assert adapter._sessions[session.id].closed is False
+
+    _FlakyCloseClient.failures = 0  # platform turbulence over
+    _FlakyCloseClient.calls = 0
+
+    reaped = asyncio.run(adapter.reap_unclosed_sessions())
+
+    assert reaped == 1
+    assert adapter._sessions[session.id].closed is True
