@@ -12,8 +12,10 @@ from pathlib import Path
 from .secureio import open_beneath, read_regular_text
 
 _HARNESS_VIEWS = ("world.context.txt", "progress.json")
-_CONTAINER_UID = 65532
-_CONTAINER_GID = 65532
+# The container runs as root without owning the tree, so the harness keeps the
+# workspace and reaches it through harness.agent's baseline capabilities.
+_CONTAINER_UID = 0
+_CONTAINER_GID = 0
 PRIOR_SUMMARY_NAME = "prior-summary.md"
 MAX_PRIOR_SUMMARY_BYTES = 256 * 1024
 
@@ -239,29 +241,26 @@ def prepare_agent_task_view(
 
 
 def prepare_agent_workspace_for_container(workspace: Path) -> tuple[int, int]:
-    """Make the workspace writable by a dedicated, non-root container identity."""
+    """Lock the workspace down and return the identity the container runs as.
+
+    Ownership stays with the harness identity (the root container does not need
+    it), so a non-root harness keeps the write access its view replacement needs.
+    """
     info = workspace.stat(follow_symlinks=False)
     if not stat.S_ISDIR(info.st_mode):
         raise ValueError("agent workspace must be a real directory")
-    uid, gid = (
-        (_CONTAINER_UID, _CONTAINER_GID)
-        if os.geteuid() == 0
-        else (os.geteuid(), os.getegid())
-    )
     for parent, directories, files in os.walk(workspace, followlinks=False):
         parent_path = Path(parent)
         for path in (parent_path / name for name in directories + files):
             path_info = path.lstat()
             if stat.S_ISLNK(path_info.st_mode):
                 continue
-            os.chown(path, uid, gid, follow_symlinks=False)
             if stat.S_ISDIR(path_info.st_mode):
                 os.chmod(path, 0o700, follow_symlinks=False)
             elif stat.S_ISREG(path_info.st_mode):
                 os.chmod(path, stat.S_IMODE(path_info.st_mode) | 0o600, follow_symlinks=False)
-        os.chown(parent_path, uid, gid, follow_symlinks=False)
         os.chmod(parent_path, 0o700, follow_symlinks=False)
-    return uid, gid
+    return _CONTAINER_UID, _CONTAINER_GID
 
 
 def sync_agent_workspace(*, run_dir: Path, workspace: Path) -> None:

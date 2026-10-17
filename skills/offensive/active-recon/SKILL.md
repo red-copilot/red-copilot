@@ -26,7 +26,9 @@ Active port scanning and service version detection on authorized targets.
 
 ## payload 家族与变体
 
-- 扫描族：全连接探测（可靠、慢）与半开探测（快、需要更高权限）二选一，不要在没网权限时硬上。
+- 扫描族：全连接探测（`nmap -sT`、`nc -z`，可靠、慢）与半开探测（`nmap -sS`，快）二选一。
+  半开探测、UDP 扫描与 `masscan` 都依赖原始套接字，只有 Agent 在配置里声明 `NET_RAW` 时才可用；
+  未声明时这些命令会以 `Operation not permitted` 失败——换 connect 路径，不要原地重试。
 - 服务识别族：协议探测脚本、版本指纹库、TLS 探测。先跑轻量指纹，再有选择地加脚本。
 - 速率变体：按目标规模分级（单机/小网段/大网段），大网段要限速并分批，禁止全端口全速。
 - 反模式：把全端口 `-p-` 当默认动作。缺省先扫常见端口，拿到线索再定向扩。
@@ -47,6 +49,7 @@ Active port scanning and service version detection on authorized targets.
 ## 常见坑
 
 - 有 WAF/IPS 时把"连接被重置"读成"端口关闭"，从而漏掉真实服务。
+- 把识别软件包当侦察动作：求解期没有包源，装不上也来不及；用镜像已有的工具换路径。
 - 只记录开放端口不记录服务版本，导致后面没有 payload 选择的依据。
 - 把一次扫描结果当成恒定事实：目标会变，重要结论要带时间戳。
 - 反复扫同一区间刷步数，却不产生新的服务事实——这属于重复动作，会被收敛机制打断。

@@ -29,7 +29,6 @@ def _spec(*, mounts: tuple[Mount, ...] = (), environment: tuple[EnvVar, ...] = (
         image="harness/pi-kali:local",
         mounts=mounts,
         environment=environment,
-        user="1000:1000",
     )
 
 
@@ -52,8 +51,12 @@ def test_create_command_keeps_the_hardening() -> None:
     ):
         assert flag in command, flag
     assert command[command.index("--network") + 1] == "host"
-    assert command[command.index("--cap-add") + 1] == "NET_RAW"
-    assert command[command.index("--user") + 1] == "1000:1000"
+    # Root with the cap-dropped baseline plus NET_RAW: the same identity
+    # contract as the Harness's Agent containers.
+    assert [
+        command[index + 1] for index, entry in enumerate(command) if entry == "--cap-add"
+    ] == ["DAC_OVERRIDE", "FOWNER", "NET_RAW"]
+    assert command[command.index("--user") + 1] == "0:0"
     assert "docker.sock" not in " ".join(command)
     image_index = command.index("harness/pi-kali:local")
     assert command[image_index + 1 :] == ["sleep", "infinity"]

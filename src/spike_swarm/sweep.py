@@ -39,7 +39,6 @@ from .containers import (
     Mount,
     PiRpcSession,
     create_command,
-    current_user,
     destroy_container,
     ensure_container,
     passthrough_env,
@@ -395,7 +394,6 @@ def session_spec(
         image=config.image,
         mounts=tuple(mounts),
         environment=tuple(environment),
-        user=current_user(),
     )
 
 

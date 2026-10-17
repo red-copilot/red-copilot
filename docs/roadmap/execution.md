@@ -5,7 +5,7 @@
 ### EXE-01 [x] P0 — Execution trust boundary
 Deliver: documented threat model plus enforceable mounts, secret isolation, rootfs permissions, capability/PID/CPU/RAM limits, network rules, a non-privileged default and artifact handoff; the Agent must not reach the authoritative World DB, verifier source or credentials.
 Accept: integration tests attempt to mutate protected state, obtain secrets, escape the allowed workspace and contact denied destinations; failures are observable.
-State: per-run `agent-workspace/` separation, numeric UID/GID ownership, no-follow file access, a verifier-free bounded task snapshot, blanked Docker proxy defaults, explicit `cap_add` opt-in, shared `build_container_command` limits and six enforced network profiles are implemented. The isolation-probe boundary test now runs in CI (`tests/test_container_boundary.py`, executed after the probe image build) and passed locally against `harness-isolation-probe:ci`.
+State: per-run `agent-workspace/` separation, no-follow file access, a verifier-free bounded task snapshot, blanked Docker proxy defaults, a cap-dropped container with an explicit capability baseline plus `cap_add` opt-in, shared `build_container_command` limits and six enforced network profiles are implemented. The isolation-probe boundary test runs in CI (`tests/test_container_boundary.py`, executed after the probe image build) and passed locally against `harness-isolation-probe:ci`; since EXE-09 it asserts the mount, capability and environment boundary instead of a non-root container UID.
 
 ### EXE-02 [~] P1 — Adapter/session contract and budgets
 Deliver: normalized event IDs, settled/terminal semantics, tool-call correlation and per-run token/tool/wall-clock/cost accounting without double charging through both Gateway and Pi.
@@ -32,7 +32,7 @@ Deliver: one pydantic schema per Agent-authored event type, validated at the ACI
 Accept: the registry covers exactly the typed events `TypedACI` translates; malformed payloads fail closed into `aci.feedback` without state changes.
 State: implemented in `agent_events.py::TYPED_EVENT_SCHEMAS` with a documented fail-closed tightening on known keys with wrong types; a live Pi run remains before acceptance.
 
-### EXE-07 [ ] P1 — Tool availability over tool count
+### EXE-07 [x] P1 — Tool availability over tool count
 Deliver: fix or explicitly retire the tools the Agent actually reached for and could not use -
 nmap is broken in-run (`/usr/lib/nmap/nmap: Operation not permitted`, 28 occurrences) - and
 pre-install the missing basics (`unzip`, `xxd`, `php-cli`, `iptables`, `traceroute`, the Python
@@ -41,10 +41,19 @@ carries the documented replacement path for anything retired.
 Accept: the image static contract test asserts the added tools and that nothing installs at solve
 time; an in-container probe runs the replacement reconnaissance path and imports the Python
 stack; the image size delta is recorded.
-State: pending. Evidence: 28 `Operation not permitted` results from nmap, `unzip`/`xxd`/`php`
+State: implemented. Evidence: 28 `Operation not permitted` results from nmap, `unzip`/`xxd`/`php`
 missing in session transcripts, `pip install` unusable under the offline profile, and zero calls
-to five of the ten Kali tools the image already ships. Capability or seccomp changes need
-maintainer review before the code moves.
+to five of the ten Kali tools the image already ships. The image adds `unzip`, `xxd`, `php-cli`,
+`traceroute`, `iptables` and the Python stack, and strips nmap's file capabilities (see EXE-09 for
+why the exec failed even before privileges; no capability or seccomp relaxation was needed).
+Measured, not estimated: `docker image inspect` reports 2,868,832,915 bytes in the 2026-10-14
+baseline against 2,983,477,199 bytes now (+114,644,284 bytes, +0.11 GiB), while the file a
+platform actually receives is much smaller - `docker save ... | wc -c` reports 766,589,952 bytes
+and the gzipped form 763,061,574 bytes, both inside the 3 GB upload ceiling. Verified by `tests/test_pi_kali_image.py` (static contract: added tools,
+the capability strip, and no solve-time install anywhere in the image or the agent-facing
+markdown) and `tests/test_pi_kali_tools_docker.py` (connect and raw-socket scans, the Python
+stack, and a root-written artifact the harness can read back). The prompt and
+`skills/offensive/active-recon` now carry the connect-scan default and the fallback path.
 
 ### EXE-08 [ ] P2 — Rendered observation (browser), phased
 Deliver: phase one is a Harness-side read-only `render(url)` observation (status, DOM text,
@@ -57,6 +66,26 @@ and a recorded size delta; phase two has no acceptance path until the boundary r
 State: pending, deliberately unproven: c-01 spent 136 tool calls and 70 model calls on a Vue SPA
 and scored zero, but the seven unsolved `a-*` runs stalled on finding a bypass predicate rather
 than on rendering, so this item is a bet rather than a measured bottleneck.
+
+### EXE-09 [x] P0 — Root container identity for raw-socket tooling
+Deliver: the Agent container runs as root inside a read-only, capability-dropped container so
+declared capabilities such as `NET_RAW` actually apply, with the workspace kept harness-owned and
+owner-only and the changed isolation contract documented before the code moved.
+Accept: the container command pins the root identity and the baseline capability set; the CI
+isolation probe still proves the Agent cannot read or forge authoritative state, escape the
+writable mount or reach the denied network; the workspace stays readable by a non-root harness.
+State: implemented (maintainer-reviewed boundary change, decided on the 2026-10-16 sweep data).
+Measured on the sweep's Kali image under the exact container settings (non-root user, capabilities
+dropped, `no-new-privileges`): the declared `cap_add: [NET_RAW]` was inert (`CapEff:
+0000000000000000`) and `/usr/bin/nmap: exec: /usr/lib/nmap/nmap: Operation not permitted` matched
+the 28 in-run failures. Under the root identity the same probe reports `CapEff:
+0000000000002000` and `nmap -sS` succeeds, while the file-capped nmap still fails under
+`no-new-privileges`, so the image keeps `setcap -r`. A cap-dropped root is also weaker than the
+workspace owner: the baseline `ROOT_AGENT_CAPABILITIES` (`CAP_DAC_OVERRIDE`, `CAP_FOWNER`) is
+what lets the Agent write the owned-by-harness `0700` workspace, measured by writing into one. The
+workspace stays owner-only, and the mounts, the network profiles and the un-mounted run root are
+unchanged. Evidence: `tests/test_agent_workspace.py`, `tests/test_container_boundary.py`,
+`tests/test_pi_adapter.py`, `tests/test_runtime_profiles.py`.
 
 **Non-goals:** arbitrary unsandboxed host execution as a default, dynamic tool downloads in offline competition runs, schema-ing the Harness-normalized `tool.*`/`model.*` streams, multi-agent session contracts.
 

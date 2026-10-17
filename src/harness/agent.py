@@ -188,7 +188,7 @@ def build_container_command(
     ]
     if spec.runtime:
         command.extend(["--runtime", spec.runtime])
-    for capability in extra_cap_add:
+    for capability in (*ROOT_AGENT_CAPABILITIES, *extra_cap_add):
         command.extend(["--cap-add", capability])
     if host_gateway:
         command.extend(["--add-host", "host.docker.internal:host-gateway"])
@@ -394,6 +394,12 @@ def run_docker(
     if check and result.returncode != 0:
         raise AgentError(f"{' '.join(command[:3])} failed: {result.stderr.strip()}")
     return result
+
+
+# Root with every capability dropped cannot write a workspace it does not own
+# (no CAP_DAC_OVERRIDE), so these two are the Agent-container baseline; declared
+# capabilities such as NET_RAW add on top.
+ROOT_AGENT_CAPABILITIES = ("DAC_OVERRIDE", "FOWNER")
 
 
 def hardened_docker_flags(

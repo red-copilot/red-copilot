@@ -54,16 +54,26 @@ still derives evidence-tier facts from tool output for the world projection.
 Descoped: the catalog is no longer a Harness projection. `skills/` is mounted read-only under
 `/knowledge/<name>` and discovered by the Agent with `ls` / `cat`.
 
-### PLN-08 [ ] P2 — Tool and memory discipline (markdown only)
+### PLN-08 [x] P2 — Tool and memory discipline (markdown only)
 Deliver: `prompts/tsec-solver.md` says what the tool budget is per call and when to write
 conclusions back into notes; `skills/offensive/*` carries ffuf rate/recursion guidance and the
 fallback path when a scanner is unavailable; `knowledge/methodology/*` says when to abandon a
 path. Nothing is parsed, ranked or injected by the Harness.
 Accept: the knowledge catalogue and docs consistency tests pass; the next live sweep reports
 slow-call counts and notes bytes as observations, not gates.
-State: pending. Evidence: the prompt asked for ffuf/gobuster while the Agent hand-rolled 287
+State: implemented. Evidence: the prompt asked for ffuf/gobuster while the Agent hand-rolled 287
 `echo`, 191 `cat` and 99 `for` invocations; notes stayed at a 344-byte median and a-16 ended with
-"Findings: (none yet)" after 2000s.
+"Findings: (none yet)" after 2000s. The prompt now bounds a single call (a self-imposed timeout,
+and 180s is the point where the Harness records a slow call), requires a notes write-back every
+5-10 tool calls or on every settled conclusion, and states that a candidate is submitted the
+moment it exists rather than at the finalize window; `skills/offensive/web-crawl` carries the
+ffuf rate/recursion starting point and the scanner-unavailable fallback, `vuln-scan` separates
+"the scanner failed" from "the target is clean", and `knowledge/methodology/recon-to-report.md`
+names the minutes-long-call and the silent-notes triggers for abandoning a path. Nothing is
+parsed, ranked or injected by the Harness; `tests/test_knowledge_catalogue.py`,
+`tests/test_pi_kali_image.py` (no solve-time install in agent-facing markdown) and
+`tests/test_docs_consistency.py` stay green. Slow-call counts and notes bytes are observations
+for the next sweep, not gates.
 
 **Non-goals:** required task DAG, harness-authored chain-of-thought, a learnable planner as the
 main spine, harness-computed skill ranking.

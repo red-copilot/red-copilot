@@ -56,7 +56,10 @@ file. The extension has three hooks: oversized `tool_result` output is spilled i
 workspace with a 600-character preview kept in context, `session_before_compact`
 produces a summary carrying the Harness retention checklist (any failure falls back to
 Pi's default compaction), and `tool_call` clamps the requested per-command timeout to
-180s so one blocking command cannot hold the run window. Default is false; when false, behaviour is unchanged. Keep
+180s so one blocking command cannot hold the run window. Default is false; when false, behaviour
+is unchanged. The competition profiles (`agents/examples/pi-tsec-opencode.yaml`,
+`agents/examples/zc-offensive.yaml`) set it true; the local, demo and other example agents keep
+the default. Keep
 `extensions: false` unless an evaluation explicitly accepts other extension sources: the
 competition profile only enables the Harness-authored file. The execution boundary for the
 extension is documented in [security/execution-boundary.md](security/execution-boundary.md).
@@ -121,9 +124,9 @@ because Pi can continue retries or queued work; `agent_settled` defines the comp
 
 Harness creates the Pi container with:
 
-- non-root numeric identity matching the writable workspace owner
+- root inside the container, with the workspace kept harness-owned and owner-only
 - read-only root filesystem
-- all Linux capabilities dropped, then only `pi.cap_add` restored
+- all Linux capabilities dropped, then the `DAC_OVERRIDE`/`FOWNER` baseline plus `pi.cap_add`
 - `no-new-privileges`
 - CPU, RAM, PID, and tmpfs limits
 - task mounted read-only
@@ -133,7 +136,9 @@ Harness creates the Pi container with:
 - explicit network selection
 - per-run Pi config/session directories
 
-`pi.cap_add` defaults to an empty list. Add `NET_RAW` only for tasks that need raw sockets.
+`pi.cap_add` defaults to an empty list. The container runs as root with every capability
+dropped, so a declared capability is the only route to kernel-level access: add `NET_RAW` for
+tasks that need raw sockets (`nmap -sS`, UDP scans); without it, use connect-based scanning.
 
 Pi is also started with deterministic non-interactive defaults:
 

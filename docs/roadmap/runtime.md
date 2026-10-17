@@ -42,8 +42,10 @@ the requested bash timeout to 180s in its `tool_call` hook. The benchmark path k
 closure switches on and the local task path keeps them off, both pinned by tests. Measured: the
 ceiling re-measured at 17,075 lines with the module count unchanged. Evidence:
 `tests/test_solver_loop.py`, `tests/test_world_context.py`, `tests/test_benchmark_streaming.py`,
-`tests/test_pi_adapter.py`. Outstanding: enabling `pi.harness_extension` for the competition agent
-configs is a maintainer call, and the live pacing effect needs the BEN-07 re-run.
+`tests/test_pi_adapter.py`. The competition configs (`agents/examples/pi-tsec-opencode.yaml`,
+`agents/examples/zc-offensive.yaml`) now opt into `pi.harness_extension`, which clamps one bash
+call to 180s and spills oversized tool output; every other config keeps the default, pinned by
+`tests/test_models.py`. Outstanding: the live pacing effect needs the BEN-07 re-run.
 Evidence: 19 tool calls over 180s (longest 927s, 51% of the window) and 39 budget steers that only
 arrived after the budget was nearly gone; `world.context.txt` carried no budget section at all.
 

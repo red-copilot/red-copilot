@@ -29,6 +29,20 @@ def test_example_contracts_are_valid() -> None:
     assert hackathon_agent.pi.system_prompt_file == "prompts/tsec-solver.md"
 
 
+def test_competition_agents_opt_into_the_harness_context_extension() -> None:
+    # RUN-06: the tool_call clamp and the tool_result spill are opt-in, and only
+    # the competition profiles opt in; every other config keeps the default.
+    for name in ("pi-tsec-opencode.yaml", "zc-offensive.yaml"):
+        agent = load_agent(Path("agents/examples") / name)
+        assert agent.pi is not None
+        assert agent.pi.harness_extension is True, name
+
+    for name in ("pi.yaml", "pi-tsec.yaml", "pi-tsec-hackathon.yaml", "demo.yaml"):
+        path = Path("agents/examples") / name
+        agent = load_agent(path)
+        assert agent.pi is None or agent.pi.harness_extension is False, name
+
+
 def test_docker_agent_requires_image() -> None:
     with pytest.raises(ValidationError):
         AgentSpec.model_validate(

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -60,9 +61,10 @@ def test_docker_agent_runtime_flag(monkeypatch, tmp_path: Path) -> None:
         host_gateway=False,
     )
     assert command[command.index("--runtime") + 1] == "runsc"
-    assert command[command.index("--user") + 1] == (
-        f"{workspace.stat().st_uid}:{workspace.stat().st_gid}"
-    )
+    # The Agent container runs as root; the workspace stays harness-owned and
+    # world-readable so a non-root harness can read the artifacts back.
+    assert command[command.index("--user") + 1] == "0:0"
+    assert workspace.stat().st_uid == os.getuid()
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "no-new-privileges" in command
     assert command[command.index("--pids-limit") + 1] == "256"
@@ -316,10 +318,9 @@ def test_container_agents_share_hardening_flags(monkeypatch, tmp_path: Path, bui
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "no-new-privileges" in command
     assert command[command.index("--network") + 1] == "none"
-    assert command[command.index("--user") + 1] == (
-        f"{(tmp_path / ('run-docker' if builder is _docker_container_command else 'run-pi')).stat().st_uid}:"
-        f"{(tmp_path / ('run-docker' if builder is _docker_container_command else 'run-pi')).stat().st_gid}"
-    )
+    workspace = tmp_path / ("run-docker" if builder is _docker_container_command else "run-pi")
+    assert command[command.index("--user") + 1] == "0:0"
+    assert workspace.stat().st_uid == os.getuid()
     for entry in SHARED_TASK_ENV:
         assert entry in command, entry
     assert "/tmp:rw,nosuid,nodev" in " ".join(command)

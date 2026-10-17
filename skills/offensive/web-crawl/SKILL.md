@@ -30,6 +30,11 @@ Spider and enumerate web endpoints, parameters, and hidden paths.
 - 变体：同一路径的不同方法（GET/POST/PUT/DELETE）、不同 `Content-Type`（表单 vs JSON）、
   不同身份（匿名/低权限/高权限）分别记录，它们经常给出不同结果。
 - 反模式：把爬取当扫描。爬取只负责"知道有哪些入口"，不负责验证漏洞。
+- 枚举参数：`ffuf -w <字典> -u <url>/FUZZ -mc 200,204,301,302,401,403 -t 40 -rate 200`
+  起步，先单层、再用 `-recursion -recursion-depth 2`；`gobuster dir -t 40 -x php,txt,bak`
+  是等价备选。速率要按目标规模定，别用默认值对着小站全速打。
+- 断点与回退：字典缺失或工具报错时，用 `curl` 打已知路径确认目标仍在响应，再换
+  `gobuster`/`dirb` 或手工路径清单继续；扫描器不可用不是放弃侦察的理由，只是换一条路径。
 
 ## 预期证据形态
 
