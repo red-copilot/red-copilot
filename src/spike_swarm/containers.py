@@ -79,24 +79,18 @@ class ContainerSpec:
     mounts: tuple[Mount, ...]
     environment: tuple[EnvVar, ...]
     network: str = "host"
-    cap_add: tuple[str, ...] = ("NET_RAW",)
+    # Root inside the container, with every capability dropped: the
+    # DAC_OVERRIDE/FOWNER pair is what lets a cap-dropped root write a workspace
+    # it does not own (same contract as the Harness's Agent containers), and
+    # NET_RAW is what makes a raw-socket scan work at all.
+    cap_add: tuple[str, ...] = ("DAC_OVERRIDE", "FOWNER", "NET_RAW")
     workdir: str = CONTAINER_WORKDIR
     entrypoint: tuple[str, ...] = ("sleep", "infinity")
     pids_limit: int = CONTAINER_PIDS_LIMIT
     memory: str = CONTAINER_MEMORY
     cpus: str = CONTAINER_CPUS
     tmpfs: tuple[str, ...] = CONTAINER_TMPFS
-    user: str | None = None
-
-
-def current_user() -> str | None:
-    """Host uid:gid so the container writes files the operator can read."""
-
-    getuid = getattr(os, "getuid", None)
-    getgid = getattr(os, "getgid", None)
-    if getuid is None or getgid is None:  # pragma: no cover - non-POSIX host
-        return None
-    return f"{getuid()}:{getgid()}"
+    user: str | None = "0:0"
 
 
 def create_command(spec: ContainerSpec) -> list[str]:
