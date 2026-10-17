@@ -6,8 +6,6 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .world.models import StateSelector
-
 
 def _is_reserved_credential_env(name: str) -> bool:
     normalized = name.upper()
@@ -23,10 +21,6 @@ def _is_reserved_credential_env(name: str) -> bool:
 
 class ObjectiveSpec(BaseModel):
     description: str = Field(min_length=1)
-    # Optional declarative target states. When present they become
-    # ``Goal.required_states`` and drive the goal-driven frontier. Absent/empty
-    # keeps the legacy behavior for existing tasks.
-    required_states: list[StateSelector] = Field(default_factory=list)
 
 
 class BudgetSpec(BaseModel):
@@ -66,6 +60,9 @@ class VerificationSpec(BaseModel):
         return self
 
 
+ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
 class TaskSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -87,7 +84,7 @@ class PiSpec(BaseModel):
     launcher_args: list[str] = Field(default_factory=list)
     provider: str | None = None
     model: str = Field(min_length=1)
-    thinking: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    thinking: ThinkingLevel | None = None
     tools: list[str] = Field(default_factory=lambda: ["read", "bash", "edit", "write"])
     approve_project: bool = False
     context_files: bool = False
@@ -106,6 +103,31 @@ class PiSpec(BaseModel):
     # public API endpoint. The key itself stays in the environment.
     models_base_url: str | None = None
     models_api_key_env: str | None = None
+
+
+class ExecutorSpec(BaseModel):
+    """One competing solver session for a single provisioned challenge.
+
+    Only the session-level overrides are declared here. ``type``, ``image``,
+    ``command`` and the tool set stay on ``AgentSpec``: changing those changes
+    the adapter contract itself, not just how one competing session is
+    configured. Everything omitted is inherited from the agent's base config.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(min_length=1)
+    provider: str | None = None
+    model: str | None = Field(default=None, min_length=1)
+    thinking: ThinkingLevel | None = None
+    system_prompt_file: str | None = None
+    extra_args: list[str] = Field(default_factory=list)
+
+
+# Competing sessions share one provisioned challenge and each one runs in its
+# own Agent container, so the ceiling keeps ``challenges x executors`` inside
+# the machine budget the run is planned for.
+MAX_EXECUTOR_SESSIONS = 4
 
 
 class AgentSpec(BaseModel):
@@ -129,6 +151,62 @@ class AgentSpec(BaseModel):
     ] = "unrestricted"
     runtime: str | None = None
     pi: PiSpec | None = None
+    # Read-only markdown knowledge roots (payload catalogues, cheat sheets,
+    # SKILL.md skill files) exposed to the Agent's file tools. The Agent reads
+    # them on demand; the Harness never parses or plans over them.
+    knowledge: list[str] = Field(default_factory=list)
+    # Competing solver sessions for one provisioned challenge. Empty means a
+    # single session on this agent's own configuration.
+    executors: list[ExecutorSpec] = Field(default_factory=list)
+
+    def with_executors(self) -> list[AgentSpec]:
+        """Derive one validated AgentSpec per competing session.
+
+        Re-validated rather than shallow-copied so a bad executor override fails
+        at load time instead of inside a run.
+        """
+        if not self.executors:
+            return [self]
+        payload = self.model_dump(by_alias=True)
+        derived: list[AgentSpec] = []
+        for index, executor in enumerate(self.executors):
+            session = dict(payload)
+            session["id"] = f"{self.id}#{index + 1}-{executor.id}"
+            session["executors"] = []
+            pi_payload = dict(session.get("pi") or {})
+            if pi_payload:
+                if executor.provider is not None:
+                    pi_payload["provider"] = executor.provider
+                if executor.model is not None:
+                    pi_payload["model"] = executor.model
+                if executor.thinking is not None:
+                    pi_payload["thinking"] = executor.thinking
+                if executor.system_prompt_file is not None:
+                    pi_payload["system_prompt_file"] = executor.system_prompt_file
+                if executor.extra_args:
+                    pi_payload["extra_args"] = [
+                        *pi_payload.get("extra_args", []),
+                        *executor.extra_args,
+                    ]
+                session["pi"] = pi_payload
+            derived.append(AgentSpec.model_validate(session))
+        return derived
+
+    @model_validator(mode="after")
+    def validate_executors(self) -> AgentSpec:
+        if not self.executors:
+            return self
+        if self.type != "pi":
+            raise ValueError("competing executors require a pi agent")
+        if len(self.executors) > MAX_EXECUTOR_SESSIONS:
+            raise ValueError(
+                f"at most {MAX_EXECUTOR_SESSIONS} competing executors are supported per case"
+            )
+        ids = [executor.id for executor in self.executors]
+        if len(set(ids)) != len(ids):
+            raise ValueError("executor ids must be unique")
+        self.with_executors()  # fail fast on any invalid session override
+        return self
 
     @model_validator(mode="after")
     def validate_adapter(self) -> AgentSpec:

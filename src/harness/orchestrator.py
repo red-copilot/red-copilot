@@ -24,7 +24,7 @@ from .agent_workspace import (
     prepare_agent_task_view,
     sync_agent_workspace,
 )
-from .budget import UsageMetrics, apply_budget_limits
+from .budget import UsageMetrics, enforced_budget_limits
 from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
@@ -38,11 +38,6 @@ from .runtime.evidence import persist_objective_verdict
 from .runtime.lifecycle import RunLifecycle, resolve_run_status
 from .runtime.projections import finalize_world_goal, network_result, run_summary, world_result
 from .runtime.results import persist_run_result
-from .runtime.solver_profile import (
-    DEFAULT_SOLVER_PROFILE,
-    SolverProfile,
-    solver_profile_settings,
-)
 from .secureio import read_regular_text
 from .session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
 from .trace import TraceRecorder
@@ -101,11 +96,9 @@ class Orchestrator:
         runs_root: str | Path = ".harness/runs",
         *,
         world_repository_factory: Callable[[Path], WorldRepository] = SQLiteWorldRepository,
-        skills_root: str | Path = "skills",
     ) -> None:
         self.runs_root = Path(runs_root)
         self.world_repository_factory = world_repository_factory
-        self.skills_root = Path(skills_root)
 
     def run(
         self,
@@ -120,7 +113,6 @@ class Orchestrator:
         resume_world_events: Path | None = None,
         resume_run_dir: Path | None = None,
         run_id: str | None = None,
-        solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
         context_token_budget: int | None = None,
     ) -> dict:
         if threading.current_thread() is not threading.main_thread():
@@ -135,7 +127,6 @@ class Orchestrator:
                 resume_world_events=resume_world_events,
                 resume_run_dir=resume_run_dir,
                 run_id=run_id,
-                solver_profile=solver_profile,
                 context_token_budget=context_token_budget,
             )
 
@@ -164,7 +155,6 @@ class Orchestrator:
                 resume_world_events=resume_world_events,
                 resume_run_dir=resume_run_dir,
                 run_id=run_id,
-                solver_profile=solver_profile,
                 context_token_budget=context_token_budget,
             )
         finally:
@@ -184,11 +174,13 @@ class Orchestrator:
         resume_world_events: Path | None = None,
         resume_run_dir: Path | None = None,
         run_id: str | None = None,
-        solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
         context_token_budget: int | None = None,
     ) -> dict:
-        solver_profile = SolverProfile(solver_profile)
-        solver_profile_settings(solver_profile)
+        if len(agent.executors) > 1:
+            raise ValueError(
+                "competing executor sessions are declared but not scheduled yet; "
+                "declare one executor or wait for PLN-04"
+            )
         if resume_run_dir is not None and resume_world_events is not None:
             raise ValueError("resume_run_dir and resume_world_events are mutually exclusive")
         is_resume = resume_run_dir is not None
@@ -210,11 +202,6 @@ class Orchestrator:
                 raise ValueError("resume agent hash does not match original run")
             if started_trace.get("task_id") != task.id:
                 raise ValueError("resume task ID does not match original run")
-            original_profile = started_trace.get(
-                "solver_profile", DEFAULT_SOLVER_PROFILE.value
-            )
-            if original_profile != solver_profile.value:
-                raise ValueError("resume solver profile does not match original run")
         else:
             run_id = run_id or _new_run_id()
             if not re.fullmatch(r"run_[A-Za-z0-9_-]{1,128}", run_id):
@@ -253,21 +240,18 @@ class Orchestrator:
             status="active",
             priority=1.0,
             attributes={"task_id": task.id, "category": task.category},
-            required_states=list(task.objective.required_states),
         )
-        budget_limits = apply_budget_limits(task.budgets, trace)
+        budget_limits = enforced_budget_limits(task.budgets)
         runtime = bootstrap_solver(
             run_dir=run_dir,
             trace=trace,
             goal=root_goal,
             actor=f"agent:{agent.id}",
             context_query=task.objective.description,
-            skills_root=self.skills_root,
             world_repository_factory=self.world_repository_factory,
             budget_limits=budget_limits,
             agent_workspace=agent_workspace,
             resume_existing=is_resume,
-            solver_profile=solver_profile,
             context_token_budget=context_token_budget,
         )
         world = runtime.world
@@ -318,7 +302,6 @@ class Orchestrator:
                 "task_sha256": _sha256(task_path),
                 "agent_sha256": _sha256(agent_path),
                 "resumed_world": resume_world_events is not None,
-                "solver_profile": solver_profile.value,
             }
         if is_resume:
             trace.emit("run.resumed", data={"agent_session_id": recovery_checkpoint.agent_session_id})
@@ -400,14 +383,13 @@ class Orchestrator:
                         session=agent_session,
                         world_revision=world.snapshot.revision,
                         progress=progress,
-                        plan_revision=solver_loop.planned_world_revision,
                         budget_used=_sum_usage(
                             recovered_usage,
                             getattr(agent_session, "usage_metrics", {}),
                         ),
                         processed_event_ids=solver_loop.processed_event_ids,
                     )
-                    startup_decision = solver_loop.decide(force_replan=True)
+                    startup_decision = solver_loop.decide()
                     if startup_decision.action.value == "stop":
                         trace.emit(
                             "solver.decision",
@@ -426,13 +408,10 @@ class Orchestrator:
                             session=agent_session,
                             world_revision=world.snapshot.revision,
                             progress=progress,
-                            plan_revision=solver_loop.planned_world_revision,
                             budget_used=_sum_usage(recovered_usage, result.metrics.as_dict()),
                             processed_event_ids=solver_loop.processed_event_ids,
                         )
                         return result
-                    else:
-                        await solver_loop.maybe_replan(agent_session, force=True)
                     async for event in agent_session.events():
                         decision = await solver_loop.process_event(agent_session, event)
                         sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
@@ -441,7 +420,6 @@ class Orchestrator:
                             session=agent_session,
                             world_revision=world.snapshot.revision,
                             progress=progress,
-                            plan_revision=solver_loop.planned_world_revision,
                             budget_used=_sum_usage(
                                 recovered_usage,
                                 getattr(agent_session, "usage_metrics", {}),
@@ -451,13 +429,42 @@ class Orchestrator:
                         if decision.action.value == "stop":
                             await agent_session.close(f"solver-stop:{decision.reason}")
                             break
+                        # The local run path cannot restart the Agent session,
+                        # so a long context degrades to steering the brief in
+                        # place instead of silently ignoring the threshold.
+                        restart_reason = progress.context_restart_due()
+                        if restart_reason is not None:
+                            _, brief = solver_loop.write_carry_forward_brief(restart_reason)
+                            progress.record_context_restart()
+                            trace.emit(
+                                "solver.context_restart",
+                                actor="harness",
+                                data={
+                                    "reason": restart_reason,
+                                    "from_session": None,
+                                    "to_session": None,
+                                    "brief_chars": len(brief),
+                                    "degraded": True,
+                                },
+                            )
+                            await agent_session.observe(
+                                AgentObservation(
+                                    type="solver.context_restart",
+                                    data={
+                                        "reason": restart_reason,
+                                        "brief_file": "carry-forward.md",
+                                        "brief_chars": len(brief),
+                                        "degraded": True,
+                                        "message": brief,
+                                    },
+                                )
+                            )
                     result = await agent_session.result()
                     await save_session_checkpoint(
                         run_dir=run_dir,
                         session=agent_session,
                         world_revision=world.snapshot.revision,
                         progress=progress,
-                        plan_revision=solver_loop.planned_world_revision,
                         budget_used=_sum_usage(recovered_usage, result.metrics.as_dict()),
                         processed_event_ids=solver_loop.processed_event_ids,
                     )

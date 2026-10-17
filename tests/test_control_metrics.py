@@ -1,8 +1,9 @@
 """Size metrics for the pruned control spine.
 
 The prune removed open-loop subsystems (control plane, queue, worker,
-coordination, OTLP export, scoring, suite, evaluation, benchmark registry).
-These ceilings keep the package from silently growing back.
+coordination, OTLP export, scoring, suite, evaluation, benchmark registry) and
+later the modules no production path imported. These ceilings keep the package
+from silently growing back.
 """
 from __future__ import annotations
 
@@ -10,26 +11,24 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 
-# Baseline before the control-spine prune: 75 modules, 16,997 source lines.
-MAX_MODULES = 64
-# Raised from 14,200 for the derived focus projection (world/focus.py plus its
-# context and planner wiring), which narrows the Agent working set per round.
-# Raised from 15,200 for the soft-deadline finalize path and round-based
-# execution: the post-run "facts + intents" summary projection, per-dimension
-# budget fractions, the RPC agent-event cursor, and the ruled-out view plus
-# round brief compiled from the intent-fact graph. All are small additions to
-# existing modules.
-# Raised to 15,800 for the round-based execution additions: the ruled-out view,
-# round brief (facts/leads/frontier/repetition), command-family derivation and
-# the finalize re-ask. All are small additions to existing modules.
-# Raised to 16,000 for deterministic fact extraction from tool output
-# (harness/extract.py plus its adapter and ACI wiring), which is what lets the
-# fact/intent graph grow from what a run actually observed.
-# Raised to 16,400 for the agent-session contract consolidation: the explicit
-# session phase machine, AgentCapabilities/AgentRunContext (one typed parameter
-# object replacing 12+ duplicated adapter kwargs), single-source typed-event
-# schemas (harness/agent_events.py), and token-budget-aware context assembly.
-MAX_SRC_LINES = 16_900
+# Baselines: 75 modules / 16,997 lines before the control-spine prune, 64 /
+# 18,388 after the crew prototype was wired onto the spine, then 55 / 14,130
+# after the v2 cut retired the cognition scaffolding (planner, cognition,
+# skills, crew, runtime.solver_profile) in favour of the agent-native,
+# file-system cognition layer. PLN-04 added `runtime.executors` (the competing
+# session scheduler, shared findings channel and budget shares) on top of that
+# cut, which is the deliberate +1 module; the line ceiling is re-measured from
+# the tree rather than estimated.
+#
+# The ZCP improvement round added no module: repetition interruption, session
+# restarts with a carry-forward brief, the ruled-out projection, executor
+# attribution and the summary-section check all live in existing modules.
+# Measured before 14,770 lines, after 15,508 (+738: the restart path and the
+# brief renderer, the window-relative restart trigger in `progress.py`, and the
+# whole-word summary-section marker check). Re-measured from the tree rather
+# than estimated.
+MAX_MODULES = 58
+MAX_SRC_LINES = 16_296
 
 
 def _module_names() -> set[str]:

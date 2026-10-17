@@ -10,7 +10,6 @@ from ..models import ObjectiveSpec
 # Externally evaluated 1-hour benchmarks (such as TSecBench) have no local
 # action-level verifier, so they use a wider exploration horizon before stopping.
 BENCHMARK_MAX_UNCONFIRMED_PROGRESS = 160
-BENCHMARK_MAX_REPLANS = 16
 
 
 class BenchmarkCase(BaseModel):

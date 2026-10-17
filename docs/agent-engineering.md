@@ -1,117 +1,130 @@
-# 智能体工程设计：目标驱动的意图-事实前沿
+# 智能体工程设计：赛场上的 Agent-Native Harness
 
-本文描述 Red Harness 的**智能体认知与决策闭环**：Agent 如何在 World 状态、
-技能元数据和显式目标之间选择下一步动作。设计保持确定性，并把"前沿选择"与
-"候选打分"分开，使该层可以在没有模型/凭据的环境中被完整测试。
+> 本文是 v2 设计（[agent-architecture-v2.md](agent-architecture-v2.md)）在赛场方向的落地说明：
+> 认知层是什么、会话怎么组、赛场硬约束有哪些、48 小时窗口内先做什么。
+> v1 的《智能体工程设计：目标驱动的意图-事实前沿》已随 v2 剪枝删除，其前沿算法冻结为离线消融
+> 基线（`tests/ablation/`），不再进入生产路径。
 
-落地模块：`src/harness/cognition.py`（意图-事实投影与前沿规划）、
-`src/harness/planner.py`（滚动时域封装与启发式打分）、
-`src/harness/runtime/bootstrap.py`（按 profile 组装）、
-`src/harness/solver_loop.py`（把前沿投影写进 Agent 上下文）。
+## 1. 定位与归属
 
-## 1. 现状诊断
+一句话：**Harness 供给环境与信任，模型拥有认知。**
 
-改造前，仓库里已经存在一份"意图-事实 DAG"投影（原 `offensive.py`），但它：
-
-- **未接线**：`bootstrap_solver` 固定使用 `RollingHorizonPlanner` 加
-  `HeuristicSkillPlanner`；相位前沿规划器只在单元测试里被调用。
-- **绑定场景**：阶段枚举 `RECON/DISCOVERY/EXPLOIT/REPORT` 及其权重直接来自
-  某个众测平台的自主度评分，属于评测语义，不应进入通用闭环。
-- **Agent 看不到**：写入 `world.context.txt` 的是 `WorldContextBuilder` 输出，
-  并不是 DAG 投影，"可执行前沿"只存在于文档和提示词里。
-
-因此本次改造的目标是：把该投影改造成**平台无关、纯目标驱动**的前沿，并真正
-接到求解闭环与 Agent 上下文上。
-
-## 2. 目标驱动的意图-事实闭环
-
-三方输入推导出"下一步可执行前沿"：
-
-| 输入 | 来源 | 含义 |
+| 层 | 归属 | 内容 |
 | --- | --- | --- |
-| 事实（fact） | `WorldSnapshot` 各类记录 | 当前已被观测/验证的状态 |
-| 意图（intent） | `SkillSpec` 元数据 | 一个技能可执行时产生的状态转移 |
-| 目标（goal） | `Goal.required_states` | 期望达到的目标状态选择器 |
+| 认知（做什么、怎么做） | 模型 | 推理、选工具、写笔记、读知识 |
+| 环境（在哪儿做） | Harness | 容器、只读任务与知识挂载、可写工作区、网络 profile |
+| 信任（算不算数） | Harness | 三层信任、授权裁决、证据引用 |
+| 记账（花了多少） | Harness | 预算、trace、工件、checkpoint |
+| 恢复（崩了怎么办） | Harness | 生命周期、对账、单操作者 flock |
 
-三者构成二部图：事实满足意图的 `requires`，意图的 `produces` 产生新事实。
-**前沿**只包含"前置条件已满足"（`enabled`）且（传递地）推进某个未达成目标的
-意图。没有任何目标声明选择器时，前沿退化为全部 `enabled` 意图，保持既有行为。
+非目标：黑板/蚁群等涌现式协调、可编程 DSL、向量检索、神经世界模型、把模型输出当结论、
+Harness 侧规划与技能排序。这些已在 v2 中删除，`tests/test_architecture.py` 会挡住回归。
 
-意图是**派生投影**：不落盘、不新增 `WorldObjectKind`、不改事件 schema。同一个
-snapshot 与 skills 始终得到同一个前沿。
+## 2. 认知层：文件系统 + 通用 coding agent
 
-## 3. 接口与数据流
+Agent 的全部"认知基础设施"就是容器里的 markdown：
 
-- `Goal` 新增可选字段 `required_states: list[StateSelector]`；`ObjectiveSpec`
-  同样新增 `required_states`，在 `orchestrator.py` 与 `benchmark/runner.py`
-  构造 root goal 时映射过去。缺省为空 → 旧任务行为不变。
-- `StateSelector` 上提到 `world/models.py`，由 `skills.py` 重导出，
-  `from harness.skills import StateSelector` 等既有导入路径保持可用。
-- 数据流：
+- **笔记** `$HARNESS_NOTES_DIR`（容器内 `/run/harness/notes`）：Agent 自己写、自己读，
+  跨轮次与跨会话的长期记忆。Harness 不解析、不排序、不做 schema 校验。
+- **知识** `$HARNESS_KNOWLEDGE_DIRS`：只读 markdown 目录，容器内挂在 `/knowledge/<name>`。
+  技能说明 `<skill-id>/SKILL.md`、payload 手册、方法论都走这条路；Agent 用 `ls` / `cat`
+  按需取用，Harness 既不注入也不排序。目录本身无可执行语义。
+- **世界观测** `$HARNESS_WORLD_CONTEXT`：Harness 投影的**事实**视图——焦点集、已确立事实、
+  未解未知、失败记录、预算。它是观测输入，不含候选动作、不含计划。
+- **提交** `$HARNESS_SUBMISSION_INBOX`：一行一个 JSON 候选，由 Harness 去重后提交；
+  被拒候选是修正假设的证据，不是重发理由。
 
-```text
-TaskSpec.objective.required_states
-        │  (orchestrator / benchmark runner)
-        v
-Goal.required_states ──┐
-WorldSnapshot (facts) ─┼─> IntentFactDAG.from_snapshot ──> frontier()
-SkillSpec[] (intents) ─┘                                     │
-                                                             v
-                     GoalFrontierPlanner.propose ──> PlanCandidate[]
-                                                             │
-                        RollingHorizonPlanner ──> plan.json / trace
-                                                             │
-                     frontier_context() ──> world.context.txt（Agent 可见）
-```
+需要强制执行的东西留在 Harness：授权范围、预算、破坏性动作边界、验证权威。
+这条边界让领域知识可以随便换，而不必改运行时代码。
 
-## 4. 前沿算法
+## 3. 执行拓扑：Pi 优先 + 同题多会话竞争
 
-`IntentFactDAG.frontier()`：
+- **执行内核**：`type: pi` 是默认执行器（容器内 Pi RPC）。硬化保持原样：只读根文件系统、
+  `--cap-drop ALL`、no-new-privileges、无 docker socket、只读 `/task` 与 `/knowledge/*`、
+  可写 `/run/harness`。
+- **同题竞争**：`AgentSpec.executors` 声明同一道题上的多个 solver 会话（不同 provider /
+  model / thinking / `extra_args` / system prompt）。调度落地在
+  `src/harness/runtime/executors.py` 与 `BenchmarkRunner.run_case`：
+  - 上位并发：`harness tsec --parallel N` 决定同时跑几道题（平台上限 3 题）。
+  - 题内并发：每题按 `executors` 派生 N 个会话，**硬上限 4**（`MAX_EXECUTOR_SESSIONS`，
+    超限在加载期与调度期都 fail-closed）。
+  - 会话隔离：每个会话独占 `run_dir/executors/<nn>-<id>/`（工作区、笔记、事件、日志、
+    会话级 `progress.json` 与 `checkpoint.json`），容器名由该路径派生，互不覆盖。
+  - 共享面：一次 provision、一个 world、一条权威 `trace.jsonl`、一个提交去重集合、
+    一次最终裁决、一份 `result.json`。`result.json` 的 `executor_sessions[]` 记录每个会话
+    的状态、提交次数与预算用量。
+  - 共享成果：`run_dir/executor-shared/` 以 rw 挂到各会话的 `/run/harness-shared`，
+    只放 Agent 自己写的 `shared-findings.md`（`$HARNESS_SHARED_FINDINGS`）；Harness 按内容
+    哈希归档快照。该目录不得出现任何权威工件，见
+    [security/execution-boundary.md](security/execution-boundary.md)。
+  - 预算：token / 模型调用 / 工具调用 / 成本按会话均分（向下取整、下限 1），
+    wall_time 不切分——会话并发共享同一个赛窗。
+  - 收敛：任一会话提交被接受且最终 evaluator 判定成功即关闭其余会话并释放实例；
+    单个会话触达自身止损律只关自己；全部会话结束或预算耗尽即结束该题。
+  - 降级：本地 `harness run`（`Orchestrator._run`）仍对多 executor 声明 fail-closed。
 
-1. **目标种子**：取 `active`/`pending` 目标中尚未被满足的 `required_states`。
-   满足判定复用 `_selector_matches`，即记录必须有效且达到 `minimum_trust`。
-2. **直接命中**：某意图的 `produces` 覆盖某个未达成目标选择器，即为目标直击
-   （`goal_hit=True`，`depth=0`）。
-3. **后向链前置**：若直击意图尚未 `enabled`，其未满足的 `requires` 作为深度 +1
-   的新种子，沿 `requires→produces` 反向链补前置，直到 `MAX_FRONTIER_DEPTH=3`。
-   环由深度上限切断。
-4. **只暴露可执行项**：前沿仅包含 `enabled` 的意图；未就绪的中间意图只用于展开
-   前置，不作为候选。
-5. **确定性排序**：目标直击优先，其次深度，最后 `skill_id` 兜底。
-6. **活性兜底**：无目标选择器、或目标没有任何技能可覆盖时，退化为全部
-   `enabled` 意图，避免"没有候选"的死循环。
+## 4. 赛场约束（闯关赛接入面）
 
-`GoalFrontierPlanner`（`name="goal-frontier"`）实现既有 `Planner` 协议：先取
-`HeuristicSkillPlanner` 的确定性得分作为基础项，裁剪到前沿，再叠加直击/深度加成。
-启发式因此降级为**评分项与消融基线**，而不再是唯一的候选来源。
+当前客户端保持既有 SDK 接入面：`tsec_benchmark` 的 `openapi/v1/*` + `BENCHMARK_TOKEN`，
+控制面凭据只在 Harness 侧，容器里只有目标地址与任务描述。**SDK 与官方文档
+（`/api/*` + `Agent-Token`）的差异仍是赛前必须核对的门**，本轮不改接入实现，只登记状态。
+SDK 与 MCP 两条面都还没在本机对真实平台跑通，任何"已对齐"的说法都要等 ZCP-01 的证据。
 
-## 5. 上下文与信任边界
+已知的赛场硬约束（来自平台文档，落地状态见 §5）：
 
-- `SolverLoop` 与 `bootstrap_solver` 在写 `world.context.txt` 时，按
-  "focus 块 + 前沿块"组合；前沿块由 `cognition.frontier_context()` 生成并受字符
-  预算约束。组合发生在控制主脊，`world/` 不反向依赖 `cognition`。
-- 前沿只影响**动作选择**，不改变信任边界：目标达成仍由权威验证器
-  （`AuthorizedObjectiveVerdict`）判定；Agent 自述与工具退出码仍是观测而非证据，
-  `claim` 级记录不能冒充 `evidence`/`verified` 目标状态。
+- 平台每队同时运行实例**最多 3 个**，用完必须 `close_challenge` 释放，
+  否则后续 `start_challenge` 直接失败。
+- 全接口共享**每秒 3 次**限流，超限返回 HTTP `429`。
+- 查看提示后该题得分扣 10%，且只能查看已启动实例的题；提示只在需要时按阈值取用。
+- flag 按题计分，多 flag 题按 flag 计数，重复提交同一 flag 不再得分。
+- 机器容量前提：`--parallel` × 每题会话数 = 同时在跑的容器数，
+  以 4 GB / 4 CPU 每会话估算本机容量，别把并发堆到同一道题上。
 
-## 6. 运行时 profile 与消融
+## 5. 48 小时窗口：P0 / P1
 
-`--solver-profile` 现有四档：
+P0 是赛前必须成立的能力；没做完的项必须显式标出，不许当成已完成。
 
-| profile | World 上下文 | 候选规划器 |
-| --- | --- | --- |
-| `pi-only` | 关 | 无 |
-| `pi-world` | 开 | 无 |
-| `pi-world-heuristic` | 开 | `HeuristicSkillPlanner` |
-| `pi-world-goal`（默认） | 开 | `GoalFrontierPlanner` |
+| ID | 交付 | 落点 | 状态 | 验收 |
+| --- | --- | --- | --- | --- |
+| PLN-04 | 同题多 executor 竞争调度 | `src/harness/runtime/executors.py`、`src/harness/benchmark/runner.py` | 已落地 | `tests/test_executors.py`：一次 provision、重复候选只提交一次、首个成功取消其余会话 |
+| ZCP-01 | 接入面核对（SDK `openapi/v1` vs 官方 `/api` + `Agent-Token`） | `src/harness/benchmark/tsec_client.py`、`src/harness/preflight.py` | 未落地 | 对真实平台跑通 list/start/submit/hint/close 并记录端点与认证头 |
+| ZCP-02 | 3 req/s 令牌桶 + 实例 ≤3 + 用完 `close_challenge` 释放 | `src/harness/benchmark/tsec_client.py`、`src/harness/benchmark/tsec_adapter.py` | 未落地 | 离线计数测试证明不越界不触发 429；实例数不超上限 |
+| ZCP-03 | 多题并行调度（≤3 题，独立 run dir 与预算） | `src/harness/benchmark/tsec_adapter.py` | 已落地 | `run_tsec_challenges` 的信号量与按题 run dir（`tests/test_tsec_adapter.py`） |
+| ZCP-04 | 按步数阈值分级提示，替代全局 `--hint` | `src/harness/benchmark/tsec_adapter.py`、`src/harness/solver_policy.py` | 未落地 | 阈值只触发一次、只影响该题、扣分影响可对账 |
+| ZCP-11 | 墙钟上限解除：有效预算取声明的 `--wall-time`，另加运维安全阀 | `src/harness/benchmark/tsec_adapter.py`、`src/harness/cli.py` | 已落地 | 声明 7200s 时有效预算就是 7200s；`--max-wall-time-seconds` 只在显式传入时生效（`tests/test_tsec_adapter.py`） |
 
-`pi-world-heuristic` 保留为**非前沿消融基线**：固定种子下对比两档 profile 的按域
-完成率与成本，即可衡量前沿裁剪是否带来收益。该对比需要 Docker/Pi/模型凭据，属于
-环境依赖项；确定性 fixtures 覆盖前沿演进、后向链、信任级别、深度上限与环安全，
-在无凭据环境即可完整回归。
+P1 是赛前有余力才做、赛后必做的项：
 
-## 7. 非目标
+| ID | 交付 | 落点 | 状态 | 验收 |
+| --- | --- | --- | --- | --- |
+| ZCP-05 | 上下文重启与接力简报（阶段一已落地）；容器内钩子为阶段二，需 maintainer 复核 | `src/harness/solver_loop.py`、`src/harness/benchmark/runner.py`、`src/harness/progress.py` | 阶段一已落地 | 自上次重启起工具调用 300 次、或又用掉 `max_tool_calls` 的 60% 时触发重启，最多 2 次（刚跨过的阈值不会在下一次事件重触发，`tests/test_solver_loop.py`）；简报含已确立事实/已排除路径/开放意图/指针；旧会话产物归档为 `restart-N` 副本（`tests/test_executors.py`） |
+| ZCP-06 | 重复动作打断（消费已有的 `args_family`，连续同族注入干预） | `src/harness/progress.py`、`src/harness/solver_loop.py` | 已落地 | 同族连续 3 次触发一次干预、6 次升级为收敛级；确认进展清零计数；不同命令族不误伤（`tests/test_solver_loop.py`） |
+| ZCP-07 | 知识库填充（技能手册 + 自研索引 + 上游语料按需挂载） | `skills/offensive/`、`knowledge/README.md` | 已落地 | 7 个技能含全部必需小节且 ≥50 行；索引链接可解析；上游语料只经 `scripts/fetch-knowledge.sh` 按 pinned revision 拉取（`tests/test_knowledge_catalogue.py`） |
+| ZCP-08 | 失败/已排除路径看板 | `src/harness/world/context.py` | 已落地 | refuted/superseded 出现在 Ruled out（上限 10 条，截断给计数）；无记录时投影不含该段（`tests/test_world_context.py`） |
+| ZCP-09 | 会话级用量归因与 prompt/model 战绩 | `src/harness/benchmark/runner.py`、`src/harness/cli.py` | 已落地 | `executor_summary` 按 (prompt, provider, model) 聚合；单会话结果不新增键（`tests/test_executors.py`） |
+| ZCP-10 | 收尾加固（结构化摘要 + 缺失可观测 + 复用上一轮摘要） | `src/harness/solver_loop.py`、`src/harness/cli.py` | 已落地 | `result.json` 的 `agent_report` 记录摘要是否存在与缺失段落，并写 `solver.summary_incomplete`；`--seed-notes-from` 把上一轮摘要放进新会话 notes（`tests/test_executors.py`） |
+| ZCP-12 | 重启简报质量观测（词数、来源 notes、缺失段落；只观测不排序） | `src/harness/benchmark/runner.py`、`src/harness/solver_loop.py` | 未落地 | 每次重启写会计级指标；无重启时结果不含新键（`tests/test_executors.py`） |
+| ZCP-13 | 会话级收尾模板复用（重启/取消路径复用四段摘要，摘要仍非证据） | `src/harness/solver_loop.py`、`src/harness/cli.py` | 未落地（条件项） | 重启/取消路径的缺失段落可观测（`tests/test_solver_loop.py`） |
+| ZCP-14 | 知识语料扩容（pinned 取数＋索引＋许可） | `knowledge/`、`skills/offensive/`、`scripts/fetch-knowledge.sh` | 未落地 | 目录结构校验通过；运行期无网络依赖（`tests/test_knowledge_catalogue.py`） |
 
-- 不引入学习式检索或模型规划作为主脊；`Planner` 协议为其预留插件点。
-- 不新增世界记录类型承载"意图"，也不把阶段/权重等评测语义写入通用闭环。
-- 不把前沿升级为全局攻击 DAG：它仍是滚动时域（视界 1–3）的局部工作集。
+排期与实现顺序见 [zc-improvement-design.md](zc-improvement-design.md)：A 段（ZCP-11/05/06/07）与
+B 段（ZCP-08/09/10）已落地，C 段（容器内 Pi 扩展）在 maintainer 复核通过前不动。
+赛制接入面仍按 ZCP-01/02 先行——不核对接入面就没有后续的一切。
+≤5 工作日窗口的排期、依赖与验收口径见 [zc-improvement-plan.md](zc-improvement-plan.md)；ZCP-13 是 D3 门后启动的条件项。
+
+## 6. 信任边界与验收
+
+- 只有授权 verifier / benchmark evaluator 能签发 `verified`；Agent 自述与工具退出码都是观测。
+- 权威工件：`trace.jsonl`、`progress.json`、`result.json`、`world.*`；
+  不可信侧：`events.jsonl`、`agent.events.jsonl`、`agent.summary.md`、`shared-findings.md`。
+- 容器永远拿不到 run root、world 存储、结果、checkpoint、凭据；唯一新增的
+  跨会话可写面是 `executor-shared/`，其边界由测试守住。
+- **效果验收是比赛结果**（得分/名次）；确定性的 CI 护栏（信任分层、恢复对账、
+  无开环子系统回归、import 方向、模块与行数上限）不计入效果验收。
+
+相关文档：[agent-architecture-v2.md](agent-architecture-v2.md)、
+[zc-improvement-design.md](zc-improvement-design.md)、
+[zc-improvement-plan.md](zc-improvement-plan.md)、
+[zc-architecture-comparison.md](zc-architecture-comparison.md)、[tsec.md](tsec.md)、
+[security/execution-boundary.md](security/execution-boundary.md)、
+[roadmap/planning.md](roadmap/planning.md)。

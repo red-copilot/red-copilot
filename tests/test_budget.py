@@ -5,19 +5,55 @@ from pathlib import Path
 
 import pytest
 
-from harness.budget import BudgetMonitor
+from harness.budget import (
+    FINALIZE_GRACE_SECONDS,
+    BudgetMonitor,
+    UsageMetrics,
+    enforced_budget_limits,
+    usage_budget_exceeded,
+)
 from harness.models import BudgetSpec, load_task
 from harness.trace import TraceRecorder
 
 
-def test_budget_monitor_accounts_without_enforcing_non_time_limits(tmp_path: Path) -> None:
-    # Token/call/cost ceilings are declared for compatibility but no longer stop
-    # a run; only the soft wall-clock deadline bounds it.
+def test_enforced_budget_limits_include_declared_dimensions() -> None:
+    limits = enforced_budget_limits(
+        BudgetSpec(wall_time=60, max_tokens=100, max_cost_usd=0.5)
+    )
+    assert limits == {"wall_time": 60.0, "max_tokens": 100.0, "max_cost_usd": 0.5}
+    # Unset dimensions stay absent; nothing is silently dropped anymore.
+    assert enforced_budget_limits(BudgetSpec(wall_time=30)) == {"wall_time": 30.0}
+
+
+def test_usage_budget_exceeded_reports_first_crossed_dimension() -> None:
+    metrics = UsageMetrics(total_tokens=120, model_calls=2)
+    assert (
+        usage_budget_exceeded(metrics, BudgetSpec(wall_time=60, max_tokens=100))
+        == "max_tokens"
+    )
+    assert usage_budget_exceeded(metrics, BudgetSpec(wall_time=60, max_model_calls=5)) is None
+    assert usage_budget_exceeded(UsageMetrics(), BudgetSpec(wall_time=60)) is None
+    # At-limit counts as exceeded; cost compares as a float.
+    assert (
+        usage_budget_exceeded(
+            UsageMetrics(model_calls=5), BudgetSpec(wall_time=60, max_model_calls=5)
+        )
+        == "max_model_calls"
+    )
+    assert (
+        usage_budget_exceeded(
+            UsageMetrics(cost_usd=0.5), BudgetSpec(wall_time=60, max_cost_usd=0.5)
+        )
+        == "max_cost_usd"
+    )
+
+
+def test_budget_monitor_accounts_usage_under_the_limits(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     trace = TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test")
     monitor = BudgetMonitor(
         events,
-        BudgetSpec(max_tokens=10, max_model_calls=2, max_tool_calls=2),
+        BudgetSpec(max_tokens=100, max_model_calls=5, max_tool_calls=5),
         trace,
     )
     events.write_text(
@@ -34,6 +70,39 @@ def test_budget_monitor_accounts_without_enforcing_non_time_limits(tmp_path: Pat
     assert monitor.poll() is None
     assert monitor.metrics.total_tokens == 12
     assert monitor.metrics.model_calls == 1
+    assert monitor.usage_exceeded is None
+    assert '"budget.exceeded"' not in (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+
+
+def test_budget_monitor_usage_crossing_is_soft_with_grace_window(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test")
+    monitor = BudgetMonitor(events, BudgetSpec(wall_time=60, max_tokens=10), trace)
+    events.write_text(
+        json.dumps(
+            {
+                "type": "model.usage",
+                "data": {"input_tokens": 8, "output_tokens": 4, "cost_usd": 0.0, "model_calls": 1},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # Crossing a usage ceiling does not stop the supervised process on the
+    # spot: it opens the same finalize grace window the soft wall-clock
+    # deadline uses, and poll() reports the dimension once the window elapsed.
+    assert monitor.poll() is None
+    assert monitor.exceeded is None
+    assert monitor.usage_exceeded == "max_tokens"
+    trace_text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert '"budget.exceeded"' in trace_text
+    assert '"budget":"max_tokens"' in trace_text
+    assert f'"grace_seconds":{FINALIZE_GRACE_SECONDS}' in trace_text
+
+    monitor.usage.deadline -= FINALIZE_GRACE_SECONDS + 1  # time-travel past the window
+    assert monitor.poll() == "max_tokens"
+    assert monitor.exceeded == "max_tokens"
 
 
 def test_budget_monitor_fails_closed_on_malformed_or_negative_untrusted_usage(

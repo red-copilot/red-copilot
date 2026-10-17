@@ -13,9 +13,7 @@ from pathlib import Path
 from ..agent import AgentResult
 from ..budget import FINALIZE_GRACE_SECONDS
 from ..models import AgentSpec, BudgetSpec, ObjectiveSpec
-from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from .base import (
-    BENCHMARK_MAX_REPLANS,
     BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     AdapterSessionState,
     BenchmarkAdapter,
@@ -33,6 +31,8 @@ from .tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig
 # clock is capped at the platform's task limit (not the historical one-hour
 # cap) so a competition run can use its whole window.
 MAX_EVALUATION_WALL_TIME_SECONDS = 8 * 3600
+# The platform caps concurrently running challenge instances per team at three.
+MAX_PARALLEL_CHALLENGES = 3
 # Do not dispatch a new case when this little of the evaluation window is left:
 # it could not finish a meaningful attempt plus the finalize grace anyway.
 DISPATCH_FLOOR_SECONDS = 300
@@ -374,7 +374,6 @@ async def run_tsec_challenges(
     agent: AgentSpec,
     budgets: BudgetSpec,
     runs_root: str | Path,
-    skills_root: str | Path = "skills",
     challenge_code: str | None = None,
     run_all: bool = False,
     seed: int = 0,
@@ -382,20 +381,41 @@ async def run_tsec_challenges(
     start_retries: int = 2,
     retry_delay: float = 2.0,
     allow_host_agent: bool = False,
-    solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
     max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
-    max_replans: int = BENCHMARK_MAX_REPLANS,
+    parallel: int | None = None,
     concurrency: int = 1,
     total_wall_time: int | None = None,
     max_passes: int = 1,
+    max_wall_time_seconds: int | None = None,
+    seed_notes_from: str | Path | None = None,
 ) -> list[dict]:
     """Run selected TSec challenges through the generic benchmark runtime."""
 
+    if parallel is not None:
+        if parallel < 1:
+            raise TSecAdapterError("parallel must be at least 1")
+        if parallel > MAX_PARALLEL_CHALLENGES:
+            raise TSecAdapterError(
+                f"the platform allows at most {MAX_PARALLEL_CHALLENGES} running instances"
+            )
+        if concurrency not in {1, parallel}:
+            raise TSecAdapterError("parallel and concurrency disagree")
+        concurrency = parallel
+    if not 1 <= concurrency <= MAX_PARALLEL_CHALLENGES:
+        raise TSecAdapterError(
+            f"concurrency must be between 1 and {MAX_PARALLEL_CHALLENGES}"
+        )
+    if max_wall_time_seconds is not None and max_wall_time_seconds < 1:
+        raise TSecAdapterError("max_wall_time_seconds must be at least 1")
+
     results: list[dict] = []
+    wall_time = min(budgets.wall_time, MAX_EVALUATION_WALL_TIME_SECONDS)
+    if max_wall_time_seconds is not None:
+        wall_time = min(wall_time, max_wall_time_seconds)
     effective_budgets = budgets.model_copy(
-        update={"wall_time": min(budgets.wall_time, MAX_EVALUATION_WALL_TIME_SECONDS)}
+        update={"wall_time": wall_time}
     )
-    runner = BenchmarkRunner(runs_root=runs_root, skills_root=skills_root)
+    runner = BenchmarkRunner(runs_root=runs_root)
     try:
         async with _tsec_client(config) as client:
             adapter = TSecBenchmarkAdapter(
@@ -439,9 +459,10 @@ async def run_tsec_challenges(
                             seed=pass_seed + index,
                             submission_extractor=_extract_submissions,
                             allow_host_agent=allow_host_agent,
-                            solver_profile=solver_profile,
                             max_unconfirmed_progress=max_unconfirmed_progress,
-                            max_replans=max_replans,
+                            seed_notes_from=(
+                                Path(seed_notes_from) if seed_notes_from else None
+                            ),
                         )
                     except Exception as exc:
                         if _is_sdk_error(exc, "VpnCheckError"):

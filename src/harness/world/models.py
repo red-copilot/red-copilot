@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 def _id(prefix: str) -> str:
@@ -41,23 +41,6 @@ KIND_COLLECTIONS: dict[str, str] = {
 }
 
 
-class StateSelector(BaseModel):
-    """A declarative reference to a World record at a minimum trust level.
-
-    Selectors are the shared vocabulary for skill preconditions/outputs and for
-    goal target states. They live in the World layer so both domain records
-    (``Goal.required_states``) and planner-facing skill metadata can reuse one
-    validated type without a reverse import.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    kind: WorldObjectKind
-    type: str = Field(min_length=1)
-    scope: str | None = None
-    minimum_trust: Literal["claim", "evidence", "verified"] = "claim"
-
-
 class Provenance(BaseModel):
     actor: str | None = None
     source: str | None = None
@@ -67,8 +50,8 @@ class Provenance(BaseModel):
 
 
 # Epistemic trust ordering over ``Provenance.epistemic_status``. One shared
-# lattice: the focus builder, planner selectors and the goal-frontier projection
-# must agree on it or they silently rank the same state differently.
+# lattice: the focus builder and the verification path must agree on it or they
+# silently rank the same state differently.
 TRUST_RANK: dict[str, int] = {"unclassified": 1, "claim": 1, "evidence": 2, "verified": 3}
 
 # Observation types the Harness writes for its own bookkeeping (one per tool
@@ -179,10 +162,6 @@ class Goal(WorldRecord):
     priority: float = Field(default=0.5, ge=0.0, le=1.0)
     parent_id: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
-    # Declarative target states. When set, the goal-driven frontier only proposes
-    # skills that (transitively) produce one of these states; an empty list keeps
-    # the legacy "all enabled skills" behavior.
-    required_states: list[StateSelector] = Field(default_factory=list)
 
 
 class ActionRecord(WorldRecord):

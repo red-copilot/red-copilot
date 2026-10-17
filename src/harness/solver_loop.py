@@ -2,44 +2,81 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
 from .aci import TypedACI
 from .action_verifier import ActionVerifier
-from .cognition import frontier_context, round_brief, ruled_out_intents
-from .hints import HINTS_FILE, HintCursor
-from .planner import RollingHorizonPlanner, RollingPlan
+from .hints import HINTS_FILE, HintCursor, HintRecord
 from .progress import ProgressLedger
 from .session import AgentEvent, AgentObservation, AgentSession
-from .skills import SkillSpec
 from .solver_policy import (
     DEFAULT_MAX_NO_PROGRESS,
-    DEFAULT_MAX_REPLANS,
     DEFAULT_MAX_UNCONFIRMED_PROGRESS,
     SolverAction,
     SolverDecision,
     decide_solver_action,
 )
 from .trace import TraceRecorder
-
-MAX_PROCESSED_EVENT_IDS = 50_000
-# Cap on distinct "attempted without gaining a fact" keys kept in progress.
-MAX_NO_GAIN_KEYS = 50
 from .verification import AuthorizedActionVerdict, VerifierRegistry
 from .world import (
     Observation,
     Provenance,
     WorldContextBuilder,
     WorldRepository,
-    WorldSnapshot,
-    is_agent_actor,
-    is_bookkeeping_record,
 )
 from .world.live import WorldInboxCursor
+
+MAX_PROCESSED_EVENT_IDS = 50_000
+
+# The finalize steer asks for a report with these four sections. The Agent's
+# summary is untrusted text, so the Harness only *reports* what is missing; it
+# never fails a run because a heading is absent. The generic English markers are
+# matched as whole words: "confirmed" is a substring of "unconfirmed", so a
+# plain membership test would count one section's heading for another.
+SUMMARY_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("confirmed", ("已确认事实", "confirmed fact", "confirmed")),
+    ("unconfirmed", ("未确认假设", "unconfirmed", "hypothes")),
+    ("ruled out", ("已尝试并排除", "ruled out", "tried and")),
+    ("unfinished", ("未完成意图", "unfinished", "open intent")),
+)
+MAX_SUMMARY_BYTES = 256 * 1024
+
+# The carry-forward brief replaces a long transcript with the short version of
+# the same state. It is deliberately small: it must fit in any context.
+CONTEXT_BRIEF_MAX_CHARS = 8000
+CONTEXT_BRIEF_FACTS = 12
+CONTEXT_BRIEF_RULED_OUT = 8
+CONTEXT_BRIEF_FAILURES = 5
+
+
+def _mentions_summary_marker(text: str, marker: str) -> bool:
+    """True when a marker appears as its own word rather than inside a longer one."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(marker)}", text) is not None
+
+
+def missing_summary_sections(summary_path: Path) -> list[str]:
+    """Return the report sections the Agent did not write.
+
+    A missing or unreadable summary reports every section as missing; the
+    caller decides whether that is worth a trace event.
+    """
+    try:
+        if summary_path.stat().st_size > MAX_SUMMARY_BYTES:
+            return [name for name, _ in SUMMARY_SECTIONS]
+        text = summary_path.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return [name for name, _ in SUMMARY_SECTIONS]
+    missing: list[str] = []
+    for name, markers in SUMMARY_SECTIONS:
+        if not any(_mentions_summary_marker(text, marker.lower()) for marker in markers):
+            missing.append(name)
+    return missing
 
 
 @dataclass
@@ -62,9 +99,6 @@ class SolverLoop:
     )
     # Remaining-budget fractions at which the Agent is steered once to converge.
     BUDGET_STEER_THRESHOLDS: ClassVar[tuple[float, ...]] = (0.5, 0.25, 0.1)
-    # Tool results without a new established fact or ruled-out path before the
-    # Harness opens a new round to break the current line of attack.
-    ROUND_STALL_STEPS: ClassVar[int] = 6
 
     def __init__(
         self,
@@ -81,19 +115,14 @@ class SolverLoop:
         verifier_registry: VerifierRegistry | None = None,
         context_builder: WorldContextBuilder | None = None,
         world_inbox: WorldInboxCursor | None = None,
-        skills: list[SkillSpec] | None = None,
-        planner: RollingHorizonPlanner | None = None,
-        planner_enabled: bool = True,
-        world_context_enabled: bool = True,
-        plan_horizon: int = 3,
         max_no_progress: int = DEFAULT_MAX_NO_PROGRESS,
         max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
-        max_replans: int = DEFAULT_MAX_REPLANS,
         processed_event_ids: dict[str, str] | None = None,
-        world_inbox_path: Path | None = None,
         hint_cursor: HintCursor | None = None,
+        world_inbox_path: Path | None = None,
         sync_agent_views: Callable[[], None] | None = None,
         summary_path: Path | None = None,
+        notes_dir: Path | None = None,
     ) -> None:
         self.world = world
         self.progress = progress
@@ -112,10 +141,8 @@ class SolverLoop:
             actor=actor,
         )
         self.hint_cursor = hint_cursor or HintCursor(run_dir / HINTS_FILE)
-        # The cursor offset is not checkpointed, so a resumed loop would re-read
-        # every previously delivered hint. The World's persisted human.hint
-        # observations are the durable delivery ledger: seed the delivered set
-        # from them so hints are steered exactly once per run.
+        # The cursor offset is not checkpointed; World observations are the
+        # durable delivery ledger so a resumed loop does not re-steer hints.
         self._delivered_hint_ids: set[str] = {
             record_id.removeprefix("human.hint:")
             for record_id in world.snapshot.observations
@@ -123,25 +150,13 @@ class SolverLoop:
         }
         self.progress_path = run_dir / "progress.json"
         self.summary_path = summary_path or (run_dir / "agent.summary.md")
+        self.notes_dir = notes_dir
         self.sync_agent_views = sync_agent_views
-        self.plan_path = run_dir / "plan.json"
-        self.skills = list(skills or [])
-        self.planner = planner or RollingHorizonPlanner()
-        self.planner_enabled = planner_enabled
-        self.world_context_enabled = world_context_enabled
-        self.plan_horizon = max(1, min(3, plan_horizon))
         self.max_no_progress = max_no_progress
         self.max_unconfirmed_progress = max_unconfirmed_progress
-        self.max_replans = max_replans
-        self._last_plan_signature: tuple | None = None
-        self._last_plan: RollingPlan | None = None
         self._budget_steers_fired: set[float] = set()
         self._finalize_steered = False
         self._finalize_prompted = False
-        self._round_count = 1
-        self._round_fingerprint: tuple[frozenset[str], frozenset[str]] | None = None
-        self._round_brief_text: str | None = None
-        self._steps_without_new_facts = 0
         self.stats = SolverLoopStats()
         self._processed_event_ids: dict[str, str] = dict(processed_event_ids or {})
 
@@ -231,8 +246,6 @@ class SolverLoop:
         self.progress.record_event(event)
         self.progress.write(self.progress_path)
         self._sync_agent_views()
-        if event.type == "tool.call":
-            self._apply_plan_fallback_observation()
         before_revision = self.world.revision
         if event.type in {"tool.call", "tool.result"}:
             tool_call_id = event.data.get("tool_call_id")
@@ -314,41 +327,10 @@ class SolverLoop:
         live_ingest = self.world_inbox.poll()
         self.stats.inbox_accepted += live_ingest.accepted
         self.stats.inbox_rejected += live_ingest.rejected
-        semantic_agent_update = event.type in {
-            "world.observe",
-            "world.hypothesis",
-            "world.capability",
-            "world.artifact",
-            "world.failure",
-        }
-        if (semantic_agent_update and aci_mutations) or live_ingest.accepted:
-            self.progress.request_replan("world_state_changed")
 
-        # Operator hints: advisory guidance recorded at evidence tier so the
-        # Agent sees them, but never an objective verdict. A new hint also
-        # requests a replan, mirroring how benchmark feedback re-enters planning.
-        for hint in self.hint_cursor.poll():
-            if hint.id in self._delivered_hint_ids:
-                continue
-            self._delivered_hint_ids.add(hint.id)
-            self.world.upsert(
-                "observation",
-                Observation(
-                    id=f"human.hint:{hint.id}",
-                    type="human.hint",
-                    content={"text": hint.text},
-                    confidence=1.0,
-                    source="harness.hint",
-                    provenance=Provenance(epistemic_status="evidence"),
-                ),
-                actor="harness",
-            )
-            self.progress.request_replan("hint_received")
-            self.trace.emit(
-                "solver.hint",
-                actor="harness",
-                data={"hint_id": hint.id, "text": hint.text},
-            )
+        # Operator hints are advisory: record them at evidence tier so the
+        # Agent sees them, but never treat them as an objective verdict.
+        for hint in self._absorb_hints():
             await session.observe(
                 AgentObservation(
                     type="solver.hint",
@@ -417,7 +399,6 @@ class SolverLoop:
                     self.stats.last_verification_key = verification_key
                     self.progress.record_verification(verification)
                     if verification.status == "verified":
-                        self.progress.request_replan("evidence_confirmed")
                         action_id = (self.progress.last_action or {}).get("tool_call_id")
                         if isinstance(action_id, str) and action_id:
                             revision_before_verification = self.world.revision
@@ -465,17 +446,12 @@ class SolverLoop:
 
         self.progress.write(self.progress_path)
         self._sync_agent_views()
+        await self._maybe_steer_repetition(session)
         await self._maybe_steer_budget(session)
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
-        await self._maybe_start_round(
-            session, event_type=event.type, world_changed=after_revision != before_revision
-        )
         decision = self.decide(event_type=event.type)
-        if decision.action is SolverAction.REPLAN:
-            plan = await self.maybe_replan(session)
-            if plan is None:
-                decision = SolverDecision(SolverAction.CONTINUE, "replan_suppressed")
+        decision = self._hold_stop_for_budget_grace(decision)
         if decision.action is SolverAction.STOP:
             await session.observe(
                 AgentObservation(
@@ -499,7 +475,6 @@ class SolverLoop:
                 "event_id": event_id,
                 "world_revision": self.world.revision,
                 "no_progress_count": self.progress.no_progress_count,
-                "replan_count": self.progress.replan_count,
                 "remaining_budget_fraction": self.progress.remaining_budget_fraction,
             },
         )
@@ -507,92 +482,6 @@ class SolverLoop:
     @property
     def processed_event_ids(self) -> dict[str, str]:
         return dict(self._processed_event_ids)
-
-    async def maybe_replan(
-        self,
-        session: AgentSession,
-        *,
-        force: bool = False,
-    ) -> RollingPlan | None:
-        if not self.planner_enabled:
-            return None
-        decision = self.decide(force_replan=force)
-        if decision.action is not SolverAction.REPLAN:
-            return None
-        reasons = list(self.progress.replan_reasons)
-        if self.progress.no_progress_count >= 2 and "no_progress_threshold" not in reasons:
-            reasons.append("no_progress_threshold")
-        if not force and not reasons:
-            return None
-
-        snapshot = self.world.snapshot
-        plan = self.planner.propose(
-            snapshot,
-            self.skills,
-            progress=self.progress,
-            horizon=self.plan_horizon,
-        )
-        # Suppress replans that would recommend the same actions. The raw world
-        # revision (and the heuristic score) changes on almost every event, so
-        # keying on either re-planned — and re-notified the Agent — for facts
-        # that do not change the recommended action set.
-        signature = (
-            tuple(action.skill_id for action in plan.actions),
-            tuple(reasons),
-            self.progress.no_progress_count,
-            (self.progress.last_verification or {}).get("status"),
-        )
-        if not force and signature == self._last_plan_signature:
-            return None
-
-        self.plan_path.write_text(
-            plan.model_dump_json(indent=2) + "\n",
-            encoding="utf-8",
-        )
-        self.planned_world_revision = snapshot.revision
-        self.progress.replan_count += 1
-        payload = plan.model_dump(mode="json")
-        self.trace.emit(
-            "solver.plan.updated",
-            actor="harness",
-            data=payload,
-        )
-        self.progress.write(self.progress_path)
-        self._sync_agent_views()
-        await session.observe(
-            AgentObservation(
-                type="solver.plan.updated",
-                data={
-                    **payload,
-                    "plan_path": "plan.json",
-                },
-            )
-        )
-        self.progress.consume_replan_reasons(reasons)
-        self.progress.write(self.progress_path)
-        self._last_plan_signature = signature
-        self._last_plan = plan
-        return plan
-
-    def _apply_plan_fallback_observation(self) -> None:
-        """Fill the verify expectation from the plan when the Agent declared none.
-
-        ``ActionVerifier.verify`` returns ``None`` when ``expected_observation`` is
-        unset, which silently disables action-level verification (and its
-        feedback) for every tool call. The published plan already carries the
-        expected observations for each recommended skill, so use it strictly as a
-        fallback: an Agent-declared expectation always wins, and this never
-        produces a ``verified`` verdict on its own.
-        """
-        if self.progress.expected_observation or self._last_plan is None:
-            return
-        actions = self._last_plan.actions
-        if not actions:
-            return
-        skill_id = (self.progress.action_intent or {}).get("skill_id")
-        action = next((item for item in actions if item.skill_id == skill_id), actions[0])
-        if action.expected_observations:
-            self.progress.expected_observation = action.expected_observations[0]
 
     async def _maybe_steer_budget(self, session: AgentSession) -> None:
         """Steer the Agent once per budget threshold so it converges in time."""
@@ -628,75 +517,116 @@ class SolverLoop:
                 )
             )
 
-    async def _maybe_steer_finalize(self, session: AgentSession) -> None:
-        """Stop the Agent exploring at the soft deadline and ask for a summary.
+    async def _maybe_steer_repetition(self, session: AgentSession) -> None:
+        """Intervene once when one command family is being ground down.
 
-        The run is not cut off: the wall-clock limit is soft, and the remaining
-        grace window belongs to writing down what was found (facts) and what was
-        being attempted (intents) so a timed-out run still leaves usable state.
+        The family comes from the adapter's coarse tool identity, so "the same
+        loop with a different wordlist" counts as one family. Level 1 nudges the
+        Agent to change its hypothesis; level 2 asks it to converge and record
+        what the path ruled out. Neither level kills the session.
+        """
+        if self.progress.objective_completed:
+            return
+        action = self.progress.repetition_action()
+        if action is None:
+            return
+        family, streak, level = action
+        self.progress.note_repetition_steer(family, level=level)
+        self.trace.emit(
+            "solver.repetition_steer",
+            actor="harness",
+            data={
+                "family": family,
+                "consecutive": streak,
+                "level": level,
+                "escalated": level > 1,
+            },
+        )
+        if level > 1:
+            message = (
+                f"{streak} calls in a row share the command family {family} without "
+                "confirmed progress. Stop repeating it: consolidate what is already "
+                "verified, record what this path ruled out, then either widen or "
+                "write your summary."
+            )
+        else:
+            message = (
+                f"{streak} calls in a row share the command family {family} without "
+                "confirmed progress. Change the hypothesis or the input class before "
+                "calling it again; the same command with new arguments is the same path."
+            )
+        await session.observe(
+            AgentObservation(
+                type="solver.repetition_steer",
+                data={
+                    "family": family,
+                    "consecutive": streak,
+                    "level": level,
+                    "message": message,
+                },
+            )
+        )
+
+    async def _maybe_steer_finalize(self, session: AgentSession) -> None:
+        """Stop the Agent exploring at a soft limit and ask for a summary.
+
+        The run is not cut off: the wall-clock deadline and every declared
+        usage ceiling are soft, and the remaining grace window belongs to
+        writing down what was found (facts) and what was being attempted
+        (intents) so a timed-out or budget-exhausted run still leaves usable
+        state.
         """
         if self._finalize_steered or self.progress.objective_completed:
             return
-        if not self.progress.wall_time_expired:
+        exceeded = self.progress.budget_exceeded_dimension
+        if exceeded is None:
             return
+        if exceeded != "wall_time" and self.progress.budget_exceeded_at is None:
+            # Stamp when a usage dimension first crossed so the budget STOP can
+            # be held for the grace window counted from here.
+            self.progress.budget_exceeded_at = datetime.now(UTC)
+        soft_usage = exceeded != "wall_time"
+        data: dict = {"reason": "soft_budget_limit" if soft_usage else "soft_time_limit"}
+        if soft_usage:
+            data["budget"] = exceeded
         self._finalize_steered = True
-        self.trace.emit("solver.finalize", actor="harness", data={"reason": "soft_time_limit"})
+        self.trace.emit("solver.finalize", actor="harness", data=data)
+        lead = (
+            "A run budget is exhausted." if soft_usage else "Time is up."
+        )
         await session.observe(
             AgentObservation(
                 type="solver.finalize",
                 data={
-                    "reason": "soft_time_limit",
+                    **data,
                     "summary_file": "agent.summary.md",
                     "message": (
-                        "Time is up, and this finalize instruction overrides any earlier "
-                        "instruction that told you to keep working. Stop launching new "
-                        "probes and do not run any more commands. Based only on what you "
-                        "have already confirmed, write a short report to "
-                        "$HARNESS_SUMMARY_FILE covering: confirmed facts (with the evidence "
-                        "that confirms them), unconfirmed hypotheses, what you tried and what "
-                        "it ruled out, and the intents you were pursuing but did not finish. "
-                        "Then stop."
+                        f"{lead} Stop launching new probes. Write a short report to "
+                        "$HARNESS_SUMMARY_FILE with exactly these four sections: "
+                        "(1) confirmed facts - each with the evidence that confirms it; "
+                        "(2) unconfirmed hypotheses; (3) what you tried and ruled out; "
+                        "(4) unfinished intents. Then stop."
                     ),
                 },
             )
         )
 
-    def _round_state(self, snapshot: WorldSnapshot) -> tuple[frozenset[str], frozenset[str]]:
-        """Established fact ids and ruled-out intent ids currently in the graph.
+    def _hold_stop_for_budget_grace(self, decision: SolverDecision) -> SolverDecision:
+        """Keep the loop alive inside the post-exhaustion grace window.
 
-        Harness bookkeeping is excluded: every tool result also writes a
-        ``tool.execution`` observation at evidence tier, which would otherwise
-        look like a new fact on every step. Agent-authored claims count as graph
-        change too - they are new knowledge the run recorded, even though the
-        verdict remains open until independent evidence confirms them.
+        A usage dimension that crossed its ceiling steers finalize first; the
+        policy's budget STOP goes through only once the grace window has
+        elapsed, which is the same edge the adapters kill on. Without the
+        hold, exhaustion would stop the session before the summary is written.
         """
-        established = frozenset(
-            record.id
-            for store in (snapshot.observations, snapshot.capabilities, snapshot.artifacts)
-            for record in store.values()
-            if not is_bookkeeping_record(record)
-            and (
-                record.provenance.epistemic_status in {"evidence", "verified"}
-                or is_agent_actor(record.provenance.actor)
-            )
-        )
-        return established, frozenset(ruled_out_intents(snapshot, self.progress))
-
-    def _note_attempt(self, *, gained_fact: bool) -> None:
-        """Count an attempt that produced no new fact, keyed by tool+arguments."""
-        if gained_fact:
-            return
-        action = self.progress.last_action or {}
-        tool = action.get("tool")
-        if not isinstance(tool, str) or not tool:
-            return
-        family = action.get("args_family")
-        key = family if isinstance(family, str) and family else tool
-        counts = self.progress.no_gain_tools
-        counts[key] = counts.get(key, 0) + 1
-        if len(counts) > MAX_NO_GAIN_KEYS:
-            for stale in list(counts)[: len(counts) - MAX_NO_GAIN_KEYS]:
-                counts.pop(stale, None)
+        if (
+            decision.action is SolverAction.STOP
+            and decision.reason == "budget_exhausted"
+            and self.progress.budget_exceeded_at is not None
+            and not self.progress.budget_grace_elapsed
+        ):
+            return SolverDecision(SolverAction.CONTINUE, "budget_grace_window")
+        return decision
 
     async def _maybe_reask_finalize(self, session: AgentSession, *, event_type: str) -> None:
         """Re-ask for the summary once a settled Agent has not written it.
@@ -725,86 +655,10 @@ class SolverLoop:
                     "reason": "summary_missing",
                     "summary_file": "agent.summary.md",
                     "message": (
-                        "Your round ended without a summary. This instruction overrides any "
-                        "earlier instruction to keep working: run no more commands. Write "
-                        "$HARNESS_SUMMARY_FILE now, based only on what you already confirmed: "
-                        "confirmed facts with their evidence, unconfirmed hypotheses, what you "
-                        "tried and ruled out, and unfinished intents. Then stop."
+                        "Your round ended without a summary. Write $HARNESS_SUMMARY_FILE now: "
+                        "(1) confirmed facts with their evidence, (2) unconfirmed hypotheses, "
+                        "(3) what you tried and ruled out, (4) unfinished intents. Then stop."
                     ),
-                },
-            )
-        )
-
-    async def _maybe_start_round(
-        self,
-        session: AgentSession,
-        *,
-        event_type: str,
-        world_changed: bool,
-    ) -> None:
-        """Open a new round once the fact/intent graph actually changed.
-
-        A round is a fresh ``prompt`` on the same session carrying a compiled
-        brief: what the previous round established, what it ruled out, and the
-        open frontier. It fires on new evidence, on a newly ruled-out path, or
-        after ``ROUND_STALL_STEPS`` tool results with no new fact at all.
-        The graph can only change when the world revision moved or a tool
-        result updated the failure ledger, so other events skip the projection.
-        """
-        if self._finalize_steered or self.progress.objective_completed:
-            return
-        if event_type != "tool.result" and not world_changed:
-            return
-        snapshot = self.world.snapshot
-        established, ruled = self._round_state(snapshot)
-        if self._round_fingerprint is None:
-            # First observation of the graph is the baseline; it does not by
-            # itself count as "the graph changed".
-            self._round_fingerprint = (established, ruled)
-        previous_facts, previous_ruled = self._round_fingerprint
-        changed = bool(established - previous_facts or ruled - previous_ruled)
-        if event_type == "tool.result":
-            self._note_attempt(gained_fact=bool(established - previous_facts))
-        if changed:
-            self._steps_without_new_facts = 0
-        elif event_type == "tool.result":
-            self._steps_without_new_facts += 1
-        stalled = (
-            not changed
-            and event_type == "tool.result"
-            and self._steps_without_new_facts >= self.ROUND_STALL_STEPS
-        )
-        if not changed and not stalled:
-            return
-
-        self._round_fingerprint = (established, ruled)
-        self._round_count += 1
-        brief = round_brief(
-            snapshot,
-            self.skills,
-            self.progress,
-            round_number=self._round_count,
-        )
-        if not stalled and brief == self._round_brief_text:
-            return
-        self._round_brief_text = brief
-        reason = "stall" if stalled else "graph_changed"
-        path = self.run_dir / f"round-{self._round_count}.md"
-        path.write_text(brief + "\n", encoding="utf-8")
-        self._steps_without_new_facts = 0
-        self.trace.emit(
-            "solver.round",
-            actor="harness",
-            data={"round": self._round_count, "reason": reason, "path": path.name},
-        )
-        await session.observe(
-            AgentObservation(
-                type="solver.round",
-                data={
-                    "round": self._round_count,
-                    "reason": reason,
-                    "path": path.name,
-                    "brief": brief,
                 },
             )
         )
@@ -813,35 +667,19 @@ class SolverLoop:
         self,
         *,
         event_type: str | None = None,
-        force_replan: bool = False,
     ) -> SolverDecision:
         return decide_solver_action(
             event_type=event_type,
-            replan_reasons=self.progress.replan_reasons,
             no_progress_count=self.progress.no_progress_count,
             unconfirmed_progress=self.progress.unconfirmed_progress,
-            replans_used=self.progress.replan_count,
             remaining_budget_fraction=self.progress.remaining_budget_fraction,
-            force_replan=force_replan,
             max_no_progress=self.max_no_progress,
             max_unconfirmed_progress=self.max_unconfirmed_progress,
-            max_replans=self.max_replans,
         )
 
-    def finish_ingest(self) -> None:
-        report = self.world_inbox.poll()
-        self.stats.inbox_accepted += report.accepted
-        self.stats.inbox_rejected += report.rejected
-        self.trace.emit(
-            "world.ingested",
-            data={
-                "accepted": report.accepted,
-                "rejected": report.rejected,
-                "errors": [error.model_dump() for error in report.errors[:10]],
-            },
-        )
-        # Late hints still land in the World so the end-of-run summary can
-        # include guidance the operator added while the session was closing.
+    def _absorb_hints(self) -> list[HintRecord]:
+        """Record new operator hints in World; return the newly absorbed ones."""
+        absorbed = []
         for hint in self.hint_cursor.poll():
             if hint.id in self._delivered_hint_ids:
                 continue
@@ -861,29 +699,127 @@ class SolverLoop:
             self.trace.emit(
                 "solver.hint",
                 actor="harness",
-                data={"hint_id": hint.id, "late": True},
+                data={"hint_id": hint.id, "text": hint.text},
             )
+            absorbed.append(hint)
+        return absorbed
+
+    def finish_ingest(self) -> None:
+        self._absorb_hints()
+        report = self.world_inbox.poll()
+        self.stats.inbox_accepted += report.accepted
+        self.stats.inbox_rejected += report.rejected
+        self.trace.emit(
+            "world.ingested",
+            data={
+                "accepted": report.accepted,
+                "rejected": report.rejected,
+                "errors": [error.model_dump() for error in report.errors[:10]],
+            },
+        )
 
     def _write_context(self) -> None:
-        if self.world_context_enabled:
-            # One snapshot for focus, render and frontier keeps the written
-            # context revision-consistent instead of three reloads apart.
-            snapshot = self.world.snapshot
-            focus = self.context_builder.build_focus(
-                snapshot,
-                reference=self.context_query,
-                subgoal=self.progress.current_subgoal,
-            )
-            rendered = self.context_builder.render(
-                snapshot,
-                query=self.context_query,
-                focus=focus,
-            )
-            rendered += "\n" + frontier_context(snapshot, self.skills)
-        else:
-            rendered = ""
+        # One snapshot for focus and render keeps the written context
+        # revision-consistent instead of two reloads apart.
+        snapshot = self.world.snapshot
+        focus = self.context_builder.build_focus(
+            snapshot,
+            reference=self.context_query,
+            subgoal=self.progress.current_subgoal,
+        )
+        rendered = self.context_builder.render(
+            snapshot,
+            query=self.context_query,
+            focus=focus,
+        )
         (self.run_dir / "world.context.txt").write_text(rendered, encoding="utf-8")
         self._sync_agent_views()
+
+    def carry_forward_brief(self, reason: str) -> str:
+        """Summarise the run into the state a fresh session must inherit.
+
+        The brief is the short version of the transcript that is about to be
+        discarded: what is established, what is ruled out, what is still open
+        and where the durable notes live. It is bounded so it fits any context.
+        """
+        snapshot = self.world.snapshot
+        lines = [
+            "# Carry-forward brief",
+            f"reason: {reason}",
+            f"world revision: {snapshot.revision}",
+            f"tool calls so far: {self.progress.tool_calls}",
+            "",
+            "## Established facts",
+        ]
+        facts: list[str] = list(self.progress.confirmed_facts)
+        for observation in sorted(snapshot.observations.values(), key=lambda item: item.id):
+            trust = getattr(observation.provenance, "epistemic_status", "unclassified")
+            if trust not in {"evidence", "verified"}:
+                continue
+            summary = observation.content.get("summary")
+            text = str(summary) if isinstance(summary, str) and summary else observation.id
+            if text not in facts:
+                facts.append(text)
+        lines.extend(f"- {fact}" for fact in facts[:CONTEXT_BRIEF_FACTS])
+        if not facts:
+            lines.append("- none recorded")
+
+        lines.extend(["", "## Ruled out"])
+        ruled_out = [
+            item
+            for item in sorted(snapshot.hypotheses.values(), key=lambda item: item.id)
+            if item.status in {"refuted", "superseded"}
+        ]
+        lines.extend(
+            f"- [{item.status}] {item.statement}" for item in ruled_out[:CONTEXT_BRIEF_RULED_OUT]
+        )
+        failures = sorted(snapshot.failures.values(), key=lambda item: item.id)
+        lines.extend(
+            f"- [failure] {item.message}" for item in failures[-CONTEXT_BRIEF_FAILURES:]
+        )
+        if not ruled_out and not failures:
+            lines.append("- none recorded")
+
+        lines.extend(["", "## Open intents"])
+        intents: list[str] = []
+        if self.progress.current_subgoal:
+            intents.append(f"subgoal: {self.progress.current_subgoal}")
+        intent = self.progress.action_intent or {}
+        description = intent.get("description")
+        if isinstance(description, str) and description:
+            intents.append(f"last declared intent: {description}")
+        for hypothesis in sorted(snapshot.hypotheses.values(), key=lambda item: item.id):
+            if hypothesis.status in {"open", "supported"}:
+                intents.append(f"[{hypothesis.status}] {hypothesis.statement}")
+        lines.extend(f"- {item}" for item in intents[:CONTEXT_BRIEF_FACTS])
+        if not intents:
+            lines.append("- none recorded")
+
+        lines.extend(
+            [
+                "",
+                "## Pointers",
+                f"- notes: {self.notes_dir if self.notes_dir is not None else 'notes directory'}",
+                "- durable state: world.context.txt (Harness-rendered fact view)",
+                "- write your final report to the summary file before you stop",
+                "",
+                (
+                    "Continue from this state: do not re-derive what is listed above, and do "
+                    "not re-walk a ruled-out path unless you have new evidence."
+                ),
+            ]
+        )
+        brief = "\n".join(lines) + "\n"
+        if len(brief) > CONTEXT_BRIEF_MAX_CHARS:
+            brief = brief[:CONTEXT_BRIEF_MAX_CHARS].rstrip() + "\n[brief truncated]\n"
+        return brief
+
+    def write_carry_forward_brief(self, reason: str) -> tuple[Path, str]:
+        """Write the brief into the run directory and return it with its path."""
+        brief = self.carry_forward_brief(reason)
+        path = self.run_dir / "carry-forward.md"
+        path.write_text(brief, encoding="utf-8")
+        return path, brief
 
     def _sync_agent_views(self) -> None:
         if self.sync_agent_views is not None:

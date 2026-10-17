@@ -319,7 +319,6 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     assert ledger.expected_observation == "admin route exists"
     assert ledger.actual_observation == "/admin returned 200"
     assert ledger.hypotheses["hyp-admin"].status == "supported"
-    assert ledger.replan_reasons == ["new capability"]
 
     ledger.record_submission(accepted=True, completed=True)
     assert ledger.accepted_submissions == 1

@@ -78,7 +78,7 @@ def test_gateway_writes_accounting_to_agent_inaccessible_event_file(tmp_path: Pa
 def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
-    from harness.budget import UsageMetrics
+    from harness.budget import UsageCeiling, UsageMetrics
     from harness.models import load_task
     from harness.pi_container import ContainerPiRpcSession
     from harness.session import AgentCheckpoint
@@ -110,6 +110,7 @@ def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path
     session._gateway_event_offset = 0
     session._metrics = UsageMetrics()
     session._budget_exceeded = None
+    session.usage = UsageCeiling()
     task = load_task(Path("benchmarks/examples/hello/task.yaml"))
     session._task = task.model_copy(
         update={"budgets": task.budgets.model_copy(update={"max_tokens": 10})}

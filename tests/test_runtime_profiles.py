@@ -337,3 +337,71 @@ def test_container_agents_keep_their_own_resource_limits(monkeypatch, tmp_path: 
     assert pi_command[pi_command.index("--memory") + 1] == "4g"
     assert pi_command[pi_command.index("--cpus") + 1] == "4"
     assert "/var/tmp:rw,nosuid,nodev,size=256m" in pi_command
+
+
+def _knowledge_adapter(tmp_path: Path, knowledge: list[str]) -> ContainerPiAdapter:
+    return ContainerPiAdapter(
+        AgentSpec.model_validate(
+            {
+                "apiVersion": "harness/v1",
+                "id": "pi-knowledge",
+                "type": "pi",
+                "image": "harness-pi-kali:test",
+                "knowledge": knowledge,
+                "pi": {"provider": "fake", "model": "m", "mode": "json"},
+            }
+        ),
+        allow_host=False,
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run", "task"),
+    )
+
+
+def test_knowledge_roots_are_mounted_read_only_and_exported(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
+    catalog = tmp_path / "payloads"
+    catalog.mkdir()
+    (catalog / "sqli.md").write_text("# payloads\n", encoding="utf-8")
+    adapter = _knowledge_adapter(tmp_path, [str(catalog)])
+    run_dir = tmp_path / "run-knowledge"
+    run_dir.mkdir()
+
+    command = adapter._container_command(
+        _task(),
+        task_dir=Path("benchmarks/examples/hello").resolve(),
+        run_dir=run_dir,
+        container_name="pi-knowledge",
+        network="none",
+        environment_project=None,
+        seed=1,
+        gateway_url=None,
+        gateway_token=None,
+        host_gateway=False,
+    )
+
+    # Read-only mount: the Agent reads the catalogue but cannot rewrite it.
+    assert f"{catalog.resolve()}:/knowledge/payloads:ro" in command
+    assert "HARNESS_KNOWLEDGE_DIRS=/knowledge/payloads" in command
+    assert "HARNESS_NOTES_DIR=/run/harness/notes" in command
+    assert any(str(entry).endswith("/run/harness:rw") for entry in command)
+
+
+def test_missing_knowledge_root_fails_closed(tmp_path: Path) -> None:
+    adapter = _knowledge_adapter(tmp_path, [str(tmp_path / "absent")])
+    run_dir = tmp_path / "run-missing"
+    run_dir.mkdir()
+
+    with pytest.raises(AgentError):
+        adapter._container_command(
+            _task(),
+            task_dir=Path("benchmarks/examples/hello").resolve(),
+            run_dir=run_dir,
+            container_name="pi-knowledge",
+            network="none",
+            environment_project=None,
+            seed=1,
+            gateway_url=None,
+            gateway_token=None,
+            host_gateway=False,
+        )

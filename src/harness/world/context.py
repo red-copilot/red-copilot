@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from .focus import DEFAULT_FOCUS_CLAIM_THRESHOLD, FocusBuilder, FocusItem, FocusRequest, FocusSet
@@ -44,6 +45,7 @@ class WorldContextBuilder:
         *,
         max_observations: int = 20,
         max_failures: int = 10,
+        max_ruled_out: int = 10,
         max_relations: int = 20,
         max_chars: int = 16000,
         focus_max_chars: int = 2000,
@@ -55,6 +57,7 @@ class WorldContextBuilder:
     ) -> None:
         self.max_observations = max_observations
         self.max_failures = max_failures
+        self.max_ruled_out = max_ruled_out
         self.max_relations = max_relations
         self.max_chars = max_chars
         self.focus_max_chars = focus_max_chars
@@ -278,6 +281,41 @@ class WorldContextBuilder:
                 )
         else:
             lines.append("- none")
+
+        # Ruled-out paths are rendered straight from the snapshot instead of the
+        # retrieval ranking: a dead end matters precisely because it is not
+        # relevant to the current query, so relevance ranking would hide it.
+        ruled_out = [
+            item
+            for item in snapshot.hypotheses.values()
+            if item.status in {"refuted", "superseded"} and item.is_valid_at()
+        ]
+        if ruled_out:
+            ruled_out.sort(key=lambda item: item.id)
+            ruled_out.sort(
+                key=lambda item: (
+                    item.observed_at or datetime.min.replace(tzinfo=UTC)
+                ),
+                reverse=True,
+            )
+            lines.extend(["", "## Ruled out"])
+            for hypothesis in ruled_out[: self.max_ruled_out]:
+                lines.append(
+                    self._line(
+                        hypothesis.status,
+                        hypothesis.id,
+                        "hypothesis",
+                        {
+                            "statement": hypothesis.statement,
+                            "confidence": hypothesis.confidence,
+                            **hypothesis.attributes,
+                            **self._state_meta(hypothesis),
+                        },
+                    )
+                )
+            omitted = len(ruled_out) - self.max_ruled_out
+            if omitted > 0:
+                lines.append(f"- ({omitted} more ruled-out hypotheses omitted)")
 
         lines.extend(["", "## Artifacts"])
         artifacts = sorted(selected["artifacts"], key=lambda item: item.id)

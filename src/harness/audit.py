@@ -620,6 +620,7 @@ def audit_run(run_dir: str | Path) -> AuditReport:
             "harness/progress/v1",
             "harness/progress/v2",
             "harness/progress/v3",
+            "harness/progress/v4",
         ):
             _add(
                 issues,

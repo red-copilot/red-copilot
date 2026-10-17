@@ -5,7 +5,8 @@ runtime adds durable, replayable state without requiring the Harness to own the 
 
 ## Design principles
 
-- **Events are authoritative.** The SQLite `world_events` stream in `world.db` is canonical.\n- **Projections are derived.** `world_objects`, `world.snapshot.json`, and JSONL exports can be rebuilt from events.
+- **Events are authoritative.** The SQLite `world_events` stream in `world.db` is canonical.
+- **Projections are derived.** `world_objects`, `world.snapshot.json`, and JSONL exports can be rebuilt from events.
 - **Core defines mechanics, domains define semantics.** Core type strings are intentionally open.
 - **The world is not assumed to be a DAG.** Relations may form arbitrary directed graphs.
 - **Beliefs are not facts.** Observations and hypotheses may carry confidence and provenance.

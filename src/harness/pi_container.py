@@ -22,10 +22,15 @@ from .agent import (
     ContainerLimits,
     _terminate_process,
     build_container_command,
-    run_docker,
 )
 from .agent_workspace import prepare_agent_task_view
-from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor, UsageMetrics, charge_usage_event
+from .budget import (
+    FINALIZE_GRACE_SECONDS,
+    BudgetMonitor,
+    UsageCeiling,
+    UsageMetrics,
+    charge_usage_event,
+)
 from .models import AgentSpec, TaskSpec
 from .pi_adapter import PiAdapter
 from .secureio import open_regular_file, read_regular_text
@@ -89,17 +94,18 @@ class ContainerPiSession(OneShotAgentSession):
 class ContainerPiRpcSession:
     """Interactive Pi RPC session with Harness-controlled stdin steering."""
 
+    # Observation types that reach a live Pi session as steering prompts. Only
+    # what the Harness actually emits belongs here.
     _STEER_TYPES = frozenset(
         {
             "solver.verification",
-            "solver.plan.updated",
-            "solver.replan_requested",
             "aci.feedback",
             "benchmark.feedback",
             "world.state.updated",
             "solver.budget",
             "solver.finalize",
-            "solver.round",
+            "solver.repetition_steer",
+            "solver.context_restart",
             "solver.hint",
         }
     )
@@ -132,10 +138,14 @@ class ContainerPiRpcSession:
         self._settled = False
         self._timed_out = False
         self._budget_exceeded: str | None = None
-        # Invalid usage telemetry degrades accounting (that model call is not
-        # counted) instead of terminating the session: only wall_time is
-        # enforced, and a one-shot evaluation must survive a provider hiccup.
+        # Invalid usage telemetry degrades accounting instead of terminating the
+        # session; only wall time and the explicitly declared soft ceilings stop
+        # a run. A provider telemetry hiccup must not discard an otherwise valid
+        # evaluation.
         self._telemetry_invalid: str | None = None
+        # Usage ceilings are soft: the crossing opens the finalize grace window
+        # and only the window's edge (not the crossing) ends the session.
+        self.usage = UsageCeiling()
         self._event_offset = 0
         self._agent_event_offset = 0
         self._agent_event_remainder = ""
@@ -195,6 +205,11 @@ class ContainerPiRpcSession:
         run_dir = self.run_dir
         if context.resume_session_id:
             await self._guard_existing_resume_container(task_dir)
+        else:
+            # A fresh session still has to clear the container from the previous
+            # session in this run directory: a context restart keeps the run
+            # directory and only replaces the model transcript.
+            await self._clear_previous_container(task_dir)
         environment_network = context.environment_network
         gateway_url = context.gateway_url
         gateway_token = context.gateway_token
@@ -255,6 +270,7 @@ class ContainerPiRpcSession:
             gateway_token=gateway_token,
             host_gateway=host_gateway,
             agent_session_id=context.resume_session_id,
+            shared_findings_dir=context.shared_findings_dir,
         )
         self.adapter.trace.emit(
             "agent.started",
@@ -378,6 +394,30 @@ class ContainerPiRpcSession:
             check=False,
         )
 
+    async def _clear_previous_container(self, task_dir: Path) -> None:
+        """Remove a stopped container left by the previous session in this run."""
+        inspect = await asyncio.to_thread(
+            self.adapter._docker,
+            ["docker", "inspect", "--format", "{{.State.Running}}", self.container_name],
+            cwd=task_dir,
+            check=False,
+        )
+        if inspect.returncode != 0:
+            if (
+                "no such object" not in inspect.stderr.lower()
+                and "no such container" not in inspect.stderr.lower()
+            ):
+                raise AgentError(f"cannot inspect prior Pi container: {inspect.stderr.strip()}")
+            return
+        if inspect.stdout.strip().lower() not in {"true", "false"}:
+            return
+        await asyncio.to_thread(
+            self.adapter._docker,
+            ["docker", "rm", "-f", self.container_name],
+            cwd=task_dir,
+            check=False,
+        )
+
     def _normalize_pi_record(self, raw: str) -> list[tuple[str, dict[str, Any]]]:
         """Keep model accounting on the trusted Gateway stream when routed there."""
         return self.adapter._normalize_line(
@@ -428,17 +468,26 @@ class ContainerPiRpcSession:
             for event in self._consume_agent_events():
                 yield event
             hard_deadline = task.budgets.wall_time + FINALIZE_GRACE_SECONDS
-            remaining = hard_deadline - (time.monotonic() - self._started)
+            wall_remaining = hard_deadline - (time.monotonic() - self._started)
+            usage_remaining = self.usage.remaining()
+            remaining = min(
+                value for value in (wall_remaining, usage_remaining) if value is not None
+            )
             if remaining <= 0:
-                self._timed_out = True
-                self.adapter.trace.emit(
-                    "budget.exceeded",
-                    data={
-                        "budget": "wall_time",
-                        "limit": task.budgets.wall_time,
-                        "grace_seconds": FINALIZE_GRACE_SECONDS,
-                    },
-                )
+                if usage_remaining is not None and usage_remaining <= wall_remaining:
+                    # The exhausted usage dimension owns this stop; its crossing
+                    # was already traced when the ceiling was reached.
+                    self._budget_exceeded = self.usage.dimension
+                else:
+                    self._timed_out = True
+                    self.adapter.trace.emit(
+                        "budget.exceeded",
+                        data={
+                            "budget": "wall_time",
+                            "limit": task.budgets.wall_time,
+                            "grace_seconds": FINALIZE_GRACE_SECONDS,
+                        },
+                    )
                 await self._kill_container()
                 break
             try:
@@ -733,6 +782,9 @@ class ContainerPiRpcSession:
 
     def _account(self, event: AgentEvent) -> None:
         if charge_usage_event(self._metrics, event.type, event.data):
+            # A declared usage ceiling crossing is soft: trace it once and arm
+            # the finalize grace window; the events loop kills only at the edge.
+            self.usage.observe(self._metrics, self._task.budgets, self.adapter.trace)
             return
         missing = event.type == "model.usage_missing"
         self._telemetry_invalid = (
@@ -837,7 +889,24 @@ class ContainerPiAdapter(PiAdapter):
         self.trace = trace
         self._tool_started: dict[str, float] = {}
 
-    _docker = staticmethod(run_docker)
+    @staticmethod
+    def _docker(
+        command: list[str],
+        *,
+        cwd: Path,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if check and result.returncode != 0:
+            raise AgentError(f"{' '.join(command[:3])} failed: {result.stderr.strip()}")
+        return result
 
     def _container_command(
         self,
@@ -854,6 +923,7 @@ class ContainerPiAdapter(PiAdapter):
         host_gateway: bool,
         agent_session_id: str | None = None,
         agent_task_dir: Path | None = None,
+        shared_findings_dir: Path | None = None,
     ) -> list[str]:
         pi_env = {
             "PI_CODING_AGENT_DIR": "/run/harness/pi-agent",
@@ -877,6 +947,7 @@ class ContainerPiAdapter(PiAdapter):
             gateway_token=gateway_token,
             host_gateway=host_gateway,
             agent_task_dir=agent_task_dir,
+            shared_findings_dir=shared_findings_dir,
             workdir="/run/harness",
             limits=ContainerLimits(
                 pids=512,
@@ -998,6 +1069,7 @@ class ContainerPiAdapter(PiAdapter):
             host_gateway=host_gateway,
             agent_session_id=None,
             agent_task_dir=context.agent_task_dir,
+            shared_findings_dir=context.shared_findings_dir,
         )
 
         self.trace.emit(

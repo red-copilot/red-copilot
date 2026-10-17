@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from harness.agent import AgentError, AgentRunContext
-from harness.budget import UsageMetrics
+from harness.budget import UsageCeiling, UsageMetrics
 from harness.models import AgentSpec, load_task
 from harness.pi_container import (
     ContainerPiAdapter,
@@ -972,12 +972,14 @@ def test_pi_rpc_session_accounts_usage_without_enforcing_non_time_limits(
     events, result = asyncio.run(scenario())
 
     assert [event.type for event in events] == event_types
-    # Only the soft wall-clock deadline bounds a run: usage above a declared
-    # token/call/cost ceiling is still charged, but no budget stop is raised.
+    # Usage above a declared ceiling is still charged, but the crossing is
+    # soft: it is traced and arms the finalize grace window instead of
+    # stopping the stream immediately.
     assert result.budget_exceeded is None
     assert result.timed_out is False
     trace_text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
-    assert '"budget.exceeded"' not in trace_text
+    assert '"budget.exceeded"' in trace_text
+    assert f'"budget":"{budget_name}"' in trace_text
     assert getattr(result.metrics, metric_name) == metric_value
 
 
@@ -1065,9 +1067,12 @@ def test_pi_rpc_uses_verified_target_network_id(monkeypatch, tmp_path: Path) -> 
 
     asyncio.run(start_session())
 
-    create = docker_commands[0]
+    create = next(command for command in docker_commands if "--network" in command)
     assert create[create.index("--network") + 1] == "b" * 64
-    assert len(docker_commands) == 1
+    # A fresh session first inspects for a container left by a previous session
+    # in the same run directory (context restart), then creates its own.
+    assert len(docker_commands) == 2
+    assert docker_commands[0][1] == "inspect"
 
 
 
@@ -1237,6 +1242,8 @@ def test_pi_rpc_session_survives_missing_usage_mid_stream(monkeypatch, tmp_path:
     session._metrics = UsageMetrics()
     session._budget_exceeded = None
     session._telemetry_invalid = None
+    session._task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+    session.usage = UsageCeiling()
 
     session._account(AgentEvent(type="model.usage_missing", data={"source": "pi"}))
     session._account(

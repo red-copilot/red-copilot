@@ -42,7 +42,7 @@ control-loop system prompt (`pi.system_prompt_file: prompts/tsec-solver.md`). Th
 prompt tells Pi to observe/act/verify/adjust, to treat Harness verification as the
 only authoritative feedback, and to submit candidates via `$HARNESS_SUBMISSION_INBOX`.
 The ablation matrix (Pi-only vs feedback vs full control spine) is in
-[control-theory.md](control-theory.md).
+[agent-architecture.md](agent-architecture.md).
 
 ## Run
 
@@ -68,28 +68,33 @@ harness tsec \
   --all
 ```
 
-Optional limits and ablation profiles:
+Optional limits, knowledge roots and parallelism:
 
 ```bash
 harness tsec \
   --agent agents/examples/pi-tsec-hackathon.yaml \
   --all \
-  --solver-profile pi-world-heuristic \
-  --skills-root skills \
+  --knowledge-root skills/offensive \
+  --parallel 3 \
   --max-unconfirmed-progress 160 \
-  --max-replans 16 \
+  --wall-time 3600 \
   --start-retries 2 \
   --retry-delay 2
 ```
 
-`--wall-time` (default: the managed evaluation platform's eight-hour task window)
-is a soft deadline: at that point Harness steers the Agent to write
+`--parallel N` solves up to N challenges at once (default 1, hard cap 3 because the platform
+allows each team three running instances). Each challenge runs in its own run directory with
+its own budgets, so one slow challenge cannot starve the others.
+
+`--wall-time` is a soft deadline: at that point Harness steers the Agent to write
 `agent.summary.md` (facts, ruled-out hypotheses, unfinished intents) and grants a
 `FINALIZE_GRACE_SECONDS` (180s) window before the container is killed. The
-`--max-tokens`/`--max-model-calls`/`--max-tool-calls`/`--max-cost-usd` flags are still accepted
-but no longer enforced; passing one prints a warning and records a `budget.ignored` trace event.
+`--max-tokens`/`--max-model-calls`/`--max-tool-calls`/`--max-cost-usd` flags are enforced the
+same soft way: the first crossing records a `budget.exceeded` trace event, steers finalize
+(`solver.finalize`, `reason=soft_budget_limit`) and only ends the run if the grace window
+elapses without the summary.
 
-When a TSec challenge is provisioned, `bootstrap_solver()` seeds each `benchmark.target` entity alongside an `evidence`-level `network.reachability` capability scoped to the target address so `RollingHorizonPlanner` immediately produces an initial 3-step plan (`plan.json`) across bundled multi-domain skills (`network`, `web`, `pwn`, `crypto`, `cloud`, `benchmark`).
+When a TSec challenge is provisioned, `bootstrap_solver()` seeds each `benchmark.target` entity alongside an `evidence`-level `network.reachability` capability scoped to the target address, so the Agent's world context starts from a verified reachability fact. The Agent decides what to do with it; the Harness publishes no plan.
 
 If the platform returns `ResourceUnavailable` while starting a challenge, Harness retries according to `--start-retries` and `--retry-delay`. Other SDK state errors are recorded in the trace and surfaced instead of being guessed around.
 
@@ -103,6 +108,44 @@ harness tsec \
 ```
 
 Harness calls `get_hint()` only when `--hint` is present and records that a score penalty is expected.
+
+## ZC offensive agent
+
+`agents/examples/zc-offensive.yaml` declares read-only `knowledge:` roots
+(`skills/offensive`, `knowledge`), mounted at `/knowledge/<name>` and exported as
+`HARNESS_KNOWLEDGE_DIRS`. The Agent reads the `SKILL.md` catalogue and staged payload notes on
+demand with its own file tools; nothing in the Harness parses or ranks them.
+
+```bash
+harness tsec --agent agents/examples/zc-offensive.yaml --all --parallel 3 \
+  --knowledge-root skills/offensive --wall-time 3600
+```
+
+CVM deployment checklist: [agent-architecture-v2.md](agent-architecture-v2.md).
+
+### Competing sessions on one challenge
+
+A `pi` agent may declare several competing sessions for the same challenge:
+
+```yaml
+executors:
+  - id: primary
+    model: gpt-5.6-sol
+    thinking: high
+  - id: challenger
+    model: gpt-5.6-sol
+    thinking: medium
+```
+
+`--parallel` still decides how many challenges run at once; every declared executor adds one
+container to that challenge, so keep `parallel x executors` inside the machine budget. All
+sessions share the provisioned instance, the World, the submission dedupe set and the final
+evaluation; the first session whose submission the evaluator confirms stops the others and
+releases the instance once. Each session keeps its own container, workspace, notes, progress
+ledger and `checkpoint.json` under `run_dir/executors/<nn>-<id>/`, splits the token / model-call /
+tool-call / cost budgets evenly, and shares the wall-clock window. Findings a session wants its
+siblings to see go to `$HARNESS_SHARED_FINDINGS`; `result.json` reports every session under
+`executor_sessions`. The local `harness run` entry point still rejects competing executors.
 
 ## Security boundary
 
@@ -125,8 +168,7 @@ A TSec result records:
   "platform_cumulative_score": 935,
   "benchmark": {
     "challenge_total_score": 120,
-    "hint_used": true,
-    "solver_profile": "pi-world-heuristic"
+    "hint_used": true
   },
   "flags": {
     "expected": 2,

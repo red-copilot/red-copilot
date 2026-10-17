@@ -1,8 +1,9 @@
 apiVersion: harness/v1
-kind: Task
 id: zc-hackathon-track3
-benchmark: zc
-description: "ZC Hackathon Track 3: AI-assisted real-world vulnerability hunting"
+name: ZC Hackathon Track 3
+category: web
+difficulty: hard
+tags: [zc, hackathon, offensive]
 
 objective:
   description: |
@@ -10,15 +11,17 @@ objective:
     Submit verified vulnerabilities with minimal PoC evidence.
     Maximize autonomy score across recon, discovery, and exploitation phases.
 
-budget:
-  wall_clock_seconds: 7200
-  model_calls: 500
-  tool_calls: 2000
-
-skills:
-  - skills/offensive/
-  - skills/examples/
+budgets:
+  wall_time: 7200
+  max_model_calls: 500
+  max_tool_calls: 2000
 
 environment:
-  type: none
+  provider: none
+
+# Solver invocation for this task pairs the agent below with the offensive catalogue.
+# The agent declares its read-only knowledge roots (`skills/offensive`, `knowledge`)
+# in its YAML; `harness tsec --knowledge-root <dir>` overrides them per run.
+#   harness run benchmarks/examples/zc-hackathon/task.yaml \
+#     --agent agents/examples/zc-offensive.yaml
 

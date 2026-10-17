@@ -10,15 +10,17 @@ from typing import Annotated
 import typer
 from pydantic import ValidationError
 
-from .benchmark.base import BENCHMARK_MAX_REPLANS, BENCHMARK_MAX_UNCONFIRMED_PROGRESS
-from .benchmark.tsec_adapter import MAX_EVALUATION_WALL_TIME_SECONDS, run_tsec_challenges
+from .benchmark.base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
+from .benchmark.tsec_adapter import (
+    MAX_EVALUATION_WALL_TIME_SECONDS,
+    MAX_PARALLEL_CHALLENGES,
+    run_tsec_challenges,
+)
 from .benchmark.tsec_client import load_tsec_config
 from .gateway_runtime import GatewayConfig
 from .models import BudgetSpec, load_agent, load_task
 from .orchestrator import Orchestrator
 from .preflight import run_preflight
-from .runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
-from .skills import load_skill
 
 app = typer.Typer(
     name="harness",
@@ -187,19 +189,6 @@ def preflight(
         raise typer.Exit(code=1)
 
 
-@app.command("validate-skill")
-def validate_skill(
-    skill: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
-) -> None:
-    """Validate a skill metadata contract."""
-    try:
-        spec = load_skill(skill)
-    except (ValidationError, ValueError, TypeError) as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=2) from exc
-    typer.echo(f"valid skill: {spec.id} ({spec.domain})")
-
-
 @app.command()
 def run(
     task: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
@@ -236,12 +225,16 @@ def run(
             help="Allow trusted CLI agent command to execute on the host.",
         ),
     ] = False,
-    solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
-        DEFAULT_SOLVER_PROFILE
-    ),
     context_token_budget: Annotated[
         int | None,
         typer.Option("--context-token-budget", min=1, help="Bound world.context.txt assembly by an offline token estimate."),
+    ] = None,
+    knowledge_root: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--knowledge-root",
+            help="Read-only markdown knowledge root; repeat for more. Overrides the agent YAML.",
+        ),
     ] = None,
 ) -> None:
     """Run one task with one agent."""
@@ -249,6 +242,10 @@ def run(
         raise typer.BadParameter("--resume-run cannot be combined with --resume-world or --repeat")
     task_spec = load_task(task)
     agent_spec = load_agent(agent)
+    if knowledge_root:
+        agent_spec = agent_spec.model_copy(
+            update={"knowledge": [str(path) for path in knowledge_root]}
+        )
     gateway_config = _gateway_config(
         enabled=gateway_enabled,
         policy=gateway_policy,
@@ -272,7 +269,6 @@ def run(
             gateway_config=gateway_config,
             resume_world_events=resume_world,
             resume_run_dir=resume_run,
-            solver_profile=solver_profile,
             context_token_budget=context_token_budget,
         )
         for index in range(repeat)
@@ -298,7 +294,22 @@ def tsec(
     challenge: Annotated[str | None, typer.Option("--challenge")] = None,
     run_all: Annotated[bool, typer.Option("--all")] = False,
     runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".harness/tsec-runs"),
-    skills_root: Annotated[Path, typer.Option("--skills-root")] = Path("skills"),
+    parallel: Annotated[
+        int | None,
+        typer.Option(
+            "--parallel",
+            min=1,
+            max=MAX_PARALLEL_CHALLENGES,
+            help="Alias for --concurrency; the platform caps instances at 3.",
+        ),
+    ] = None,
+    knowledge_root: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--knowledge-root",
+            help="Read-only markdown knowledge root; repeat for more. Overrides the agent YAML.",
+        ),
+    ] = None,
     base_url_env: Annotated[str, typer.Option("--base-url-env")] = "BENCHMARK_BASE_URL",
     token_env: Annotated[str, typer.Option("--benchmark-token-env")] = "BENCHMARK_TOKEN",
     seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
@@ -331,13 +342,9 @@ def tsec(
             help="Allow a trusted CLI agent to execute on the host.",
         ),
     ] = False,
-    solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
-        DEFAULT_SOLVER_PROFILE
-    ),
     max_unconfirmed_progress: Annotated[
         int, typer.Option("--max-unconfirmed-progress", min=1)
     ] = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
-    max_replans: Annotated[int, typer.Option("--max-replans", min=1)] = BENCHMARK_MAX_REPLANS,
     concurrency: Annotated[
         int,
         typer.Option(
@@ -367,9 +374,29 @@ def tsec(
             help="Retry still-incomplete challenges this many passes over the set.",
         ),
     ] = 1,
+    max_wall_time_seconds: Annotated[
+        int | None,
+        typer.Option(
+            "--max-wall-time-seconds",
+            min=1,
+            help="Optional operator cap on the declared wall clock.",
+        ),
+    ] = None,
+    seed_notes_from: Annotated[
+        Path | None,
+        typer.Option(
+            "--seed-notes-from",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Previous run directory whose summary seeds this run's notes.",
+        ),
+    ] = None,
 ) -> None:
     """Run TSec Benchmark challenges through the generic benchmark runtime."""
     spec = load_agent(agent)
+    if knowledge_root:
+        spec = spec.model_copy(update={"knowledge": [str(path) for path in knowledge_root]})
     config = load_tsec_config(base_url_env=base_url_env, token_env=token_env)
     if any(
         value is not None
@@ -394,7 +421,6 @@ def tsec(
             agent=spec,
             budgets=budgets,
             runs_root=runs_root,
-            skills_root=skills_root,
             challenge_code=challenge,
             run_all=run_all,
             seed=seed,
@@ -402,12 +428,13 @@ def tsec(
             start_retries=start_retries,
             retry_delay=retry_delay,
             allow_host_agent=allow_host_agent,
-            solver_profile=solver_profile,
             max_unconfirmed_progress=max_unconfirmed_progress,
-            max_replans=max_replans,
+            parallel=parallel,
             concurrency=concurrency,
             total_wall_time=total_wall_time,
             max_passes=max_passes,
+            max_wall_time_seconds=max_wall_time_seconds,
+            seed_notes_from=seed_notes_from,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))

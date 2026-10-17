@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
+import pytest
+
 from harness.benchmark import tsec_adapter
 from harness.benchmark.base import (
     AdapterSessionState,
@@ -14,13 +16,13 @@ from harness.benchmark.base import (
     Submission,
 )
 from harness.benchmark.tsec_adapter import (
+    MAX_PARALLEL_CHALLENGES,
     TSecBenchmarkAdapter,
     extract_flags,
     run_tsec_challenges,
 )
-from harness.benchmark.tsec_client import TSecConfig
+from harness.benchmark.tsec_client import TSecAdapterError, TSecConfig
 from harness.models import AgentSpec, BudgetSpec
-from harness.runtime.solver_profile import SolverProfile
 
 
 class FakeTSecClient:
@@ -359,11 +361,9 @@ class FakeRunnerClient:
 class FakeBenchmarkRunner:
     last_budgets: BudgetSpec | None = None
     last_kwargs: dict | None = None
-    last_skills_root: Path | None = None
 
-    def __init__(self, *, runs_root: Path, skills_root: Path = Path("skills")):
+    def __init__(self, *, runs_root: Path):
         self.runs_root = runs_root
-        type(self).last_skills_root = Path(skills_root)
 
     async def run_case(self, *, case, budgets, **kwargs):
         type(self).last_budgets = budgets
@@ -375,9 +375,6 @@ class FakeBenchmarkRunner:
                 "case_id": case.id,
                 "domain": case.domain,
                 "difficulty": case.difficulty,
-                "solver_profile": (
-                    kwargs.get("solver_profile", SolverProfile.PI_WORLD_HEURISTIC).value
-                ),
                 "session": {
                     "hint_used": False,
                     "initial_correct": 0,
@@ -410,12 +407,9 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
             agent=_runner_agent(),
             budgets=BudgetSpec(wall_time=30),
             runs_root=tmp_path,
-            skills_root=tmp_path / "custom-skills",
             challenge_code="WEB-001",
             seed=1,
-            solver_profile=SolverProfile.PI_WORLD,
             max_unconfirmed_progress=200,
-            max_replans=20,
         )
     )
 
@@ -432,12 +426,8 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
     }
     assert result["benchmark"]["challenge"] == "WEB-001"
     assert result["benchmark"]["level"] == "L2"
-    assert result["benchmark"]["solver_profile"] == "pi-world"
-    assert FakeBenchmarkRunner.last_skills_root == tmp_path / "custom-skills"
     assert FakeBenchmarkRunner.last_kwargs is not None
-    assert FakeBenchmarkRunner.last_kwargs["solver_profile"] is SolverProfile.PI_WORLD
     assert FakeBenchmarkRunner.last_kwargs["max_unconfirmed_progress"] == 200
-    assert FakeBenchmarkRunner.last_kwargs["max_replans"] == 20
 
 
 def test_run_tsec_challenges_allows_the_full_evaluation_window(
@@ -499,7 +489,7 @@ class _ConcurrencyProbeRunner:
     max_in_flight: ClassVar[int] = 0
     fail_cases: ClassVar[set[str]] = set()
 
-    def __init__(self, *, runs_root, skills_root=Path("skills")):
+    def __init__(self, *, runs_root):
         pass
 
     async def run_case(self, *, case, budgets, **kwargs):
@@ -840,6 +830,85 @@ def test_teardown_treats_invalid_state_as_closed(monkeypatch) -> None:
     asyncio.run(adapter.teardown(session))
 
     assert adapter._sessions[session.id].closed is True
+
+
+def test_run_tsec_challenges_applies_the_operator_wall_time_cap(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=7200),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+            max_wall_time_seconds=1800,
+        )
+    )
+
+    assert FakeBenchmarkRunner.last_budgets is not None
+    assert FakeBenchmarkRunner.last_budgets.wall_time == 1800
+
+
+def test_run_tsec_challenges_keeps_a_shorter_declared_wall_clock(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", FakeBenchmarkRunner)
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=600),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+            max_wall_time_seconds=1800,
+        )
+    )
+
+    assert FakeBenchmarkRunner.last_budgets is not None
+    assert FakeBenchmarkRunner.last_budgets.wall_time == 600
+
+
+def test_run_tsec_challenges_parallel_alias_bounds_concurrency(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _reset_probe()
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _MultiCaseClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _ConcurrencyProbeRunner)
+    _ConcurrencyProbeRunner.fail_cases = set()
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            runs_root=tmp_path,
+            run_all=True,
+            parallel=2,
+        )
+    )
+
+    assert len(results) == 3
+    assert _ConcurrencyProbeRunner.max_in_flight == 2
+
+
+def test_run_tsec_challenges_rejects_parallel_above_the_platform_cap(tmp_path: Path) -> None:
+    with pytest.raises(TSecAdapterError):
+        asyncio.run(
+            run_tsec_challenges(
+                config=TSecConfig(base_url="https://example.invalid", token="secret"),
+                agent=_runner_agent(),
+                budgets=BudgetSpec(wall_time=30),
+                runs_root=tmp_path,
+                run_all=True,
+                parallel=MAX_PARALLEL_CHALLENGES + 1,
+            )
+        )
 
 
 async def _fake_sleep(_seconds: float) -> None:

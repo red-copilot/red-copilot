@@ -2,8 +2,13 @@ apiVersion: harness/v1
 id: zc-offensive-agent
 type: pi
 image: harness/pi-kali:local
-network: environment
-network_profile: model-allowed
+# TSecBench targets are reached directly from the Kali container, so the
+# externally provisioned benchmark path requires host networking.
+network: host
+# Benchmark-only keeps the legacy advisory network posture used by the TSec
+# hackathon agent (target + model egress, no isolation claim); platform
+# credentials still never enter the container.
+network_profile: benchmark-only
 
 pi:
   mode: rpc
@@ -14,4 +19,22 @@ pi:
   env_passthrough: [OPENAI_API_KEY]
   system_prompt_file: prompts/zc-solver.md
   cap_add: [NET_RAW]
+
+# Read-only markdown catalogues mounted at /knowledge/<name>. The Agent reads
+# them with its own file tools; nothing here is parsed or ranked by the Harness.
+knowledge:
+  - skills/offensive
+  - knowledge
+
+# Optional: race up to four solver sessions over one provisioned challenge.
+# Every entry adds a container, so keep `harness tsec --parallel` times this
+# count inside the machine budget. Uncomment to opt in; nothing is declared by
+# default and a single session keeps the historical layout.
+# executors:
+#   - id: primary
+#     model: gpt-5.6-sol
+#     thinking: high
+#   - id: challenger
+#     model: gpt-5.6-sol
+#     thinking: medium
 

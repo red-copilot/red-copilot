@@ -9,8 +9,25 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from .budget import USAGE_DIMENSION_SOURCES, exceeded_usage_dimension
 from .session import AgentEvent
 from .verification import AuthorizedObjectiveVerdict, VerifierRegistry
+
+# Consecutive calls in one command family before the Harness intervenes, and
+# the streak at which it stops nudging and asks for convergence instead.
+REPETITION_STEER_STREAK = 3
+REPETITION_ESCALATE_STREAK = 6
+# Repetition bookkeeping is bounded so a long run cannot grow it without limit.
+MAX_TRACKED_TOOL_FAMILIES = 200
+
+# A long single session degrades: the transcript grows, noise crowds out the
+# signal, and the Agent starts re-deriving what it already knew. These are the
+# defaults at which the Harness resets the session and re-injects a brief. The
+# tool-call triggers are counted from the previous restart, so each reset needs
+# a fresh stretch of work before the next one is considered.
+CONTEXT_RESTART_TOOL_CALLS = 300
+CONTEXT_RESTART_BUDGET_FRACTION = 0.6
+MAX_CONTEXT_RESTARTS = 2
 
 
 class ProgressHypothesis(BaseModel):
@@ -23,7 +40,7 @@ class ProgressHypothesis(BaseModel):
 
 
 class ProgressLedger(BaseModel):
-    schema_version: str = "harness/progress/v3"
+    schema_version: str = "harness/progress/v4"
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     active_goal: str | None = None
     completed_subgoals: list[str] = Field(default_factory=list)
@@ -39,11 +56,12 @@ class ProgressLedger(BaseModel):
     action_intent: dict[str, Any] | None = None
     expected_observation: str | None = None
     actual_observation: str | None = None
-    replan_reasons: list[str] = Field(default_factory=list)
     last_verification: dict[str, Any] | None = None
     verified_actions: int = 0
     execution_succeeded: int = 0
     evidence_confirmed: int = 0
+    capability_acquired: int = 0
+    goal_advanced: int = 0
     contradicted_actions: int = 0
     pending_actions: int = 0
     skipped_verifications: int = 0
@@ -57,12 +75,21 @@ class ProgressLedger(BaseModel):
     # keeps exploration alive when no action-level verifier is available while
     # still terminating an endless unproductive loop.
     unconfirmed_progress: int = 0
-    replan_count: int = 0
     failed_skill_counts: dict[str, int] = Field(default_factory=dict)
-    # Tool or argument-family -> attempts that produced no new semantic fact,
-    # so a run that keeps re-trying the same dead end can be told about it.
-    no_gain_tools: dict[str, int] = Field(default_factory=dict)
     reconciled_actions: dict[str, str] = Field(default_factory=dict)
+    # Repetition control: how many tool calls in a row share one command family,
+    # which families already drew an intervention, and the per-family totals.
+    # A family that keeps repeating without confirmed progress is the signature
+    # of a loop being ground down rather than a line of attack being widened.
+    tool_family_streak: int = 0
+    last_tool_family: str | None = None
+    tool_family_totals: dict[str, int] = Field(default_factory=dict)
+    steered_tool_families: dict[str, int] = Field(default_factory=dict)
+    # Session restarts performed after the context grew long: the counter and
+    # the tool-call mark let the next threshold be measured from the restart
+    # instead of the run start.
+    context_restarts: int = 0
+    tool_calls_at_last_restart: int = 0
     # Correlates legacy events that predate tool_call_id, so replay uses the
     # same generated action identity after a checkpoint reload.
     tool_event_correlations: dict[str, str] = Field(default_factory=dict)
@@ -71,6 +98,10 @@ class ProgressLedger(BaseModel):
     # Extra wall-clock room granted after the soft deadline so a run can stop
     # exploring and write its final summary instead of being cut off.
     wall_time_grace_seconds: float = Field(default=0.0, ge=0.0)
+    # When a usage dimension first crossed its ceiling. The solver holds the
+    # budget STOP inside the grace window counted from this stamp, mirroring
+    # the adapters' kill deadline, so exhaustion cannot cut the summary short.
+    budget_exceeded_at: datetime | None = None
     tool_calls: int = 0
     model_calls: int = 0
     accepted_submissions: int = 0
@@ -104,6 +135,7 @@ class ProgressLedger(BaseModel):
             family = event.data.get("args_family")
             if isinstance(family, str) and family:
                 action["args_family"] = family
+            self._record_tool_family(family)
             self.last_action = action
             call_id = action["tool_call_id"]
             if isinstance(call_id, str) and call_id:
@@ -164,6 +196,74 @@ class ProgressLedger(BaseModel):
                 if isinstance(value, (int, float)) and value >= 0:
                     self.budget_used[field] = self.budget_used.get(field, 0.0) + float(value)
 
+    def _record_tool_family(self, family: str | None) -> None:
+        """Track consecutive tool calls that share one command family."""
+        if not isinstance(family, str) or not family:
+            self.tool_family_streak = 0
+            self.last_tool_family = None
+            return
+        if family == self.last_tool_family:
+            self.tool_family_streak += 1
+        else:
+            self.last_tool_family = family
+            self.tool_family_streak = 1
+        self.tool_family_totals[family] = self.tool_family_totals.get(family, 0) + 1
+        while len(self.tool_family_totals) > MAX_TRACKED_TOOL_FAMILIES:
+            self.tool_family_totals.pop(next(iter(self.tool_family_totals)))
+
+    def repetition_action(self) -> tuple[str, int, int] | None:
+        """Return the pending intervention for the current family, if any.
+
+        The tuple is ``(family, streak, level)`` where level 1 is a targeted
+        nudge and level 2 asks the Agent to converge and write its summary.
+        Each level fires at most once per family per run.
+        """
+        family = self.last_tool_family
+        if not family:
+            return None
+        emitted = self.steered_tool_families.get(family, 0)
+        if self.tool_family_streak >= REPETITION_ESCALATE_STREAK and emitted < 2:
+            return family, self.tool_family_streak, 2
+        if self.tool_family_streak >= REPETITION_STEER_STREAK and emitted < 1:
+            return family, self.tool_family_streak, 1
+        return None
+
+    def note_repetition_steer(self, family: str, *, level: int) -> None:
+        self.steered_tool_families[family] = max(
+            self.steered_tool_families.get(family, 0), level
+        )
+        while len(self.steered_tool_families) > MAX_TRACKED_TOOL_FAMILIES:
+            self.steered_tool_families.pop(next(iter(self.steered_tool_families)))
+
+    def reset_repetition(self) -> None:
+        """Clear the streak after confirmed progress; steered families stay."""
+        self.tool_family_streak = 0
+        self.last_tool_family = None
+        self.tool_family_totals.clear()
+
+    def context_restart_due(self) -> str | None:
+        """Return why the session context should be reset, or ``None``.
+
+        Both triggers are counted from the previous restart, so a restart
+        cannot re-fire on the threshold it just crossed. Only while the
+        objective is still open: a finished objective has nothing left to
+        re-inject.
+        """
+        if self.objective_completed or self.context_restarts >= MAX_CONTEXT_RESTARTS:
+            return None
+        calls_since_restart = self.tool_calls - self.tool_calls_at_last_restart
+        if calls_since_restart >= CONTEXT_RESTART_TOOL_CALLS:
+            return "tool_calls"
+        limit = self.budget_limits.get("max_tool_calls", 0.0)
+        if limit > 0 and calls_since_restart >= limit * CONTEXT_RESTART_BUDGET_FRACTION:
+            return "tool_call_budget"
+        return None
+
+    def record_context_restart(self) -> None:
+        self.context_restarts += 1
+        self.tool_calls_at_last_restart = self.tool_calls
+        self.reset_repetition()
+
     def record_intent(self, intent: Any) -> None:
         data = intent.model_dump(mode="json") if hasattr(intent, "model_dump") else dict(intent)
         self.action_intent = data
@@ -214,14 +314,6 @@ class ProgressLedger(BaseModel):
             item = ProgressHypothesis.model_validate(hypothesis)
             self.hypotheses[item.id] = item
 
-        replan_reason = data.get("replan_reason")
-        if (
-            isinstance(replan_reason, str)
-            and replan_reason
-            and replan_reason not in self.replan_reasons
-        ):
-            self.replan_reasons.append(replan_reason)
-
         made_progress = data.get("made_progress")
         if made_progress is False:
             self.no_progress_count += 1
@@ -240,6 +332,7 @@ class ProgressLedger(BaseModel):
             self.evidence_confirmed += 1
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
+            self.reset_repetition()
         elif status == "contradicted":
             self.contradicted_actions += 1
             if (self.last_action or {}).get("status") != "failed":
@@ -249,27 +342,36 @@ class ProgressLedger(BaseModel):
         elif status == "pending":
             self.pending_actions += 1
 
-        for reason in data.get("replan_reasons", []):
-            if reason not in self.replan_reasons:
-                self.replan_reasons.append(reason)
-
     def record_submission(self, *, accepted: bool, completed: bool) -> None:
         del completed  # Final evaluation, not submission feedback, owns completion.
         if accepted:
             self.accepted_submissions += 1
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
-            if "benchmark_negative_feedback" in self.replan_reasons:
-                self.replan_reasons.remove("benchmark_negative_feedback")
+            self.reset_repetition()
         else:
             self.rejected_submissions += 1
             self.failure_count += 1
             self.no_progress_count += 1
             self.unconfirmed_progress += 1
-            if "benchmark_negative_feedback" not in self.replan_reasons:
-                self.replan_reasons.append("benchmark_negative_feedback")
         # Submission feedback may ask the runtime to stop early, but only the
         # final evaluator can establish objective completion.
+
+    def record_trusted_progress(self, kind: str) -> None:
+        """Record progress only from a Harness-owned verifier or benchmark."""
+        if kind == "evidence_confirmed":
+            self.evidence_confirmed += 1
+        elif kind == "capability_acquired":
+            self.capability_acquired += 1
+        elif kind == "goal_advanced":
+            self.goal_advanced += 1
+        elif kind == "objective_completed":
+            raise ValueError("objective completion requires an authorized ObjectiveVerdict")
+        else:
+            raise ValueError(f"unknown trusted progress kind: {kind}")
+        self.no_progress_count = 0
+        self.unconfirmed_progress = 0
+        self.reset_repetition()
 
     def record_objective_verdict(
         self,
@@ -284,14 +386,7 @@ class ProgressLedger(BaseModel):
         if self.objective_completed:
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
-
-    def consume_replan_reasons(self, reasons: list[str]) -> None:
-        consumed = set(reasons)
-        self.replan_reasons = [reason for reason in self.replan_reasons if reason not in consumed]
-
-    def request_replan(self, reason: str) -> None:
-        if reason and reason not in self.replan_reasons:
-            self.replan_reasons.append(reason)
+            self.reset_repetition()
 
     @property
     def remaining_budget_fraction(self) -> float:
@@ -306,6 +401,46 @@ class ProgressLedger(BaseModel):
         elapsed = max(0.0, (datetime.now(UTC) - self.started_at).total_seconds())
         return elapsed >= limit
 
+    @property
+    def usage_snapshot(self) -> dict[str, float]:
+        """Charged usage keyed the way the shared dimension table reads it.
+
+        ``model.usage`` charges tokens and cost into ``budget_used``; model and
+        tool calls are counted on their own. A dimension stays absent until it
+        is first charged, so a caller can tell "nothing charged yet" from zero.
+        """
+        charged: dict[str, float | None] = {
+            "tokens": self.budget_used.get("tokens"),
+            "cost_usd": self.budget_used.get("cost_usd"),
+            "model_calls": float(self.model_calls),
+            "tool_calls": float(self.tool_calls),
+        }
+        return {key: value for key, value in charged.items() if value is not None}
+
+    def _budget_used(self, dimension: str) -> float | None:
+        """Charged usage for one enforced dimension, or ``None`` if never charged."""
+        source = USAGE_DIMENSION_SOURCES.get(dimension)
+        return None if source is None else self.usage_snapshot.get(source[1])
+
+    @property
+    def budget_exceeded_dimension(self) -> str | None:
+        """The enforced dimension that crossed its ceiling, if any.
+
+        Scanned by the shared budget accounting so the ledger names the same
+        dimension the live monitor does when two ceilings cross at once.
+        """
+        if self.wall_time_expired:
+            return "wall_time"
+        return exceeded_usage_dimension(self.usage_snapshot, self.budget_limits)
+
+    @property
+    def budget_grace_elapsed(self) -> bool:
+        """True once the post-exhaustion grace window is over."""
+        if self.budget_exceeded_at is None:
+            return False
+        elapsed = (datetime.now(UTC) - self.budget_exceeded_at).total_seconds()
+        return elapsed >= self.wall_time_grace_seconds
+
     def budget_fractions(self) -> dict[str, float]:
         """Per-dimension remaining budget fraction (``1.0`` when untouched)."""
         fractions: dict[str, float] = {}
@@ -317,15 +452,8 @@ class ProgressLedger(BaseModel):
                 effective = limit + self.wall_time_grace_seconds
                 fractions[key] = max(0.0, min(1.0, (effective - elapsed) / effective))
                 continue
-            if key == "max_model_calls":
-                used = float(self.model_calls)
-            elif key == "max_tool_calls":
-                used = float(self.tool_calls)
-            elif key == "max_tokens":
-                used = self.budget_used.get("tokens", 0.0)
-            elif key == "max_cost_usd":
-                used = self.budget_used.get("cost_usd", 0.0)
-            else:
+            used = self._budget_used(key)
+            if used is None:
                 continue
             fractions[key] = max(0.0, min(1.0, (limit - used) / limit))
         return fractions

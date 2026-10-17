@@ -9,7 +9,9 @@ Version 0.8 provides:
 - declarative task, agent, and policy contracts
 - first-class [Pi](https://pi.dev/docs/latest) Agent Adapter running inside Kali Rolling Docker
 - Pi tool/model event normalization into Harness traces and budgets
-- Kali Rolling + `kali-linux-core` Pi image with curated security tools\n- isolated per-run Pi configuration and deterministic non-interactive defaults\n- generic Benchmark Adapter contracts (`discover/provision/submit/evaluate/teardown`)
+- Kali Rolling + `kali-linux-core` Pi image with curated security tools
+- isolated per-run Pi configuration and deterministic non-interactive defaults
+- generic Benchmark Adapter contracts (`discover/provision/submit/evaluate/teardown`)
 - TSec Benchmark adapter over the official SDK (`list/start/submit/close`) with Harness-owned benchmark credentials
 - optional Pi model routing through the Red Harness credential-isolating Gateway
 - Docker Compose or no-op benchmark environments
@@ -21,8 +23,13 @@ Version 0.8 provides:
 - provider credential isolation
 - Docker runtime profiles, including gVisor via `runtime: runsc`
 - event-sourced universal world-state runtime with materialized snapshots
-- domain-neutral skill metadata registry for planner and domain extensions
-- rolling-horizon planner integrated with the interactive SolverLoop
+- agent-native cognition: the Agent owns the reasoning loop and keeps its own
+  markdown notes, while the Harness only exposes read-only knowledge roots
+  (`AgentSpec.knowledge`) and a fact projection; see
+  [docs/agent-engineering.md](docs/agent-engineering.md)
+- competing solver sessions per provisioned case (`AgentSpec.executors`) with
+  per-session workspaces, shared submission dedupe and one authoritative result;
+  see [docs/agent-engineering.md](docs/agent-engineering.md)
 - GitHub Actions coverage for Pi 1.0.4, Docker Agent, sidecar Gateway, and Docker Verifier
 
 > [!WARNING]
@@ -164,30 +171,13 @@ Every run writes an append-only `trace.jsonl`; `harness audit-run` checks that t
 result, trace, progress, and World exports agree. A consistent report does not
 authenticate their sources or independently prove task success.
 
-## Operator hints
-
-An operator can inject guidance into a run at any time, including while the Agent
-is mid-turn:
-
-```bash
-harness hint .harness/runs/run_... --text "the login bypass is on the API host"
-echo "flag format is zc{...}" | harness hint .harness/runs/run_...
-```
-
-Hints are appended to the run's `hints.jsonl`. The SolverLoop polls the file on
-every event, records each hint in World state as an evidence-tier
-`human.hint` observation, requests a replan, and steers the running Agent with a
-`solver.hint` observation (one-shot Agents read it from `agent.feedback.jsonl`).
-Hints are advisory: they can redirect exploration, but they never verify the
-objective — only a verifier or benchmark evaluation can do that.
-
 ## Control spine
 
 Red Harness keeps a single closed feedback loop:
 
 ```
 reference (task / TSec objective) -> error -> controller
-   (solver_policy + planner + Pi) -> actuator (tools) -> plant (target)
+   (solver_policy + Pi) -> actuator (tools) -> plant (target)
    -> sensor (verifier / benchmark evaluator) -> estimator (world/) -> error
 ```
 
@@ -195,8 +185,9 @@ Only the verifier can close the loop: agent claims and tool exit codes are recor
 as claims, not evidence. Open-loop subsystems (control plane, queue, worker,
 coordination blackboard, OTLP export, scoring, suite, evaluation, benchmark
 registry) were removed to keep the loop minimal. See
-[`docs/control-theory.md`](docs/control-theory.md) for the design and the pruning
-rationale.
+[`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md) for the design and the
+pruning rationale, and [`docs/agent-engineering.md`](docs/agent-engineering.md) for the
+agent-side engineering plan.
 
 ## Gateway modes
 
@@ -295,21 +286,27 @@ bwrap
 
 ## Budgets and result bundles
 
-Only the wall-clock deadline bounds a run, and it is **soft**:
+Every declared budget dimension is enforced as a **soft** ceiling:
 
 ```yaml
 budgets:
   wall_time: 3600
+  max_tokens: 2000000
+  max_model_calls: 400
+  max_tool_calls: 800
+  max_cost_usd: 25
 ```
 
-At `wall_time` Harness sends `solver.finalize`, asking the Agent to stop probing and write
-`agent.summary.md` (confirmed facts, unconfirmed hypotheses, what was tried and ruled out,
-unfinished intents). The run then has a `FINALIZE_GRACE_SECONDS` (180s) window to finish that
-report before the container is killed as a last resort.
+Only the dimensions you declare are bounded; an undeclared one imposes no limit. Crossing any
+of them — the wall-clock deadline or a usage ceiling reported in the Agent's telemetry — emits
+a `budget.exceeded` trace event (carrying `budget`, `limit`, `observed` and `grace_seconds`)
+and sends `solver.finalize`, asking the Agent to stop probing and write `agent.summary.md`
+(confirmed facts, unconfirmed hypotheses, what was tried and ruled out, unfinished intents).
+The run then has a `FINALIZE_GRACE_SECONDS` (180s) window to finish that report before the
+process or container is killed as a last resort.
 
-`max_tokens`, `max_model_calls`, `max_tool_calls` and `max_cost_usd` are still accepted for
-backwards compatibility but are **no longer enforced**; declaring one records a `budget.ignored`
-trace event and the CLI prints a warning.
+Usage ceilings are computed from Agent-reported telemetry, so they decide when to wind the run
+down rather than what it finally cost; malformed or missing usage fails closed and stops it.
 
 Every run also writes `summary.json` and a `summary` block in `result.json`: a deterministic
 facts/intents/exploration digest built from World state and progress, plus the Agent's own report.
@@ -339,7 +336,7 @@ For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
                  │
                  ▼
         error  ──────────────►  controller
-          ▲                  solver_policy + planner + Pi
+          ▲                  solver_policy + Pi
           │                            │
           │                            ▼
        estimator ◄── sensor ◄── plant ◄── actuator
@@ -357,10 +354,9 @@ Task != Environment != Agent != Model != Tool != Verifier
 ```
 
 The closed-loop control spine, the module that owns each stage, and the pruning
-rationale are documented in [`docs/control-theory.md`](docs/control-theory.md).
-The agent-side architecture as a whole (adapter/session contracts, solver loop,
-rounds, trust tiers, recovery) is consolidated in
-[`docs/agent-architecture.md`](docs/agent-architecture.md).
+rationale are documented in [`docs/agent-architecture.md`](docs/agent-architecture.md)
+together with the agent-side architecture as a whole (adapter/session contracts,
+solver loop, rounds, trust tiers, recovery).
 
 ## Roadmap
 
@@ -373,6 +369,7 @@ rounds, trust tiers, recovery) is consolidated in
 7. **Done:** control-spine simplification (open-loop subsystems removed, single feedback loop).
 8. **Done:** dead-contract removal and duplicate-path consolidation (Firecracker stub, file world store, unreferenced schemas removed; single Docker command builder, usage accounting and TSec path).
 9. Containerized Pi adapter hardening and snapshot pooling.
+10. **Done:** repository slimming (production-unreachable modules and orphaned fixtures removed, stale design docs merged into [`docs/agent-architecture.md`](docs/agent-architecture.md), roadmap trimmed to item definitions, redundant tests cut).
 
 
 ### Benchmark adapters
@@ -414,29 +411,28 @@ continue while an action is unresolved; `harness.runtime.checkpoint.reconcile_pe
 records an operator-supplied outcome and never reruns the interrupted tool. This provides safe
 accounting and reconciliation without claiming exactly-once execution.
 
-Each benchmark run also maintains `progress.json` (`harness/progress/v2`) separately from World
+Each benchmark run also maintains `progress.json` (`harness/progress/v4`) separately from World
 State. It stores Agent-authored facts as claims, distinguishes successful execution from verified
 evidence and goal progress, and tracks no-progress/failure counters, budget usage, submissions, and
 objective completion. A successful tool exit or accepted submission alone does not establish
 objective completion; the final task verifier or benchmark evaluation controls the result.
 
 
-### Rolling-horizon planning
+### Agent cognition and competing sessions
 
-The optional short-horizon planner combines the current World Snapshot, Skill Registry, and
-`progress.json` into at most three `PlannedAction` records. Each action includes a skill, expected
-observations, an inspectable rationale
-with goal relevance, information gain, repeated-failure penalty, and remaining-budget fit,
-and explicit replan triggers such as action failure, missing expected observations, changed world
-revision, repeated no-progress, or contradicted hypotheses.
+The Harness no longer plans, ranks skills, or compiles rounds. Cognition lives in the Agent:
+it keeps its own markdown notes under `$HARNESS_NOTES_DIR`, reads read-only knowledge roots
+(`AgentSpec.knowledge`, mounted at `/knowledge/<name>`) on demand, and treats the projected
+`world.context.txt` as observations rather than instructions. The Harness keeps the environment,
+trust, accounting, recovery and the bounded stop law (`solver_policy.decide_solver_action`).
 
-The planner can filter state requirements by minimum provenance level (`claim`, `evidence`, or
-`verified`). Capabilities are checked for expiry. The rolling planner is used by the interactive
-SolverLoop. A session receives an initial
-`solver.plan.updated` observation and receives a new plan when verification, repeated no-progress,
-or benchmark feedback requests replanning. Plans are persisted to `plan.json` and guide the Agent;
-the Harness still does not execute Skill metadata directly as commands. Coordination-plane work
-publication remains explicit.
+A case may declare several competing solver sessions (`AgentSpec.executors`, at most four). Each
+session gets its own container, workspace, notes, progress ledger and checkpoint under
+`run_dir/executors/<nn>-<id>/`; they share one provision, one World, one submission dedupe set and
+one authoritative result, and the first session whose submission the final evaluator confirms
+stops the rest. Usage budgets are split evenly across sessions while the wall-clock window stays
+whole. Findings a session wants to share with its siblings go to `$HARNESS_SHARED_FINDINGS`, the
+only cross-session writable path. See [docs/agent-engineering.md](docs/agent-engineering.md).
 
 
 ### SQLite World State
@@ -444,5 +440,12 @@ publication remains explicit.
 SQLite is the default World State backend. `world.db` is authoritative; `world.events.jsonl` and
 `world.snapshot.json` are compatibility/debug exports. The database uses WAL mode, persistent event
 sequence numbers, event-id deduplication, and optional optimistic `expected_revision` checks.
-Legacy JSONL state can still be
+
+Incremental consumers can request:
+
+```text
+GET /v1/runs/{run_id}/world/events?after_sequence=<sequence>
+```
+
+Each returned event includes its persistent `sequence` cursor. Legacy JSONL state can still be
 passed to `--resume-world`; new runs may resume directly from a previous `world.db`.

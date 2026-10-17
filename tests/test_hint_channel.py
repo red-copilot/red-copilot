@@ -36,7 +36,6 @@ def _loop(tmp_path: Path) -> tuple[SolverLoop, FakeSession, ProgressLedger]:
         actor="agent:test",
         context_query="solve the target",
         planned_world_revision=world.snapshot.revision,
-        skills=[],
     )
     return loop, session, progress
 
@@ -70,7 +69,7 @@ def test_hint_cursor_polls_incrementally_and_skips_malformed_lines(tmp_path: Pat
     assert cursor.poll() == []
 
 
-def test_solver_loop_delivers_hint_once_and_upgrades_planning(tmp_path: Path) -> None:
+def test_solver_loop_delivers_hint_once(tmp_path: Path) -> None:
     loop, session, progress = _loop(tmp_path)
     append_hint(tmp_path, "try the backup host on port 8443")
     usage = AgentEvent(type="model.usage", data={"total_tokens": 1, "cost_usd": 0.0})
@@ -83,10 +82,9 @@ def test_solver_loop_delivers_hint_once_and_upgrades_planning(tmp_path: Path) ->
     observation = loop.world.snapshot.observations.get("human.hint:hint_0001")
     assert observation is not None
     assert observation.provenance.epistemic_status == "evidence"
-    # The hint replans within the same event, so the reason is consumed by the
-    # plan publication rather than lingering in the ledger.
-    assert progress.replan_count >= 1
-    assert any(item.type == "solver.plan.updated" for item in session.feedback)
+    # The v2 control spine has no Harness-side planner; the hint is delivered
+    # as advisory state without publishing a new plan.
+    assert progress.last_event_type == "model.usage"
     trace_rows = [
         json.loads(line)
         for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
@@ -156,9 +154,6 @@ def test_rebuilt_loop_does_not_redeliver_absorbed_hints(tmp_path: Path) -> None:
     append_hint(tmp_path, "already absorbed")
     asyncio.run(loop.process_event(session, AgentEvent(type="model.usage", data={})))
     assert len([item for item in session.feedback if item.type == "solver.hint"]) == 1
-    first_replans = _progress.replan_count if hasattr(_progress, "replan_count") else 0
-    del first_replans
-
     # Simulate a resume: same world, same hints.jsonl, brand-new cursor state.
     resumed_progress = ProgressLedger(budget_limits={"wall_time": 3600})
     resumed_trace = TraceRecorder(tmp_path / "trace.jsonl", "run-hints", "task-hints")
@@ -171,7 +166,6 @@ def test_rebuilt_loop_does_not_redeliver_absorbed_hints(tmp_path: Path) -> None:
         actor="agent:test",
         context_query="solve the target",
         planned_world_revision=loop.world.snapshot.revision,
-        skills=[],
     )
     asyncio.run(
         resumed_loop.process_event(resumed_session, AgentEvent(type="model.usage", data={}))

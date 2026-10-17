@@ -2,8 +2,8 @@
 
 The hand-written cases in ``test_control_properties.py`` pin specific
 transitions. These generated cases try to falsify the bounds themselves:
-determinism, totality, that the hard limits always stop, that replanning never
-exceeds its cap, and that invalid inputs fail closed.
+determinism, totality, that the hard limits always stop, that STOP is only ever
+produced by a declared bound, and that invalid inputs fail closed.
 """
 from __future__ import annotations
 
@@ -23,41 +23,29 @@ _EVENT_TYPES = st.sampled_from(
 @settings(max_examples=300, deadline=None)
 @given(
     event_type=_EVENT_TYPES,
-    replan_reasons=st.lists(st.sampled_from(["r1", "r2", ""]), max_size=4),
     no_progress_count=st.integers(min_value=0, max_value=500),
     unconfirmed_progress=st.integers(min_value=0, max_value=500),
-    replans_used=st.integers(min_value=0, max_value=500),
     remaining_budget_fraction=st.floats(
         min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False
     ),
-    force_replan=st.booleans(),
     max_no_progress=st.integers(min_value=1, max_value=64),
     max_unconfirmed_progress=st.integers(min_value=1, max_value=64),
-    max_replans=st.integers(min_value=1, max_value=64),
 )
-def test_decision_is_deterministic_bounded_and_never_over_replans(
+def test_decision_is_deterministic_bounded_and_stops_only_at_a_bound(
     event_type: str | None,
-    replan_reasons: list[str],
     no_progress_count: int,
     unconfirmed_progress: int,
-    replans_used: int,
     remaining_budget_fraction: float,
-    force_replan: bool,
     max_no_progress: int,
     max_unconfirmed_progress: int,
-    max_replans: int,
 ) -> None:
     kwargs = {
         "event_type": event_type,
-        "replan_reasons": replan_reasons,
         "no_progress_count": no_progress_count,
         "unconfirmed_progress": unconfirmed_progress,
-        "replans_used": replans_used,
         "remaining_budget_fraction": remaining_budget_fraction,
-        "force_replan": force_replan,
         "max_no_progress": max_no_progress,
         "max_unconfirmed_progress": max_unconfirmed_progress,
-        "max_replans": max_replans,
     }
     decision = decide_solver_action(**kwargs)
 
@@ -82,10 +70,10 @@ def test_decision_is_deterministic_bounded_and_never_over_replans(
             SolverAction.STOP,
             "budget_exhausted",
         )
-
-    # The control law may never replan past its cap.
-    if decision.action is SolverAction.REPLAN:
-        assert replans_used < max_replans
+    elif decision.action is SolverAction.STOP:
+        # No bound tripped, so the only legal stop is the low-budget guard.
+        assert decision.reason == "low_budget_without_progress"
+        assert no_progress_count > 0
 
 
 @settings(max_examples=100, deadline=None)
@@ -102,13 +90,9 @@ def test_invalid_control_inputs_fail_closed(
     with pytest.raises(ValueError):
         decide_solver_action(unconfirmed_progress=negative)
     with pytest.raises(ValueError):
-        decide_solver_action(replans_used=negative)
-    with pytest.raises(ValueError):
         decide_solver_action(max_no_progress=non_positive_bound)
     with pytest.raises(ValueError):
         decide_solver_action(max_unconfirmed_progress=non_positive_bound)
-    with pytest.raises(ValueError):
-        decide_solver_action(max_replans=non_positive_bound)
     with pytest.raises(ValueError):
         decide_solver_action(remaining_budget_fraction=non_finite)
 

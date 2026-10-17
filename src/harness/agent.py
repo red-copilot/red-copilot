@@ -26,6 +26,10 @@ class AgentError(RuntimeError):
 
 # Harness-normalized Agent event stream (the per-run artifact).
 NORMALIZED_EVENT_FILE = "events.jsonl"
+# Competing sessions share one findings file across containers. The host-side
+# layout lives in ``harness.runtime.executors``; this is the container contract.
+SHARED_FINDINGS_CONTAINER_DIR = "/run/harness-shared"
+SHARED_FINDINGS_CONTAINER_FILE = f"{SHARED_FINDINGS_CONTAINER_DIR}/shared-findings.md"
 # Agent-authored typed solver events (``action.intent``, ``world.observe``, ...).
 # RPC sessions read Pi's stdout rather than the shared file, so the Agent gets
 # its own file there; one-shot JSON sessions keep the shared file.
@@ -41,11 +45,13 @@ def task_environment(
     seed: int,
     network_profile: str,
     event_file_name: str = NORMALIZED_EVENT_FILE,
+    knowledge_dirs: Sequence[str] = (),
+    shared_findings_file: str | None = None,
 ) -> dict[str, str]:
     """Canonical ``HARNESS_*`` task contract for host and container Agents."""
 
     run_root = Path(run_dir)
-    return {
+    environment = {
         "HARNESS_TASK_ID": task.id,
         "HARNESS_TASK_DIR": str(task_dir),
         "HARNESS_RUN_DIR": str(run_root),
@@ -58,9 +64,43 @@ def task_environment(
         "HARNESS_FEEDBACK_FILE": str(run_root / "agent.feedback.jsonl"),
         "HARNESS_SUMMARY_FILE": str(run_root / "agent.summary.md"),
         "HARNESS_PROGRESS_FILE": str(run_root / "progress.json"),
+        "HARNESS_NOTES_DIR": str(run_root / "notes"),
+        "HARNESS_KNOWLEDGE_DIRS": ":".join(knowledge_dirs),
         "HARNESS_NETWORK_PROFILE": network_profile,
         "HARNESS_SEED": str(seed),
     }
+    if shared_findings_file:
+        environment["HARNESS_SHARED_FINDINGS"] = shared_findings_file
+    return environment
+
+
+def plan_knowledge_mounts(
+    roots: Sequence[str],
+    *,
+    container_root: str = "/knowledge",
+) -> list[tuple[Path, str]]:
+    """Map declared knowledge roots onto read-only container mount points.
+
+    Fail closed: a declared root that is not a readable directory aborts the run
+    instead of silently starting an Agent with no knowledge.
+    """
+    mounts: list[tuple[Path, str]] = []
+    used: set[str] = set()
+    for index, entry in enumerate(roots):
+        path = Path(entry)
+        if not path.is_dir():
+            raise AgentError(f"knowledge root is not a directory: {entry}")
+        name = path.name or f"root-{index}"
+        while name in used:
+            name = f"{name}-{index}"
+        used.add(name)
+        mounts.append((path, f"{container_root}/{name}"))
+    return mounts
+
+
+def host_knowledge_dirs(spec: AgentSpec) -> list[str]:
+    """Host-visible knowledge roots for trusted non-container Agents."""
+    return [str(path.resolve()) for path, _ in plan_knowledge_mounts(spec.knowledge)]
 
 
 def gateway_environment(gateway_url: str, gateway_token: str) -> dict[str, str]:
@@ -102,6 +142,7 @@ def build_container_command(
     host_gateway: bool,
     image_command: Sequence[str],
     agent_task_dir: Path | None = None,
+    shared_findings_dir: Path | None = None,
     workdir: str = "/task",
     limits: ContainerLimits = DEFAULT_CONTAINER_LIMITS,
     reserved_env_names: frozenset[str] | None = None,
@@ -157,10 +198,20 @@ def build_container_command(
             f"{agent_task_dir.resolve()}:/task:ro",
             "-v",
             f"{run_dir.resolve()}:/run/harness:rw",
-            "-w",
-            workdir,
         ]
     )
+    shared_findings_file: str | None = None
+    if shared_findings_dir is not None:
+        shared_root = Path(shared_findings_dir)
+        if shared_root.is_symlink() or not shared_root.is_dir():
+            raise AgentError("shared findings directory must be a real directory")
+        prepare_agent_workspace_for_container(shared_root)
+        command.extend(["-v", f"{shared_root.resolve()}:{SHARED_FINDINGS_CONTAINER_DIR}:rw"])
+        shared_findings_file = SHARED_FINDINGS_CONTAINER_FILE
+    knowledge_mounts = plan_knowledge_mounts(spec.knowledge)
+    for host_path, container_path in knowledge_mounts:
+        command.extend(["-v", f"{host_path.resolve()}:{container_path}:ro"])
+    command.extend(["-w", workdir])
 
     environment = task_environment(
         task,
@@ -170,6 +221,8 @@ def build_container_command(
         seed=seed,
         network_profile=spec.network_profile,
         event_file_name=event_file_name,
+        knowledge_dirs=[container_path for _, container_path in knowledge_mounts],
+        shared_findings_file=shared_findings_file,
     )
     if extra_env:
         environment.update(extra_env)
@@ -225,6 +278,9 @@ class AgentRunContext:
     resume_gateway_event_offset: int = 0
     resume_session_id: str | None = None
     cancel_path: Path | None = None
+    # Competing sessions share one agent-authored findings directory; it is the
+    # only container-writable path besides the session workspace.
+    shared_findings_dir: Path | None = None
 
     @property
     def gateway_enabled(self) -> bool:
@@ -409,6 +465,7 @@ class CLIAdapter:
                 environment_project=context.environment_project,
                 seed=context.seed,
                 network_profile=self.spec.network_profile,
+                knowledge_dirs=host_knowledge_dirs(self.spec),
             )
         )
         if context.gateway_enabled:
@@ -492,6 +549,7 @@ class DockerAdapter:
         gateway_token: str | None,
         host_gateway: bool,
         agent_task_dir: Path | None = None,
+        shared_findings_dir: Path | None = None,
     ) -> list[str]:
         return build_container_command(
             spec=self.spec,
@@ -506,6 +564,7 @@ class DockerAdapter:
             gateway_token=gateway_token,
             host_gateway=host_gateway,
             agent_task_dir=agent_task_dir,
+            shared_findings_dir=shared_findings_dir,
             image_command=[str(self.spec.image), *self.spec.command],
         )
 
@@ -562,6 +621,7 @@ class DockerAdapter:
             gateway_token=gateway_token,
             host_gateway=host_gateway,
             agent_task_dir=context.agent_task_dir,
+            shared_findings_dir=context.shared_findings_dir,
         )
 
         self.trace.emit(
