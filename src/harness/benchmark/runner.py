@@ -1102,7 +1102,6 @@ class BenchmarkRunner:
                 data={
                     "executor_id": planned.executor_id,
                     "live_steer": capabilities.live_steer,
-                    "typed_event_channel": capabilities.typed_event_channel,
                     "submission_channels": list(capabilities.submission_channels),
                 },
             )

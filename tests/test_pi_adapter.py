@@ -129,8 +129,27 @@ def test_pi_command_uses_rpc_mode_and_safe_defaults(monkeypatch, tmp_path: Path)
     prompt = adapter._prompt_text(task)
     assert "$HARNESS_SUBMISSION_INBOX" in prompt
     assert "$HARNESS_FEEDBACK_FILE" in prompt
+    assert "$HARNESS_NOTES_DIR" in prompt
+    assert "$HARNESS_WORLD_CONTEXT" in prompt
     assert "rejected candidate" in prompt
-    assert "reread $HARNESS_WORLD_CONTEXT" in prompt
+    for removed in (
+        "$HARNESS_EVENT_FILE",
+        "$HARNESS_PROGRESS_FILE",
+        "action.intent",
+        "world.observe",
+        "subgoal_id",
+        "skill_id",
+        "replan_conditions",
+    ):
+        assert removed not in prompt
+
+
+def test_agent_capabilities_have_no_cognitive_event_channels() -> None:
+    from harness.session import ONE_SHOT_AGENT_CAPABILITIES, RPC_AGENT_CAPABILITIES
+
+    for capabilities in (ONE_SHOT_AGENT_CAPABILITIES, RPC_AGENT_CAPABILITIES):
+        assert not hasattr(capabilities, "typed_event_channel")
+        assert capabilities.submission_channels == ("submission_inbox",)
 
 
 def test_pi_rpc_command_can_select_a_checkpointed_session(monkeypatch, tmp_path: Path) -> None:
@@ -258,10 +277,7 @@ def test_pi_container_command_is_restricted_and_passes_direct_secret(
     assert command[command.index("--cpus") + 1] == "4"
     assert "/tmp:rw,nosuid,nodev,size=512m" in command
     assert "FAKE_PROVIDER_KEY=secret" in command
-    # RPC sessions read Pi's stdout, so the Agent gets its own typed-event file
-    # instead of sharing the harness-normalized ``events.jsonl``.
-    assert "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl" in command
-    assert "HARNESS_EVENT_FILE=/run/harness/events.jsonl" not in command
+    assert not any(value.startswith("HARNESS_EVENT_FILE=") for value in command)
     assert f"{workspace.resolve()}:/run/harness:rw" in command
     assert f"{run_dir.resolve()}:/run/harness:rw" not in command
     task_mount = next(value for value in command if value.endswith(":/task:ro"))
@@ -294,8 +310,7 @@ def test_json_mode_container_command_keeps_the_shared_event_file(
         gateway_token=None,
         host_gateway=False,
     )
-    assert "HARNESS_EVENT_FILE=/run/harness/events.jsonl" in command
-    assert "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl" not in command
+    assert not any(value.startswith("HARNESS_EVENT_FILE=") for value in command)
 
 
 def _rpc_session_for_ingest(tmp_path: Path) -> ContainerPiRpcSession:

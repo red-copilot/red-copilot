@@ -12,12 +12,14 @@ from harness.verifier import build_docker_verifier_command
 SHARED_TASK_ENV = (
     "HARNESS_TASK_DIR=/task",
     "HARNESS_RUN_DIR=/run/harness",
-    "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
-    "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
     "HARNESS_WORLD_CONTEXT=/run/harness/world.context.txt",
     "HARNESS_SUBMISSION_INBOX=/run/harness/submission.inbox.jsonl",
     "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
-    "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
+)
+REMOVED_TASK_ENV = (
+    "HARNESS_EVENT_FILE=",
+    "HARNESS_WORLD_INBOX=",
+    "HARNESS_PROGRESS_FILE=",
 )
 
 
@@ -323,6 +325,8 @@ def test_container_agents_share_hardening_flags(monkeypatch, tmp_path: Path, bui
     assert workspace.stat().st_uid == os.getuid()
     for entry in SHARED_TASK_ENV:
         assert entry in command, entry
+    for entry in REMOVED_TASK_ENV:
+        assert not any(value.startswith(entry) for value in command), entry
     assert "/tmp:rw,nosuid,nodev" in " ".join(command)
 
 

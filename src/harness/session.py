@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from .agent import AgentResult
 from .budget import UsageMetrics, charge_usage_event
@@ -122,17 +122,13 @@ class AgentCapabilities:
     """
 
     live_steer: bool = False
-    typed_event_channel: Literal["agent_event_file", "shared_event_file", "none"] = (
-        "shared_event_file"
-    )
-    submission_channels: tuple[str, ...] = ("world_inbox",)
+    submission_channels: tuple[str, ...] = ("submission_inbox",)
 
 
 ONE_SHOT_AGENT_CAPABILITIES = AgentCapabilities()
 RPC_AGENT_CAPABILITIES = AgentCapabilities(
     live_steer=True,
-    typed_event_channel="agent_event_file",
-    submission_channels=("world_inbox", "submission_inbox"),
+    submission_channels=("submission_inbox",),
 )
 
 
