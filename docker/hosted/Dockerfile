@@ -70,6 +70,17 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         binwalk \
         exiftool \
         steghide \
+        unzip \
+        xxd \
+        php-cli \
+        traceroute \
+        iptables \
+        python3-requests \
+        python3-bs4 \
+        python3-lxml \
+        python3-pil \
+        python3-pycryptodome \
+        python3-paramiko \
         nodejs \
         npm \
     && node -e 'const [M,m]=process.versions.node.split(".").map(Number); if (M < 22 || (M === 22 && m < 19)) { console.error("Pi requires Node >= 22.19"); process.exit(1) }' \
