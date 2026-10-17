@@ -1731,3 +1731,35 @@ def test_default_config_keeps_the_vpn_probe(monkeypatch) -> None:
     from harness.benchmark.tsec_client import load_tsec_config
 
     assert load_tsec_config().check_vpn is True
+
+
+def test_persistent_conflicts_cool_dispatch_instead_of_burning_the_queue(
+    monkeypatch, tmp_path: Path
+) -> None:
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", InstanceConflictClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", ProvisioningRunner)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            runs_root=tmp_path,
+            run_all=True,
+            concurrency=1,
+            max_passes=1,
+        )
+    )
+
+    # Every case still records its own failure, but after two exhausted
+    # conflicts the dispatcher cools down instead of hammering the platform
+    # with the rest of the queue.
+    assert len(results) == 3
+    cooldowns = [s for s in sleeps if s > tsec_adapter.CONFLICT_COOLDOWN_SECONDS - 10]
+    assert len(cooldowns) >= 1

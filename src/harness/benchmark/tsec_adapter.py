@@ -59,6 +59,14 @@ def _is_instance_conflict(exc: BaseException) -> bool:
     return _is_sdk_error(exc, "InvalidState") and "max active" in str(exc)
 
 
+# When instance conflicts are persistent (stale instances from a crashed
+# task, a slow stop_pending reclaim), burning the dispatch queue one case at
+# a time fails everything. After CONFLICT_STREAK_LIMIT consecutive exhausted
+# cases, cool the whole dispatch down before trying the next one.
+CONFLICT_STREAK_LIMIT = 2
+CONFLICT_COOLDOWN_SECONDS = 120.0
+
+
 # A pass-boundary discover that hits a transient network blip must not be
 # classified as a dead platform and kill the sweep; wait and re-list before
 # giving up. Only a sustained outage (all attempts fail) stays fatal.
@@ -814,9 +822,21 @@ async def run_tsec_challenges(
             slots = asyncio.Semaphore(max(1, concurrency))
             zero_score_passes = 0
 
+            conflict_streak = 0
+            cooldown_until = 0.0
+
             async def _run_case(index: int, case, pass_seed: int) -> dict:
-                nonlocal platform_failure
+                nonlocal platform_failure, conflict_streak, cooldown_until
                 async with slots:
+                    delay = cooldown_until - time.monotonic()
+                    if delay > 0:
+                        print(
+                            f"[tsec] cooling dispatch {delay:.0f}s after persistent "
+                            "instance conflicts",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        await asyncio.sleep(min(delay, 300.0))
                     case_budgets = effective_budgets
                     if total_wall_time is not None:
                         remaining = total_wall_time - (time.monotonic() - started_at)
@@ -855,6 +875,15 @@ async def run_tsec_challenges(
                                 "error_type": type(exc).__name__,
                             }
                         )
+                        if kind == "instance_conflict":
+                            conflict_streak += 1
+                            if conflict_streak >= CONFLICT_STREAK_LIMIT:
+                                conflict_streak = 0
+                                cooldown_until = (
+                                    time.monotonic() + CONFLICT_COOLDOWN_SECONDS
+                                )
+                        elif kind is None:
+                            conflict_streak = 0
                         if kind in _SWEEP_FATAL_KINDS:
                             if platform_failure is None:
                                 platform_failure = TSecPlatformError(
