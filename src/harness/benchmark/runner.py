@@ -104,6 +104,7 @@ class _ExecutorRuntime:
     summary_missing_sections: list[str] = field(default_factory=list)
     retired_results: list[AgentResult] = field(default_factory=list)
     restarts: int = 0
+    restart_briefs: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _summary_key(key: tuple[str | None, str | None, str | None]) -> tuple[str, str, str]:
@@ -183,6 +184,31 @@ def _archive_session_transcript(*, workspace: Path, attempt: int) -> None:
         shutil.copyfile(source, workspace / archived)
 
 
+_CONTEXT_BRIEF_SECTIONS = ("Established facts", "Ruled out", "Open intents")
+
+
+def _empty_brief_sections(brief: str) -> list[str]:
+    """Report which carry-forward sections had nothing recorded."""
+    lines = brief.splitlines()
+    empty: list[str] = []
+    for index, line in enumerate(lines):
+        heading = line.strip().removeprefix("## ").strip()
+        if heading not in _CONTEXT_BRIEF_SECTIONS:
+            continue
+        body = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        if body == "- none recorded":
+            empty.append(heading)
+    return empty
+
+
+def _notes_file_count(workspace: Path) -> int:
+    """Count the Agent's note files at the moment of a restart."""
+    notes_dir = workspace / "notes"
+    if not notes_dir.is_dir():
+        return 0
+    return sum(1 for path in notes_dir.rglob("*") if path.is_file())
+
+
 async def _restart_session(
     *,
     executor: _ExecutorRuntime,
@@ -200,6 +226,11 @@ async def _restart_session(
     loop = executor.runtime.loop
     progress = executor.runtime.progress
     _, brief = loop.write_carry_forward_brief(reason)
+    brief_metrics = {
+        "brief_chars": len(brief),
+        "notes_count": _notes_file_count(executor.plan.workspace),
+        "empty_sections": _empty_brief_sections(brief),
+    }
     previous = executor.session
     from_session = await _session_identity(previous)
     attempt = executor.restarts + 1
@@ -207,8 +238,8 @@ async def _restart_session(
         "reason": reason,
         "from_session": from_session,
         "to_session": None,
-        "brief_chars": len(brief),
         "degraded": True,
+        **brief_metrics,
     }
     try:
         await previous.close(f"context-restart:{reason}")
@@ -233,6 +264,9 @@ async def _restart_session(
         )
         return False
     executor.restarts = attempt
+    executor.restart_briefs.append(
+        {"index": attempt, "reason": reason, **brief_metrics}
+    )
     trace.emit(
         "solver.context_restart",
         actor="harness",
@@ -240,9 +274,9 @@ async def _restart_session(
             "reason": reason,
             "from_session": from_session,
             "to_session": await _session_identity(executor.session),
-            "brief_chars": len(brief),
             "degraded": False,
             "restart": attempt,
+            **brief_metrics,
         },
     )
     # The brief rides in as the first observation, so it reaches the resumed
@@ -450,6 +484,7 @@ class BenchmarkRunner:
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
         max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
+        hint_threshold: int = 0,
         seed_notes_from: Path | None = None,
     ) -> dict:
         if agent.type in {"docker", "pi"} and agent.network == "environment":
@@ -576,6 +611,10 @@ class BenchmarkRunner:
             runtimes: list[_ExecutorRuntime] = []
             world = None
             registry = None
+            request_hint = getattr(adapter, "request_hint", None)
+            hint_request = (
+                (lambda: request_hint(case.id)) if callable(request_hint) else None
+            )
             for planned in plan.sessions:
                 attach = world is not None
                 session_runtime = bootstrap_solver(
@@ -589,6 +628,8 @@ class BenchmarkRunner:
                     budget_limits=enforced_budget_limits(planned.budgets),
                     agent_workspace=planned.workspace,
                     max_unconfirmed_progress=max_unconfirmed_progress,
+                    hint_request=hint_request,
+                    hint_threshold=hint_threshold,
                     world_repository_factory=(
                         (lambda _path, shared=world: shared) if attach else SQLiteWorldRepository
                     ),
@@ -1209,6 +1250,17 @@ class BenchmarkRunner:
                 **agent_result.metrics.as_dict(),
             },
         }
+        restart_briefs = [
+            {
+                "executor_id": item.plan.executor_id,
+                "session_id": item.plan.session_id,
+                **entry,
+            }
+            for item in runtimes
+            for entry in item.restart_briefs
+        ]
+        if restart_briefs:
+            result["restart_briefs"] = restart_briefs
         if plan.competing:
             result["executor_sessions"] = [
                 {
@@ -1232,6 +1284,11 @@ class BenchmarkRunner:
                         item.plan.workspace / "agent.summary.md"
                     ).is_file(),
                     "summary_sections_missing": list(item.summary_missing_sections),
+                    **(
+                        {"restart_briefs": item.restart_briefs}
+                        if item.restart_briefs
+                        else {}
+                    ),
                 }
                 for item in runtimes
             ]

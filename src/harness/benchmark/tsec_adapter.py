@@ -57,6 +57,8 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
         self.retry_delay = retry_delay
         self._raw_cases: dict[str, typing.Any] = {}
         self._sessions: dict[str, AdapterSessionState] = {}
+        self._case_sessions: dict[str, BenchmarkSession] = {}
+        self._hint_fetched: set[str] = set()
 
     async def discover(self) -> list[BenchmarkCase]:
         challenges = await self.client.list_challenges()
@@ -121,6 +123,11 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             if self.use_hint:
                 hint_result = await self.client.get_hint(case.id)
                 hint = getattr(hint_result, "hint", None)
+                # Viewing a hint costs score, so the immediate request has to
+                # count as this challenge's one hint: a later threshold-triggered
+                # ``request_hint`` must return what was already fetched instead
+                # of paying for a second view of the same challenge.
+                self._hint_fetched.add(case.id)
         except Exception:
             await self.client.close_challenge(case.id)
             raise
@@ -159,15 +166,48 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                 **case.metadata,
                 "hint_used": self.use_hint,
                 "hint": hint,
+                "hint_trigger": "immediate" if self.use_hint else None,
                 "initial_correct": initial_correct,
                 "total_flags": total,
                 "remaining_at_start": remaining,
             },
         )
+        self._case_sessions[case.id] = session
         self._sessions[session.id] = AdapterSessionState(
             case=case, extras={"challenge": challenge}
         )
         return session
+
+    async def request_hint(self, case_id: str) -> str | None:
+        """Fetch the platform hint at most once per challenge.
+
+        Failures are recorded on the session metadata and never retried, so a
+        broken hint endpoint cannot turn into a retry storm; the score penalty
+        is only booked when a hint was actually retrieved.
+        """
+        session = self._case_sessions.get(case_id)
+        if case_id in self._hint_fetched:
+            if session is None:
+                return None
+            cached = session.metadata.get("hint")
+            return str(cached) if cached else None
+        self._hint_fetched.add(case_id)
+        try:
+            hint_result = await self.client.get_hint(case_id)
+        except Exception:  # noqa: BLE001 - hint failure degrades, never stalls
+            if session is not None:
+                session.metadata["hint_trigger"] = "threshold"
+                session.metadata["hint_error"] = True
+            return None
+        hint = getattr(hint_result, "hint", None)
+        hint_text = str(hint) if hint else None
+        if session is not None:
+            session.metadata["hint_trigger"] = "threshold"
+            session.metadata["hint_error"] = False
+            if hint_text:
+                session.metadata["hint_used"] = True
+                session.metadata["hint"] = hint_text
+        return hint_text
 
     async def submit(
         self,
@@ -254,12 +294,14 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             try:
                 result = await self.client.close_challenge(session.case_id)
                 state.closed = bool(result.closed)
+                self._case_sessions.pop(session.case_id, None)
                 return
             except Exception as exc:  # noqa: BLE001 - closing is best effort
                 last_error = exc
                 if _is_sdk_error(exc, "InvalidState"):
                     # Already closed or the task window ended server-side.
                     state.closed = True
+                    self._case_sessions.pop(session.case_id, None)
                     return
                 if attempt < 2:
                     await asyncio.sleep(2.0 * (attempt + 1))
@@ -378,6 +420,7 @@ async def run_tsec_challenges(
     run_all: bool = False,
     seed: int = 0,
     use_hint: bool = False,
+    hint_threshold: int = 0,
     start_retries: int = 2,
     retry_delay: float = 2.0,
     allow_host_agent: bool = False,
@@ -405,6 +448,8 @@ async def run_tsec_challenges(
         raise TSecAdapterError(
             f"concurrency must be between 1 and {MAX_PARALLEL_CHALLENGES}"
         )
+    if hint_threshold < 0:
+        raise TSecAdapterError("hint_threshold must be non-negative")
     if max_wall_time_seconds is not None and max_wall_time_seconds < 1:
         raise TSecAdapterError("max_wall_time_seconds must be at least 1")
 
@@ -460,6 +505,7 @@ async def run_tsec_challenges(
                             submission_extractor=_extract_submissions,
                             allow_host_agent=allow_host_agent,
                             max_unconfirmed_progress=max_unconfirmed_progress,
+                            hint_threshold=hint_threshold,
                             seed_notes_from=(
                                 Path(seed_notes_from) if seed_notes_from else None
                             ),
@@ -483,6 +529,7 @@ async def run_tsec_challenges(
                             "level": case.metadata.get("level"),
                             "challenge_total_score": case.metadata.get("total_score", 0),
                             "hint_used": bool(session_meta.get("hint_used")),
+                            "hint_trigger": session_meta.get("hint_trigger"),
                         }
                     )
                     result["flags"] = {

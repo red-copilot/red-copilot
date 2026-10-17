@@ -164,6 +164,10 @@ def preflight(
     task: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
     tsec: Annotated[bool, typer.Option("--tsec")] = False,
+    base_url_env: Annotated[str, typer.Option("--base-url-env")] = "BENCHMARK_BASE_URL",
+    benchmark_token_env: Annotated[
+        str, typer.Option("--benchmark-token-env")
+    ] = "BENCHMARK_TOKEN",
     gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
     gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
     gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
@@ -176,6 +180,8 @@ def preflight(
             load_agent(agent),
             task_path=task,
             require_tsec=tsec,
+            tsec_base_url_env=base_url_env,
+            tsec_token_env=benchmark_token_env,
             gateway_enabled=gateway_enabled,
             gateway_mode=gateway_mode,
             gateway_image=gateway_image,
@@ -333,6 +339,17 @@ def tsec(
         bool,
         typer.Option("--hint", help="Request the platform hint; this may reduce flag score."),
     ] = False,
+    hint_threshold: Annotated[
+        int,
+        typer.Option(
+            "--hint-threshold",
+            min=0,
+            help=(
+                "Fetch the platform hint once when consecutive no-progress outcomes "
+                "reach N; 0 keeps hints off unless --hint is passed."
+            ),
+        ),
+    ] = 0,
     start_retries: Annotated[int, typer.Option("--start-retries", min=0, max=10)] = 2,
     retry_delay: Annotated[float, typer.Option("--retry-delay", min=0)] = 2.0,
     allow_host_agent: Annotated[
@@ -425,6 +442,7 @@ def tsec(
             run_all=run_all,
             seed=seed,
             use_hint=use_hint,
+            hint_threshold=hint_threshold,
             start_retries=start_retries,
             retry_delay=retry_delay,
             allow_host_agent=allow_host_agent,

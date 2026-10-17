@@ -64,25 +64,41 @@ def _sum_usage(previous: UsageMetrics, current: dict[str, int | float]) -> dict[
 
 
 def _remaining_budget_task(task: TaskSpec, started_at: datetime, used: UsageMetrics) -> TaskSpec:
-    # Only wall_time is enforced; the token/call/cost budget fields are accepted
-    # for compatibility but ignored, so a resume only refuses on spent time.
-    del used
+    """Rebase a resumed run's budgets on what is actually left.
+
+    Wall clock is checked here: a spent window leaves nothing to run, so the
+    resume is refused. The usage dimensions are handed to the Agent and the
+    adapters as *remaining* allowances, which is what keeps the two accounting
+    paths on the same edge: the Harness ledger compares cumulative usage -
+    recovered usage included - against the declared ceiling, while an adapter
+    only ever sees the usage of its own session.
+
+    Every declared ceiling stays armed. A dimension that is already spent gets
+    the smallest allowance the task contract allows, which opens the finalize
+    window instead of refusing the resume, because crossing a usage ceiling is
+    soft: the run summarises and stops rather than dying on the spot.
+    """
     elapsed = max(0, math.ceil((datetime.now(UTC) - started_at).total_seconds()))
     remaining_wall_time = task.budgets.wall_time - elapsed
     if remaining_wall_time <= 0:
         raise RuntimeError("resume budget exhausted: wall_time")
+    spent = {
+        "max_tokens": used.total_tokens,
+        "max_model_calls": used.model_calls,
+        "max_tool_calls": used.tool_calls,
+        "max_cost_usd": used.cost_usd,
+    }
+    remaining: dict[str, int | float | None] = {"wall_time": remaining_wall_time}
+    for field, spent_value in spent.items():
+        limit = getattr(task.budgets, field)
+        if limit is None:
+            remaining[field] = None
+        elif field == "max_cost_usd":
+            remaining[field] = max(float(limit) - float(spent_value), 1e-6)
+        else:
+            remaining[field] = max(int(limit) - int(spent_value), 1)
     return task.model_copy(
-        update={
-            "budgets": task.budgets.model_copy(
-                update={
-                    "wall_time": remaining_wall_time,
-                    "max_tokens": None,
-                    "max_model_calls": None,
-                    "max_tool_calls": None,
-                    "max_cost_usd": None,
-                }
-            )
-        }
+        update={"budgets": task.budgets.model_copy(update=remaining)}
     )
 
 

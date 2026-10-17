@@ -335,6 +335,17 @@ class PiAdapter:
     ) -> Path:
         agent_dir = run_dir / "pi-agent"
         agent_dir.mkdir(parents=True, exist_ok=True)
+        if self.pi.harness_extension:
+            extensions_dir = agent_dir / "extensions"
+            extensions_dir.mkdir(parents=True, exist_ok=True)
+            asset = (
+                Path(__file__).resolve().parent
+                / "pi_assets"
+                / "harness-context.ts"
+            )
+            (extensions_dir / "harness-context.ts").write_text(
+                asset.read_text(encoding="utf-8"), encoding="utf-8"
+            )
         if gateway_url and gateway_token:
             models = {
                 "providers": {
@@ -369,7 +380,7 @@ class PiAdapter:
         args.append("--approve" if self.pi.approve_project else "--no-approve")
         for enabled, flag in (
             (self.pi.context_files, "--no-context-files"),
-            (self.pi.extensions, "--no-extensions"),
+            (self.pi.extensions or self.pi.harness_extension, "--no-extensions"),
             (self.pi.skills, "--no-skills"),
             (self.pi.prompt_templates, "--no-prompt-templates"),
             (self.pi.themes, "--no-themes"),

@@ -271,10 +271,11 @@ def test_orchestrator_resumes_pi_session_in_existing_run(monkeypatch, tmp_path: 
     assert result["run_id"] == run_dir.name
     assert result["success"] is True
     assert fake.resume_session_id == "pi-session-existing"
-    # Only wall_time survives a resume; token/call budgets are ignored, so the
-    # resumed task must not keep tracking them.
-    assert fake.session_task.budgets.max_tokens is None
-    assert fake.session_task.budgets.max_tool_calls is None
+    # A resume hands the adapter what is left of each declared ceiling, so the
+    # session sees its own allowance while the run ledger keeps the totals.
+    assert fake.session_task.budgets.max_tokens == 91
+    assert fake.session_task.budgets.max_model_calls == 2
+    assert fake.session_task.budgets.max_tool_calls == 1
     assert result["metrics"]["total_tokens"] == 9
     assert result["metrics"]["tool_calls"] == 2
     assert result["world"]["revision"] > initial_revision

@@ -21,8 +21,15 @@ from harness.benchmark.tsec_adapter import (
     extract_flags,
     run_tsec_challenges,
 )
-from harness.benchmark.tsec_client import TSecAdapterError, TSecConfig
-from harness.models import AgentSpec, BudgetSpec
+from harness.benchmark.tsec_client import (
+    TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
+    TSecAdapterError,
+    TSecClientAdapter,
+    TSecConfig,
+    _TokenBucket,
+)
+from harness.models import AgentSpec, BudgetSpec, load_agent, load_task
+from harness.preflight import run_preflight
 
 
 class FakeTSecClient:
@@ -913,3 +920,299 @@ def test_run_tsec_challenges_rejects_parallel_above_the_platform_cap(tmp_path: P
 
 async def _fake_sleep(_seconds: float) -> None:
     return None
+
+
+class FakeSDK:
+    def __init__(self, base_url: str, token: str) -> None:
+        self.base_url = base_url
+        self.token = token
+        self.calls: list[tuple] = []
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self.exited = True
+
+    async def list_challenges(self):
+        self.calls.append(("list_challenges",))
+        return ["case"]
+
+    async def start_challenge(self, unique_code: str):
+        self.calls.append(("start_challenge", unique_code))
+        return {"code": unique_code}
+
+    async def submit_flag(self, unique_code: str, flag: str):
+        self.calls.append(("submit_flag", unique_code, flag))
+        return {"correct": True}
+
+    async def close_challenge(self, unique_code: str):
+        self.calls.append(("close_challenge", unique_code))
+        return {"closed": True}
+
+    async def get_hint(self, unique_code: str):
+        self.calls.append(("get_hint", unique_code))
+        return {"hint": "peek"}
+
+
+def test_tsec_client_adapter_forwards_sdk_config_and_every_call() -> None:
+    captured: dict[str, str] = {}
+    sdk = FakeSDK("unused", "unused")
+
+    def factory(base_url: str, token: str) -> FakeSDK:
+        captured.update(base_url=base_url, token=token)
+        return sdk
+
+    adapter = TSecClientAdapter(
+        TSecConfig(base_url="https://tsec.example", token="tok-123"),
+        sdk_factory=factory,
+    )
+
+    async def scenario() -> None:
+        async with adapter as client:
+            await client.list_challenges()
+            await client.start_challenge("WEB-001")
+            await client.submit_flag("WEB-001", "flag{x}")
+            await client.get_hint("WEB-001")
+            await client.close_challenge("WEB-001")
+
+    asyncio.run(scenario())
+
+    assert captured == {"base_url": "https://tsec.example", "token": "tok-123"}
+    assert sdk.calls == [
+        ("list_challenges",),
+        ("start_challenge", "WEB-001"),
+        ("submit_flag", "WEB-001", "flag{x}"),
+        ("get_hint", "WEB-001"),
+        ("close_challenge", "WEB-001"),
+    ]
+    assert sdk.entered and sdk.exited
+
+
+def test_preflight_uses_configurable_tsec_env_names(monkeypatch) -> None:
+    monkeypatch.delenv("BENCHMARK_BASE_URL", raising=False)
+    monkeypatch.delenv("BENCHMARK_TOKEN", raising=False)
+    monkeypatch.setenv("ALT_BASE_URL", "https://tsec.example")
+    monkeypatch.setenv("ALT_TOKEN", "tok")
+    root = Path(__file__).resolve().parents[1]
+    task = root / "benchmarks" / "examples" / "hello" / "task.yaml"
+    agent = root / "agents" / "examples" / "pi.yaml"
+
+    report = run_preflight(
+        load_task(task),
+        load_agent(agent),
+        task_path=task,
+        require_tsec=True,
+        tsec_base_url_env="ALT_BASE_URL",
+        tsec_token_env="ALT_TOKEN",
+    )
+
+    base_url = report.by_name("tsec_base_url")
+    credential = report.by_name("tsec_credential")
+    assert base_url.ok and "ALT_BASE_URL" in base_url.detail
+    assert credential.ok and "ALT_TOKEN" in credential.detail
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def time(self) -> float:
+        return self.now
+
+
+def _clock_sleep(clock: FakeClock, recorded: list[float]):
+    async def sleep(seconds: float) -> None:
+        recorded.append(seconds)
+        clock.now += seconds
+
+    return sleep
+
+
+class RateLimitError(Exception):
+    status_code = 429
+
+
+class FlakyListSDK(FakeSDK):
+    def __init__(self, base_url: str, token: str) -> None:
+        super().__init__(base_url, token)
+        self.list_failures = 0
+        self.list_attempts = 0
+
+    async def list_challenges(self):
+        self.list_attempts += 1
+        if self.list_failures > 0:
+            self.list_failures -= 1
+            raise RateLimitError()
+        return await super().list_challenges()
+
+
+class FailingStartSDK(FakeSDK):
+    async def start_challenge(self, unique_code: str):
+        raise RuntimeError("start rejected")
+
+
+class HintCountingClient(FakeTSecClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hint_calls = 0
+
+    async def get_hint(self, unique_code: str):
+        self.hint_calls += 1
+        return await super().get_hint(unique_code)
+
+
+class FailingHintClient(FakeTSecClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hint_calls = 0
+
+    async def get_hint(self, unique_code: str):
+        self.hint_calls += 1
+        raise RuntimeError("hint service down")
+
+
+def _limited_adapter(
+    sdk: FakeSDK,
+) -> tuple[TSecClientAdapter, FakeClock, list[float]]:
+    clock = FakeClock()
+    slept: list[float] = []
+    adapter = TSecClientAdapter(
+        TSecConfig(base_url="https://tsec.example", token="tok"),
+        sdk_factory=lambda _url, _token: sdk,
+        limiter=_TokenBucket(clock=clock.time, sleep=_clock_sleep(clock, slept)),
+        sleep=_clock_sleep(clock, slept),
+    )
+    return adapter, clock, slept
+
+
+def test_tsec_client_rate_limits_calls_to_three_per_second() -> None:
+    sdk = FakeSDK("unused", "unused")
+    adapter, _clock, slept = _limited_adapter(sdk)
+
+    async def scenario() -> None:
+        for _ in range(4):
+            await adapter.list_challenges()
+
+    asyncio.run(scenario())
+
+    assert len(sdk.calls) == 4
+    assert slept == [pytest.approx(1 / 3)]
+
+
+def test_tsec_client_caps_instances_and_releases_on_close() -> None:
+    sdk = FakeSDK("unused", "unused")
+    adapter, _clock, _slept = _limited_adapter(sdk)
+
+    async def scenario() -> None:
+        for code in ("A", "B", "C"):
+            await adapter.start_challenge(code)
+        assert adapter.open_instances == {"A", "B", "C"}
+
+        with pytest.raises(TSecAdapterError):
+            await adapter.start_challenge("D")
+        with pytest.raises(TSecAdapterError):
+            await adapter.start_challenge("B")
+
+        await adapter.close_challenge("A")
+        await adapter.close_challenge("A")  # idempotent release
+        await adapter.start_challenge("D")
+        assert adapter.open_instances == {"B", "C", "D"}
+
+    asyncio.run(scenario())
+
+
+def test_tsec_client_releases_instance_when_start_fails() -> None:
+    sdk = FailingStartSDK("unused", "unused")
+    adapter, _clock, _slept = _limited_adapter(sdk)
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError):
+            await adapter.start_challenge("X")
+        assert adapter.open_instances == frozenset()
+
+    asyncio.run(scenario())
+
+
+def test_tsec_client_retries_429_once_then_fails_closed() -> None:
+    sdk = FlakyListSDK("unused", "unused")
+    adapter, _clock, slept = _limited_adapter(sdk)
+
+    async def scenario() -> None:
+        sdk.list_failures = 1
+        assert await adapter.list_challenges() == ["case"]
+
+        sdk.list_failures = 2
+        with pytest.raises(RateLimitError):
+            await adapter.list_challenges()
+
+    asyncio.run(scenario())
+
+    assert sdk.list_attempts == 4
+    assert slept == [
+        TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
+        TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
+    ]
+
+
+def test_tsec_adapter_requests_hint_once_per_case() -> None:
+    async def scenario() -> None:
+        client = HintCountingClient()
+        adapter = TSecBenchmarkAdapter(client, use_hint=False)
+        cases = await adapter.discover()
+        session = await adapter.provision(cases[0])
+
+        assert session.metadata["hint_trigger"] is None
+        first = await adapter.request_hint("WEB-001")
+        second = await adapter.request_hint("WEB-001")
+
+        assert first == "look at the service"
+        assert second == first
+        assert client.hint_calls == 1
+        assert session.metadata["hint_used"] is True
+        assert session.metadata["hint_trigger"] == "threshold"
+        assert session.metadata["hint"] == "look at the service"
+
+    asyncio.run(scenario())
+
+
+def test_tsec_adapter_hint_failure_is_recorded_and_not_retried() -> None:
+    async def scenario() -> None:
+        client = FailingHintClient()
+        adapter = TSecBenchmarkAdapter(client, use_hint=False)
+        cases = await adapter.discover()
+        session = await adapter.provision(cases[0])
+
+        assert await adapter.request_hint("WEB-001") is None
+        assert await adapter.request_hint("WEB-001") is None
+        assert client.hint_calls == 1
+        assert session.metadata["hint_used"] is False
+        assert session.metadata["hint_error"] is True
+        assert session.metadata["hint_trigger"] == "threshold"
+
+    asyncio.run(scenario())
+
+
+def test_tsec_adapter_immediate_hint_is_not_requested_again_by_the_threshold() -> None:
+    """--hint plus --hint-threshold must pay for one hint view, not two."""
+
+    async def scenario() -> None:
+        client = HintCountingClient()
+        adapter = TSecBenchmarkAdapter(client, use_hint=True)
+        cases = await adapter.discover()
+        session = await adapter.provision(cases[0])
+
+        assert client.hint_calls == 1
+        assert session.metadata["hint_trigger"] == "immediate"
+
+        assert await adapter.request_hint("WEB-001") == "look at the service"
+        assert client.hint_calls == 1
+        assert session.metadata["hint_trigger"] == "immediate"
+        assert session.metadata["hint"] == "look at the service"
+        # The cached reply is not a fresh fetch, so no failure flag is written.
+        assert "hint_error" not in session.metadata
+
+    asyncio.run(scenario())

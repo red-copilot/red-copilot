@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -117,6 +117,8 @@ class SolverLoop:
         world_inbox: WorldInboxCursor | None = None,
         max_no_progress: int = DEFAULT_MAX_NO_PROGRESS,
         max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
+        hint_request: Callable[[], Awaitable[str | None]] | None = None,
+        hint_threshold: int = 0,
         processed_event_ids: dict[str, str] | None = None,
         hint_cursor: HintCursor | None = None,
         world_inbox_path: Path | None = None,
@@ -154,6 +156,9 @@ class SolverLoop:
         self.sync_agent_views = sync_agent_views
         self.max_no_progress = max_no_progress
         self.max_unconfirmed_progress = max_unconfirmed_progress
+        self._hint_request = hint_request
+        self.hint_threshold = hint_threshold
+        self._hint_steered = False
         self._budget_steers_fired: set[float] = set()
         self._finalize_steered = False
         self._finalize_prompted = False
@@ -327,14 +332,17 @@ class SolverLoop:
         live_ingest = self.world_inbox.poll()
         self.stats.inbox_accepted += live_ingest.accepted
         self.stats.inbox_rejected += live_ingest.rejected
-
-        # Operator hints are advisory: record them at evidence tier so the
-        # Agent sees them, but never treat them as an objective verdict.
-        for hint in self._absorb_hints():
+        # Operator hints: advisory guidance from a human operator, recorded at
+        # evidence tier so the Agent and the end-of-run summary see it. A hint
+        # is never an objective verdict and never verifies anything by itself.
+        for hint in self.hint_cursor.poll():
+            if not self._absorb_operator_hint(hint):
+                continue
             await session.observe(
                 AgentObservation(
                     type="solver.hint",
                     data={
+                        "source": "operator",
                         "id": hint.id,
                         "text": hint.text,
                         "message": f"Operator hint ({hint.id}): {hint.text}",
@@ -447,6 +455,7 @@ class SolverLoop:
         self.progress.write(self.progress_path)
         self._sync_agent_views()
         await self._maybe_steer_repetition(session)
+        await self._maybe_steer_hint(session)
         await self._maybe_steer_budget(session)
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
@@ -567,6 +576,52 @@ class SolverLoop:
             )
         )
 
+    async def _maybe_steer_hint(self, session: AgentSession) -> None:
+        """Fetch the platform hint once when the run is stuck past the threshold.
+
+        The callback is the benchmark adapter's one-shot fetch, so a failed
+        lookup is recorded and never retried in a loop.
+        """
+        if (
+            self._hint_steered
+            or self._hint_request is None
+            or self.hint_threshold <= 0
+            or self.progress.objective_completed
+        ):
+            return
+        if self.progress.no_progress_count < self.hint_threshold:
+            return
+        self._hint_steered = True
+        hint: str | None = None
+        try:
+            hint = await self._hint_request()
+        except Exception:  # noqa: BLE001 - a failed hint must not stall the loop
+            hint = None
+        self.trace.emit(
+            "solver.hint",
+            actor="harness",
+            data={
+                "source": "platform",
+                "used": bool(hint),
+                "threshold": self.hint_threshold,
+                "no_progress_count": self.progress.no_progress_count,
+            },
+        )
+        if not hint:
+            return
+        await session.observe(
+            AgentObservation(
+                type="solver.hint",
+                data={
+                    "source": "platform",
+                    "threshold": self.hint_threshold,
+                    "message": (
+                        "Platform hint (viewing it reduces this flag's score):\n" + hint
+                    ),
+                },
+            )
+        )
+
     async def _maybe_steer_finalize(self, session: AgentSession) -> None:
         """Stop the Agent exploring at a soft limit and ask for a summary.
 
@@ -591,9 +646,7 @@ class SolverLoop:
             data["budget"] = exceeded
         self._finalize_steered = True
         self.trace.emit("solver.finalize", actor="harness", data=data)
-        lead = (
-            "A run budget is exhausted." if soft_usage else "Time is up."
-        )
+        lead = "A run budget is exhausted" if soft_usage else "Time is up"
         await session.observe(
             AgentObservation(
                 type="solver.finalize",
@@ -601,7 +654,10 @@ class SolverLoop:
                     **data,
                     "summary_file": "agent.summary.md",
                     "message": (
-                        f"{lead} Stop launching new probes. Write a short report to "
+                        f"{lead}, and this finalize instruction overrides any earlier "
+                        "instruction that told you to keep working. Stop launching new "
+                        "probes and do not run any more commands. Based only on what you "
+                        "have already confirmed, write a short report to "
                         "$HARNESS_SUMMARY_FILE with exactly these four sections: "
                         "(1) confirmed facts - each with the evidence that confirms it; "
                         "(2) unconfirmed hypotheses; (3) what you tried and ruled out; "
@@ -655,9 +711,11 @@ class SolverLoop:
                     "reason": "summary_missing",
                     "summary_file": "agent.summary.md",
                     "message": (
-                        "Your round ended without a summary. Write $HARNESS_SUMMARY_FILE now: "
-                        "(1) confirmed facts with their evidence, (2) unconfirmed hypotheses, "
-                        "(3) what you tried and ruled out, (4) unfinished intents. Then stop."
+                        "Your round ended without a summary. This instruction overrides any "
+                        "earlier instruction to keep working: run no more commands. Write "
+                        "$HARNESS_SUMMARY_FILE now, based only on what you already confirmed: "
+                        "confirmed facts with their evidence, unconfirmed hypotheses, what you "
+                        "tried and ruled out, and unfinished intents. Then stop."
                     ),
                 },
             )
@@ -677,35 +735,36 @@ class SolverLoop:
             max_unconfirmed_progress=self.max_unconfirmed_progress,
         )
 
-    def _absorb_hints(self) -> list[HintRecord]:
-        """Record new operator hints in World; return the newly absorbed ones."""
-        absorbed = []
-        for hint in self.hint_cursor.poll():
-            if hint.id in self._delivered_hint_ids:
-                continue
-            self._delivered_hint_ids.add(hint.id)
-            self.world.upsert(
-                "observation",
-                Observation(
-                    id=f"human.hint:{hint.id}",
-                    type="human.hint",
-                    content={"text": hint.text},
-                    confidence=1.0,
-                    source="harness.hint",
-                    provenance=Provenance(epistemic_status="evidence"),
-                ),
-                actor="harness",
-            )
-            self.trace.emit(
-                "solver.hint",
-                actor="harness",
-                data={"hint_id": hint.id, "text": hint.text},
-            )
-            absorbed.append(hint)
-        return absorbed
+    def _absorb_operator_hint(self, hint: HintRecord, *, late: bool = False) -> bool:
+        """Record an operator hint in World and trace; False when already delivered.
+
+        The hint is advisory guidance recorded at evidence tier: the Agent and
+        the end-of-run summary see it, but it never verifies the objective on
+        its own. Steering stays with the caller, because a hint that arrives
+        while the session is closing is only absorbed into World state.
+        """
+        if hint.id in self._delivered_hint_ids:
+            return False
+        self._delivered_hint_ids.add(hint.id)
+        self.world.upsert(
+            "observation",
+            Observation(
+                id=f"human.hint:{hint.id}",
+                type="human.hint",
+                content={"text": hint.text},
+                confidence=1.0,
+                source="harness.hint",
+                provenance=Provenance(epistemic_status="evidence"),
+            ),
+            actor="harness",
+        )
+        data: dict = {"source": "operator", "hint_id": hint.id, "text": hint.text}
+        if late:
+            data["late"] = True
+        self.trace.emit("solver.hint", actor="harness", data=data)
+        return True
 
     def finish_ingest(self) -> None:
-        self._absorb_hints()
         report = self.world_inbox.poll()
         self.stats.inbox_accepted += report.accepted
         self.stats.inbox_rejected += report.rejected
@@ -717,6 +776,10 @@ class SolverLoop:
                 "errors": [error.model_dump() for error in report.errors[:10]],
             },
         )
+        # Late hints still land in the World so the end-of-run summary can
+        # include guidance the operator added while the session was closing.
+        for hint in self.hint_cursor.poll():
+            self._absorb_operator_hint(hint, late=True)
 
     def _write_context(self) -> None:
         # One snapshot for focus and render keeps the written context

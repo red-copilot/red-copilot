@@ -100,6 +100,11 @@ def extract_facts(data: dict) -> list[dict]:
             {"url": url, "status": int(status), "components": components},
         )
     for port, service, host, login, password in _HYDRA.findall(excerpt):
+        # The matched secret never becomes World content. Facts are rendered
+        # into the Agent's context file and exported through the run summary, so
+        # a plaintext password would sit in run artifacts that are deliberately
+        # kept free of credentials. The digest still correlates repeats of the
+        # same credential; the Agent keeps the raw tool output it already has.
         add(
             "credential.access",
             f"{service}:{host}:{login}",
@@ -108,7 +113,7 @@ def extract_facts(data: dict) -> list[dict]:
                 "host": host,
                 "port": int(port),
                 "login": login,
-                "password": password,
+                "secret_sha256": hashlib.sha256(password.encode("utf-8")).hexdigest()[:16],
             },
         )
     for method, param, technique in _SQLMAP_TECHNIQUE.findall(excerpt):

@@ -434,6 +434,23 @@ stops the rest. Usage budgets are split evenly across sessions while the wall-cl
 whole. Findings a session wants to share with its siblings go to `$HARNESS_SHARED_FINDINGS`, the
 only cross-session writable path. See [docs/agent-engineering.md](docs/agent-engineering.md).
 
+### Operator hints
+
+An operator can inject guidance into a run at any time, including while the Agent is mid-turn:
+
+```bash
+harness hint .harness/runs/run_... --text "the login bypass is on the API host"
+echo "flag format is zc{...}" | harness hint .harness/runs/run_...
+```
+
+Hints are appended to the run's `hints.jsonl`, outside the container-writable workspace. The
+SolverLoop polls the file on every event, records each hint in World state as an evidence-tier
+`human.hint` observation, and steers the running Agent with a `solver.hint` observation (one-shot
+Agents read it from `agent.feedback.jsonl`). The benchmark adapter steers the same observation type
+for a platform hint fetched at a configured no-progress threshold, so both sources share
+`solver.hint` and are told apart by `data.source` (`operator` or `platform`). Hints are advisory:
+they can redirect exploration, but they never verify the objective — only a verifier or benchmark
+evaluation can do that.
 
 ### SQLite World State
 

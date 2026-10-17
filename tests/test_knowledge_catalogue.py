@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "skills" / "offensive"
 KNOWLEDGE_ROOT = REPO_ROOT / "knowledge"
+FETCH_SCRIPT = REPO_ROOT / "scripts" / "fetch-knowledge.sh"
+
+# name|repository|pinned revision|licence note
+CORPORA_ENTRY = re.compile(
+    r'^\s*"([A-Za-z0-9-]+)\|(https://[^|"]+)\|([0-9a-f]{40})\|([^"|]+)"\s*$',
+    re.MULTILINE,
+)
 
 # A manual that cannot say when to use it, what it should establish and what it
 # is not allowed to do is a note, not a skill. These sections are the contract.
@@ -73,3 +81,23 @@ def test_knowledge_catalogue_stays_offline() -> None:
     assert (KNOWLEDGE_ROOT / "methodology" / "evidence-and-reporting.md").is_file()
     for category in ("web", "network", "cloud", "ad-and-credentials"):
         assert (KNOWLEDGE_ROOT / "categories" / f"{category}.md").is_file()
+
+
+def test_bulk_corpus_manifest_is_pinned_and_indexed() -> None:
+    script = FETCH_SCRIPT.read_text(encoding="utf-8")
+    entries = CORPORA_ENTRY.findall(script)
+
+    assert len(entries) >= 5
+    names = [name for name, _repo, _revision, _licence in entries]
+    assert len(names) == len(set(names))
+
+    index = (KNOWLEDGE_ROOT / "README.md").read_text(encoding="utf-8")
+    for name, repo, revision, licence in entries:
+        assert repo.startswith("https://"), name
+        assert len(revision) == 40, name
+        assert licence.strip(), name
+        assert name in index, f"{name} is not listed in knowledge/README.md"
+
+
+def test_fetch_script_is_valid_bash() -> None:
+    subprocess.run(["bash", "-n", str(FETCH_SCRIPT)], check=True)

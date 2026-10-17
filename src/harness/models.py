@@ -89,6 +89,7 @@ class PiSpec(BaseModel):
     approve_project: bool = False
     context_files: bool = False
     extensions: bool = False
+    harness_extension: bool = False
     skills: bool = False
     prompt_templates: bool = False
     themes: bool = False

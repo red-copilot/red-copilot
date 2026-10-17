@@ -1,3 +1,9 @@
+"""Frozen offline baseline for the retired frontier planner.
+
+This copy is the v2-cut snapshot of ``harness.planner``. It is a regression
+fixture, not production code: it keeps its own kind-to-collection table and is
+deliberately not kept in sync with later refactors of the deleted module.
+"""
 from __future__ import annotations
 
 import fnmatch

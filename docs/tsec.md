@@ -147,6 +147,23 @@ tool-call / cost budgets evenly, and shares the wall-clock window. Findings a se
 siblings to see go to `$HARNESS_SHARED_FINDINGS`; `result.json` reports every session under
 `executor_sessions`. The local `harness run` entry point still rejects competing executors.
 
+## 接入面核对清单（ZCP-01）
+
+离线部分已就绪：SDK 可用性、base URL 与 token env 由 `harness preflight --tsec` 诊断，
+env 名可用 `--base-url-env` / `--benchmark-token-env` 覆盖；客户端契约由
+`tests/test_tsec_adapter.py` 固定。**实时核对未执行**（需要平台窗口与真实实例操作），
+下表在联调日逐项填写并留档：
+
+| 调用 | 客户端方法 | 待核实 | 需记录的证据 |
+| --- | --- | --- | --- |
+| 题目列表 | `list_challenges()` | 实际端点、方法、认证头名 | 端点、认证头、响应字段（unique_code/flag_count/score） |
+| 启动实例 | `start_challenge(code)` | 与 SDK `openapi/v1` 的差异 | 端点、请求体、`container_addr` 字段位置 |
+| 提交 flag | `submit_flag(code, flag)` | 认证头与重复提交语义 | 端点、幂等响应、计分字段 |
+| 获取提示 | `get_hint(code)` | 只对已启动实例有效与否 | 端点、扣分说明、响应字段 |
+| 关闭实例 | `close_challenge(code)` | 幂等性与释放语义 | 端点、响应、实例对账结果 |
+
+证据不足时保持"离线就绪、实时 blocked"，不得用离线绿测代替实时核对结论。
+
 ## Security boundary
 
 The Pi container never receives `BENCHMARK_TOKEN` or `BENCHMARK_BASE_URL`. Red Harness calls the SDK to start, submit and close challenges. Pi emits candidate answers to `$HARNESS_SUBMISSION_INBOX` (or compatibility fallback `HARNESS_FLAG=flag{...}`).

@@ -7,10 +7,10 @@ Deliver: stable discover/provision/submit/evaluate/teardown contracts with resul
 Accept: contract tests for unavailable service, failed provision, submission retry, timeout, teardown after crash and unexpected API responses.
 State: implemented; the final evaluator is the authority, teardown runs in `finally` under a single idempotent owner bounded to 30s, and coverage lives in `tests/test_benchmark_streaming.py` and `tests/test_tsec_adapter.py`.
 
-### BEN-02 [~] P1 — Offline readiness gate
+### BEN-02 [x] P1 — Offline readiness gate
 Deliver: preflight checks for images, tools, model access, task inputs and SDK integration without mandatory public Internet, plus clear egress policy and actionable diagnostics.
 Accept: exercise an authorized target-only environment with public egress disabled and produce actionable missing-dependency errors before a run.
-State: `harness preflight` (with `--tsec`), topology, credential and network-profile checks plus bounded task-tree validation are implemented and never pull images or contact services. Outstanding: a Docker-capable CI run proving target-only reachability and public-egress denial.
+State: `harness preflight` (with `--tsec`), topology, credential and network-profile checks plus bounded task-tree validation are implemented and never pull images or contact services. Target-only reachability and public-egress denial run in CI (`tests/test_network_profiles_docker.py`) after the probe image build, and passed locally against `harness-isolation-probe:ci`.
 
 ### BEN-03 [!] P1 — Cross-domain evaluation (descoped 2026-10-13)
 Per-domain pass@k reporting lived in the removed suite tooling. Nine synthetic offline fixtures across general, coding, file, Web, Pwn, Reverse, Crypto, Forensics and Misc remain as regression fixtures with independent verifiers and fixed seeds (`tests/test_benchmark_fixtures.py`); they are smoke contracts, not performance evidence, and a periodic report over real benchmark tasks is not an acceptance path.

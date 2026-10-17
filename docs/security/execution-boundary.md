@@ -39,6 +39,30 @@ Nothing authoritative may live there: it must never contain `world.db`, `world.e
 read back only for archival, never as evidence or instruction. The run root itself stays
 unmounted from every session container.
 
+### Operator hint inbox
+
+`harness hint <run_dir>` appends to `hints.jsonl` at the run root, which no session container
+can reach, so a hint can only be written by an operator on the host. That mount boundary is what
+lets the SolverLoop record each hint as an evidence-tier `human.hint` World observation and steer
+it into the running Agent: hints redirect exploration, they are never a verdict, and only a
+verifier or benchmark evaluation can close the objective. If the run root ever became
+container-writable, the evidence-tier status of `human.hint` would have to be revisited, because
+an Agent-authored copy would then be forged operator input rather than a verified fact.
+
+### Opt-in Harness Pi extension
+
+With `pi.harness_extension: true`, the Harness writes its own TypeScript extension to
+`run_dir/pi-agent/extensions/harness-context.ts` (visible in the container as
+`/run/harness/pi-agent/extensions/harness-context.ts`) and stops passing `--no-extensions`, so
+Pi loads exactly that Harness-authored file at startup. The extension runs with Agent
+privileges and has exactly two handlers: a `tool_result` spill that writes oversized output
+into the Agent workspace while keeping a bounded preview in context, and a
+`session_before_compact` summary carrying the Harness retention checklist. It adds no network
+capability, cannot sign verdicts, never reads credentials or the run root, and everything it
+writes is Agent-side output, not evidence. The default is off; when off, behaviour is
+unchanged. Other extension sources stay disabled unless `pi.extensions: true` is set
+explicitly, which the competition profile does not do.
+
 ## Process and network boundary
 
 Docker Agents run as the workspace's mapped numeric identity (UID/GID 65532 when Harness
@@ -75,6 +99,13 @@ reserved Harness, benchmark, and TSec credentials. Gateway mode injects a per-ru
 instead of the direct provider key. Agent output remains untrusted even when stored as a run
 artifact. Objective verdicts are produced by registered verifiers and reference Harness-persisted
 evidence.
+
+Secrets the engagement itself discovers stay out of the derived fact graph in plaintext:
+`harness.extract` records a `credential.access` fact with the service, host, port, login and a
+truncated digest of the observed secret, never the secret itself, because those facts are
+rendered into the Agent's context file and exported through the run summary. The raw tool output
+stays where the Agent already has it: its own workspace and event stream.
+
 Host CLI Agents are an explicit development escape hatch: they are not isolated and inherit
 the host process environment. Run only trusted commands in that mode and keep sensitive
 benchmark credentials out of their environment.

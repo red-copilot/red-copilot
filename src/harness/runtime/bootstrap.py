@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,6 +52,8 @@ def bootstrap_solver(
     seed_world: bool = True,
     max_no_progress: int = DEFAULT_MAX_NO_PROGRESS,
     max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
+    hint_request: Callable[[], Awaitable[str | None]] | None = None,
+    hint_threshold: int = 0,
     context_token_budget: int | None = None,
 ) -> SolverRuntime:
     """Initialize a solver run without coupling it to a benchmark or agent.
@@ -132,6 +134,8 @@ def bootstrap_solver(
         sync_agent_views=sync_workspace,
         max_no_progress=max_no_progress,
         max_unconfirmed_progress=max_unconfirmed_progress,
+        hint_request=hint_request,
+        hint_threshold=hint_threshold,
         processed_event_ids=processed_event_ids,
     )
     return SolverRuntime(

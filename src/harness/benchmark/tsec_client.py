@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 import typing
 from dataclasses import dataclass
 
 
 class TSecAdapterError(RuntimeError):
     pass
+
+
+TSEC_REQUESTS_PER_SECOND = 3.0
+TSEC_RATE_LIMIT_BURST = 3
+TSEC_INSTANCE_LIMIT = 3
+TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -29,17 +37,117 @@ def load_tsec_config(
     return TSecConfig(base_url=base_url, token=token)
 
 
-class TSecClientAdapter:
-    """Thin async wrapper over the official TSec Benchmark SDK."""
+class _TokenBucket:
+    """Async token bucket enforcing the platform's 3 requests/second cap."""
 
-    def __init__(self, config: TSecConfig) -> None:
+    def __init__(
+        self,
+        *,
+        rate: float = TSEC_REQUESTS_PER_SECOND,
+        capacity: int = TSEC_RATE_LIMIT_BURST,
+        clock: typing.Callable[[], float] = time.monotonic,
+        sleep: typing.Callable[[float], typing.Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._rate = rate
+        self._capacity = float(capacity)
+        self._tokens = float(capacity)
+        self._clock = clock
+        self._sleep = sleep
+        self._updated_at = clock()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            while True:
+                now = self._clock()
+                elapsed = now - self._updated_at
+                if elapsed > 0:
+                    self._tokens = min(
+                        self._capacity, self._tokens + elapsed * self._rate
+                    )
+                    self._updated_at = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                await self._sleep((1.0 - self._tokens) / self._rate)
+
+
+class _InstanceRegistry:
+    """Tracks started challenge instances so the team cap of three holds."""
+
+    def __init__(self, *, limit: int = TSEC_INSTANCE_LIMIT) -> None:
+        self._limit = limit
+        self._open: set[str] = set()
+
+    @property
+    def open_codes(self) -> frozenset[str]:
+        return frozenset(self._open)
+
+    def register(self, unique_code: str) -> None:
+        if unique_code in self._open:
+            raise TSecAdapterError(
+                f"challenge already has a running instance: {unique_code}"
+            )
+        if len(self._open) >= self._limit:
+            raise TSecAdapterError(
+                f"concurrent instance limit reached ({self._limit})"
+            )
+        self._open.add(unique_code)
+
+    def release(self, unique_code: str) -> None:
+        self._open.discard(unique_code)
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    return "ratelimit" in type(exc).__name__.lower() or "429" in str(exc)
+
+
+class TSecClientAdapter:
+    """Async wrapper over the official TSec Benchmark SDK.
+
+    Every call passes a shared token bucket, started and closed challenges are
+    accounted for against the platform's per-team instance cap, and a 429 is
+    retried at most once before the call fails closed.
+    """
+
+    def __init__(
+        self,
+        config: TSecConfig,
+        *,
+        sdk_factory: typing.Callable[[str, str], typing.Any] | None = None,
+        limiter: _TokenBucket | None = None,
+        registry: _InstanceRegistry | None = None,
+        sleep: typing.Callable[[float], typing.Awaitable[None]] = asyncio.sleep,
+        rate_limit_retry_delay: float = TSEC_RATE_LIMIT_RETRY_DELAY_SECONDS,
+    ) -> None:
+        factory = sdk_factory or _default_sdk_factory
         try:
-            from tsec_benchmark import TSecBenchmarkAsync
-        except ImportError as exc:
+            self._client = factory(config.base_url, config.token)
+        except ImportError as exc:  # pragma: no cover - import guard
             raise TSecAdapterError(
                 'tsec-benchmark is not installed; install red-harness with ".[tsec]"'
             ) from exc
-        self._client = TSecBenchmarkAsync(base_url=config.base_url, token=config.token)
+        self._limiter = limiter or _TokenBucket(sleep=sleep)
+        self._registry = registry or _InstanceRegistry()
+        self._sleep = sleep
+        self._rate_limit_retry_delay = rate_limit_retry_delay
+
+    @property
+    def open_instances(self) -> frozenset[str]:
+        return self._registry.open_codes
+
+    async def _call(self, method: typing.Callable[..., typing.Any], *args) -> typing.Any:
+        await self._limiter.acquire()
+        try:
+            return await method(*args)
+        except Exception as exc:
+            if not _is_rate_limited(exc):
+                raise
+            await self._sleep(self._rate_limit_retry_delay)
+            await self._limiter.acquire()
+            return await method(*args)
 
     async def __aenter__(self) -> typing.Self:
         await self._client.__aenter__()
@@ -49,16 +157,30 @@ class TSecClientAdapter:
         await self._client.__aexit__(exc_type, exc, tb)
 
     async def list_challenges(self):
-        return await self._client.list_challenges()
+        return await self._call(self._client.list_challenges)
 
     async def start_challenge(self, unique_code: str):
-        return await self._client.start_challenge(unique_code)
+        self._registry.register(unique_code)
+        try:
+            return await self._call(self._client.start_challenge, unique_code)
+        except Exception:
+            self._registry.release(unique_code)
+            raise
 
     async def submit_flag(self, unique_code: str, flag: str):
-        return await self._client.submit_flag(unique_code, flag)
+        return await self._call(self._client.submit_flag, unique_code, flag)
 
     async def close_challenge(self, unique_code: str):
-        return await self._client.close_challenge(unique_code)
+        try:
+            return await self._call(self._client.close_challenge, unique_code)
+        finally:
+            self._registry.release(unique_code)
 
     async def get_hint(self, unique_code: str):
-        return await self._client.get_hint(unique_code)
+        return await self._call(self._client.get_hint, unique_code)
+
+
+def _default_sdk_factory(base_url: str, token: str) -> typing.Any:
+    from tsec_benchmark import TSecBenchmarkAsync
+
+    return TSecBenchmarkAsync(base_url=base_url, token=token)

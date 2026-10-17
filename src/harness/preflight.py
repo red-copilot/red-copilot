@@ -51,6 +51,8 @@ def run_preflight(
     *,
     task_path: str | Path,
     require_tsec: bool = False,
+    tsec_base_url_env: str = "BENCHMARK_BASE_URL",
+    tsec_token_env: str = "BENCHMARK_TOKEN",
     gateway_enabled: bool = False,
     gateway_mode: str = "host",
     gateway_image: str | None = None,
@@ -119,26 +121,26 @@ def run_preflight(
                 ),
             )
         )
-        base_url_present = bool(os.environ.get("BENCHMARK_BASE_URL"))
-        token_present = bool(os.environ.get("BENCHMARK_TOKEN"))
+        base_url_present = bool(os.environ.get(tsec_base_url_env))
+        token_present = bool(os.environ.get(tsec_token_env))
         checks.extend(
             (
                 PreflightCheck(
                     name="tsec_base_url",
                     ok=base_url_present,
                     detail=(
-                        "BENCHMARK_BASE_URL is configured"
+                        f"{tsec_base_url_env} is configured"
                         if base_url_present
-                        else "BENCHMARK_BASE_URL is missing"
+                        else f"{tsec_base_url_env} is missing"
                     ),
                 ),
                 PreflightCheck(
                     name="tsec_credential",
                     ok=token_present,
                     detail=(
-                        "BENCHMARK_TOKEN is configured (value is not displayed)"
+                        f"{tsec_token_env} is configured (value is not displayed)"
                         if token_present
-                        else "BENCHMARK_TOKEN is missing (value is not displayed)"
+                        else f"{tsec_token_env} is missing (value is not displayed)"
                     ),
                 ),
             )

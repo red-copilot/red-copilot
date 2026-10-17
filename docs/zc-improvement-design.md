@@ -22,8 +22,8 @@
 排期口径：A1 独立且最小，先合并；A2 与 A4 决定"能不能打出来"；A3 决定"打偏后能不能拉回"；
 B 段随 A 段之后；C 段在 maintainer 复核通过前不动。
 
-落地状态：A1–A4 与 B1–B3 已实现，证据见 [agent-engineering.md](agent-engineering.md) 的 ZCP 表；
-C 段尚未实施，仍待 maintainer 复核。
+落地状态：A1–A4 与 B1–B3 已实现；C 段已获 maintainer 复核并按默认关闭落地
+（`pi.harness_extension`），证据见 [agent-engineering.md](agent-engineering.md) 的 ZCP 表。
 
 ## 1. 现状核对：先纠正对比文档里的四处判断
 
@@ -148,7 +148,7 @@ C 段尚未实施，仍待 maintainer 复核。
   已被世界摘要占用，故用 `agent_report` 命名）；接力材料写成 notes 目录下的 `prior-summary.md`；
   证据见 `tests/test_executors.py`。
 
-## 4. C 段设计（需 maintainer 复核）
+## 4. C 段设计（已复核：默认关闭，逐条实现）
 
 - 目标：把获奖方案真正吃分的那部分搬到我们这条链路上——工具输出落盘、压缩保留清单——它们是 Pi 的进程内钩子。
 - 机制：把 Harness 自研的只读扩展放进运行期 agent 目录的 `extensions/` 子目录（该目录已挂到容器内
@@ -204,6 +204,6 @@ C 段尚未实施，仍待 maintainer 复核。
 - 简报质量：接力简报由 Harness 从世界投影生成，若世界状态本身稀疏（Agent 没写 `world.observe`），简报会变薄。
   这也是 B1 与 A3 要一起做的原因。
 - 上游语料的许可与体积：取数脚本只做 pinned 拉取，不复制正文；仍需在 PR 里记录许可证与来源。
-- C 段复核风险：若被判定为不可接受的执行边界变更，能力上限停在"会话级重启"，与获奖方案仍有差距，
-  这一点必须在赛后复盘里如实标注，不能算作已完成。
+- C 段已获复核并默认关闭；若运行时观测到执行边界问题，立即用开关回退到阶段一能力
+  （会话级重启＋接力简报），并在赛后复盘如实记录。
 - 本文只覆盖代码工程差距；赛制接入面（ZCP-01/02/04）仍以 [agent-engineering.md](agent-engineering.md) 为准。

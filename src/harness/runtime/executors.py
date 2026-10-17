@@ -54,11 +54,14 @@ SESSION_COUNTER_FIELDS = (
     "pending_actions",
     "skipped_verifications",
     "failure_count",
-    "no_progress_count",
-    "unconfirmed_progress",
     "accepted_submissions",
     "rejected_submissions",
 )
+
+# Counters that measure a *consecutive* streak inside one session rather than a
+# total. Adding them across sessions would report a stall no session ever ran
+# into, so the run ledger keeps the worst streak instead of the sum.
+SESSION_STREAK_FIELDS = ("no_progress_count", "unconfirmed_progress")
 
 SHARED_FINDINGS_HEADER = (
     "# Shared findings\n"
@@ -246,11 +249,18 @@ def fold_session_progress(
     """Fold competing session counters into the authoritative run ledger.
 
     Call once, after every session has stopped: the run ledger owns submissions
-    and the objective verdict itself, so folding is additive by design.
+    and the objective verdict itself, so totals fold additively while the stall
+    counters keep the longest streak any single session reached.
     """
     for ledger in sessions:
         for field in SESSION_COUNTER_FIELDS:
             setattr(run_progress, field, getattr(run_progress, field) + getattr(ledger, field))
+        for field in SESSION_STREAK_FIELDS:
+            setattr(
+                run_progress,
+                field,
+                max(getattr(run_progress, field), getattr(ledger, field)),
+            )
         for key, value in ledger.budget_used.items():
             run_progress.budget_used[key] = run_progress.budget_used.get(key, 0.0) + float(value)
         for skill, count in ledger.failed_skill_counts.items():

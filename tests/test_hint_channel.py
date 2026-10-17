@@ -69,8 +69,8 @@ def test_hint_cursor_polls_incrementally_and_skips_malformed_lines(tmp_path: Pat
     assert cursor.poll() == []
 
 
-def test_solver_loop_delivers_hint_once(tmp_path: Path) -> None:
-    loop, session, progress = _loop(tmp_path)
+def test_solver_loop_delivers_operator_hint_once(tmp_path: Path) -> None:
+    loop, session, _progress = _loop(tmp_path)
     append_hint(tmp_path, "try the backup host on port 8443")
     usage = AgentEvent(type="model.usage", data={"total_tokens": 1, "cost_usd": 0.0})
 
@@ -78,18 +78,18 @@ def test_solver_loop_delivers_hint_once(tmp_path: Path) -> None:
 
     delivered = [item for item in session.feedback if item.type == "solver.hint"]
     assert len(delivered) == 1
+    assert delivered[0].data["source"] == "operator"
     assert "8443" in delivered[0].data["message"]
     observation = loop.world.snapshot.observations.get("human.hint:hint_0001")
     assert observation is not None
     assert observation.provenance.epistemic_status == "evidence"
-    # The v2 control spine has no Harness-side planner; the hint is delivered
-    # as advisory state without publishing a new plan.
-    assert progress.last_event_type == "model.usage"
     trace_rows = [
         json.loads(line)
         for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert any(row["type"] == "solver.hint" for row in trace_rows)
+    hints = [row for row in trace_rows if row["type"] == "solver.hint"]
+    assert [row["data"]["source"] for row in hints] == ["operator"]
+    assert hints[0]["data"]["hint_id"] == "hint_0001"
 
     # A later event must not redeliver the same hint.
     asyncio.run(loop.process_event(session, usage))
@@ -106,6 +106,28 @@ def test_finish_ingest_harvests_late_hints_into_world(tmp_path: Path) -> None:
     observation = loop.world.snapshot.observations.get("human.hint:hint_0001")
     assert observation is not None
     assert observation.content["text"] == "late operator nudge"
+    trace_rows = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    late = [row for row in trace_rows if row["type"] == "solver.hint"]
+    assert len(late) == 1
+    assert late[0]["data"]["source"] == "operator"
+    assert late[0]["data"]["late"] is True
+
+
+def test_hint_inbox_stays_out_of_the_agent_workspace(tmp_path: Path) -> None:
+    """Operator hints are trusted input, so the inbox must not be Agent-writable.
+
+    The container is only ever given the session workspace read-write (asserted
+    in ``tests/test_pi_adapter.py``); the inbox sits at the session root.
+    """
+    from harness.hints import HINTS_FILE
+
+    loop, _session, _progress = _loop(tmp_path)
+
+    assert loop.hint_cursor.path == tmp_path / HINTS_FILE
+    assert (tmp_path / "agent-workspace") not in loop.hint_cursor.path.parents
 
 
 def test_hint_cli_appends_and_rejects_bad_directories(tmp_path: Path) -> None:
@@ -149,7 +171,7 @@ def test_hint_observation_appears_in_run_summary(tmp_path: Path) -> None:
 
 def test_rebuilt_loop_does_not_redeliver_absorbed_hints(tmp_path: Path) -> None:
     """A resumed run rebuilds SolverLoop with a fresh cursor offset; hints the
-    World already absorbed must not be re-steered or re-replanned."""
+    World already absorbed must not be steered a second time."""
     loop, session, _progress = _loop(tmp_path)
     append_hint(tmp_path, "already absorbed")
     asyncio.run(loop.process_event(session, AgentEvent(type="model.usage", data={})))

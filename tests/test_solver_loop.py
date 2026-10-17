@@ -327,6 +327,112 @@ def test_solver_loop_stops_after_the_bounded_no_progress_limit(tmp_path: Path) -
     assert '"action":"stop"' in decisions[-1]
 
 
+def test_solver_loop_fetches_hint_once_at_the_threshold(tmp_path: Path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger()
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-hint", "task-hint")
+    session = FakeSession()
+    fetches: list[int] = []
+
+    async def fetch_hint() -> str | None:
+        fetches.append(1)
+        return "peek at the upload form"
+
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="stuck run",
+        planned_world_revision=world.snapshot.revision,
+        hint_request=fetch_hint,
+        hint_threshold=2,
+    )
+
+    async def run() -> None:
+        for index in range(3):
+            await loop.process_event(
+                session,
+                AgentEvent(
+                    type="tool.result",
+                    event_id=f"hint-{index}",
+                    data={
+                        "tool": f"probe-{index}",
+                        "tool_call_id": f"hint-call-{index}",
+                        "is_error": True,
+                    },
+                ),
+            )
+
+    asyncio.run(run())
+
+    assert fetches == [1]
+    hints = [item for item in session.feedback if item.type == "solver.hint"]
+    assert len(hints) == 1
+    assert hints[0].data["source"] == "platform"
+    assert "peek at the upload form" in hints[0].data["message"]
+
+
+def test_solver_loop_hint_failure_is_not_retried(tmp_path: Path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger()
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-hint-fail", "task-hint-fail")
+    session = FakeSession()
+    fetches: list[int] = []
+
+    async def fetch_hint() -> str | None:
+        fetches.append(1)
+        raise RuntimeError("hint service down")
+
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="stuck run",
+        planned_world_revision=world.snapshot.revision,
+        hint_request=fetch_hint,
+        hint_threshold=1,
+    )
+
+    async def run() -> None:
+        for index in range(2):
+            await loop.process_event(
+                session,
+                AgentEvent(
+                    type="tool.result",
+                    event_id=f"fail-{index}",
+                    data={
+                        "tool": f"probe-fail-{index}",
+                        "tool_call_id": f"fail-call-{index}",
+                        "is_error": True,
+                    },
+                ),
+            )
+
+    asyncio.run(run())
+
+    assert fetches == [1]
+    assert not [item for item in session.feedback if item.type == "solver.hint"]
+    traces = trace.path.read_text(encoding="utf-8")
+    assert '"type":"solver.hint"' in traces
+    assert '"used":false' in traces
+    assert '"source":"platform"' in traces
+
+
+def test_operator_and_platform_hints_share_one_steered_event_type() -> None:
+    """Both hint sources reach the Agent as ``solver.hint`` observations.
+
+    The RPC session only steers observation types on its whitelist, so the
+    shared type has to be there or a hint would stop at ``agent.feedback.jsonl``.
+    """
+    from harness.pi_container import ContainerPiRpcSession
+
+    assert "solver.hint" in ContainerPiRpcSession._STEER_TYPES
+
+
 def test_solver_loop_steers_once_per_budget_threshold(tmp_path: Path) -> None:
     world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
     progress = ProgressLedger(budget_limits={"max_tokens": 1000})
