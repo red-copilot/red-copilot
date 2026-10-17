@@ -60,6 +60,9 @@ the strongest part of the evidence.
   says otherwise.
 - Submit once. A rejected candidate is information about your hypothesis, not
   an invitation to resend.
+- Submit as soon as you have a candidate, not when you stop working. A finding
+  that never reaches the submission channel scores zero, and the time left after
+  an accepted flag is worth more than more confirmation of the one you hold.
 - Record the outcome (accepted, rejected, score delta) back into world state so
   later decisions can see it.
 
@@ -70,7 +73,13 @@ Abandon — and write down why — when any of these holds:
 - the same command family has produced no new fact for several attempts;
 - the hypothesis has been refuted, or its falsifier already appeared;
 - the input you were attacking is no longer reachable;
-- the remaining cost (time, budget, hint penalty) exceeds the score at stake.
+- the remaining cost (time, budget, hint penalty) exceeds the score at stake;
+- one call has already run for minutes: a single scan that holds the window for
+  half an hour is a decision to spend the run on one command, so bound it,
+  narrow it, or replace it with a cheaper probe;
+- the notes have not grown while the action count has: reading and re-reading the
+  same context is not progress, and an empty page at the end is the shape of a
+  run that was never recorded.
 
 Recording *what was ruled out* is worth as much as recording a finding: it is
 the only thing that stops the next session from re-walking the same path.
