@@ -1015,33 +1015,75 @@ def test_sweep_records_a_case_local_failure_and_keeps_going(
     assert payload["tallies"]["failed"] == 1
 
 
-def test_sweep_stops_dispatching_new_cases_after_an_instance_conflict(
+async def _fast_sleep(_seconds: float) -> None:
+    return None
+
+
+def test_instance_conflicts_are_waited_out_and_the_sweep_continues(
     monkeypatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", _fast_sleep)
     monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", InstanceConflictClient)
     monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", ProvisioningRunner)
     summary = tmp_path / "sweep.json"
 
-    with pytest.raises(TSecPlatformError) as raised:
-        asyncio.run(
-            run_tsec_challenges(
-                config=TSecConfig(base_url="https://example.invalid", token="secret"),
-                agent=_runner_agent(),
-                budgets=BudgetSpec(wall_time=30),
-                runs_root=tmp_path,
-                run_all=True,
-                parallel=1,
-                summary_out=summary,
-            )
+    # No TSecPlatformError: the conflict is a scheduling race, not an outage.
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=30),
+            runs_root=tmp_path,
+            run_all=True,
+            parallel=1,
+            summary_out=summary,
         )
+    )
 
-    assert raised.value.kind == "instance_conflict"
+    assert len(results) == 3
     payload = json.loads(summary.read_text(encoding="utf-8"))
-    assert payload["platform_error"]["kind"] == "instance_conflict"
+    assert payload["platform_error"] is None
     kinds = {item["case_id"]: item["failure_kind"] for item in payload["failures"]}
-    assert kinds["WEB-001"] == "instance_conflict"
-    assert kinds["WEB-002"] == "dispatch_aborted"
-    assert kinds["WEB-003"] == "dispatch_aborted"
+    # Every case exhausted its conflict waits and is recorded per-case; the
+    # sweep itself was never aborted (no dispatch_aborted entries anywhere).
+    assert kinds == {
+        "WEB-001": "instance_conflict",
+        "WEB-002": "instance_conflict",
+        "WEB-003": "instance_conflict",
+    }
+    assert all(result["status"] == "error" for result in results)
+
+
+def test_start_waits_out_a_transient_instance_conflict(monkeypatch, tmp_path: Path) -> None:
+    waited: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        waited.append(seconds)
+
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", record_sleep)
+
+    class FlakyConflictClient(FakeRunnerClient):
+        conflicts_left = 2
+
+        async def start_challenge(self, code):
+            if type(self).conflicts_left > 0:
+                type(self).conflicts_left -= 1
+                raise InvalidState("max active challenge instances reached (3)")
+            return SimpleNamespace(container_addr=["10.0.0.2:80"])
+
+    adapter = TSecBenchmarkAdapter(FlakyConflictClient())
+    case = BenchmarkCase(
+        id="WEB-001",
+        benchmark="tsec",
+        domain="web",
+        difficulty="easy",
+        metadata={"is_completed": False},
+    )
+
+    started = asyncio.run(adapter._start(case.id))
+
+    assert started.container_addr == ["10.0.0.2:80"]
+    assert waited == [tsec_adapter.INSTANCE_CONFLICT_WAIT_SECONDS] * 2
 
 
 def test_sweep_resume_skips_locally_solved_cases_and_seeds_the_rest(

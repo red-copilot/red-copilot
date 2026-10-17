@@ -149,9 +149,12 @@ class _InstanceRegistry:
                 f"challenge already has a running instance: {unique_code}"
             )
         if len(self._open) >= self._limit:
-            raise TSecPlatformError(
-                kind=PLATFORM_FAILURE_INSTANCES,
-                detail=f"concurrent instance limit reached ({self._limit})",
+            # Case-local by construction (our dispatcher bounds concurrency):
+            # the server-side stop_pending race is retried in _start, and a
+            # sweep must not die over a slot that frees itself in seconds.
+            raise TSecAdapterError(
+                f"concurrent instance limit reached ({self._limit}); "
+                "retry this case on a later pass"
             )
         self._open.add(unique_code)
 

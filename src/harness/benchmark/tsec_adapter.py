@@ -27,6 +27,8 @@ from .base import (
 )
 from .runner import BenchmarkRunner
 from .tsec_client import (
+    PLATFORM_FAILURE_UNREACHABLE,
+    PLATFORM_FAILURE_VPN,
     TSEC_PREFLIGHT_TIMEOUT_SECONDS,
     TSecAdapterError,
     TSecClientAdapter,
@@ -44,6 +46,17 @@ MAX_PARALLEL_CHALLENGES = 3
 # Do not dispatch a new case when this little of the evaluation window is left:
 # it could not finish a meaningful attempt plus the finalize grace anyway.
 DISPATCH_FLOOR_SECONDS = 300
+# An instance conflict is a scheduling race (a just-closed container is still
+# stop_pending server-side and keeps counting against the team's three
+# slots), not a platform outage: wait it out and retry instead of treating
+# it as fatal for the sweep.
+INSTANCE_CONFLICT_ATTEMPTS = 6
+INSTANCE_CONFLICT_WAIT_SECONDS = 15.0
+_SWEEP_FATAL_KINDS = frozenset({PLATFORM_FAILURE_VPN, PLATFORM_FAILURE_UNREACHABLE})
+
+
+def _is_instance_conflict(exc: BaseException) -> bool:
+    return _is_sdk_error(exc, "InvalidState") and "max active" in str(exc)
 
 
 def _is_sdk_error(exc: Exception, name: str) -> bool:
@@ -288,18 +301,31 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
         return cases
 
     async def _start(self, case_id: str):
-        for attempt in range(self.start_retries + 1):
+        resource_attempts = 0
+        conflict_attempts = 0
+        while True:
             try:
                 return await self.client.start_challenge(case_id)
             except Exception as exc:
                 if (
                     _is_sdk_error(exc, "ResourceUnavailable")
-                    and attempt < self.start_retries
+                    and resource_attempts < self.start_retries
                 ):
+                    resource_attempts += 1
                     await asyncio.sleep(self.retry_delay)
                     continue
+                if _is_instance_conflict(exc) and conflict_attempts < INSTANCE_CONFLICT_ATTEMPTS:
+                    conflict_attempts += 1
+                    print(
+                        f"[tsec] instance slots full for {case_id}; waiting "
+                        f"{INSTANCE_CONFLICT_WAIT_SECONDS:.0f}s "
+                        f"({conflict_attempts}/{INSTANCE_CONFLICT_ATTEMPTS})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    await asyncio.sleep(INSTANCE_CONFLICT_WAIT_SECONDS)
+                    continue
                 raise
-        raise RuntimeError("unreachable start retry state")
 
     async def provision(self, case: BenchmarkCase) -> BenchmarkSession:
         challenge = self._raw_cases.get(case.id)
@@ -782,7 +808,7 @@ async def run_tsec_challenges(
                                 "error_type": type(exc).__name__,
                             }
                         )
-                        if kind is not None:
+                        if kind in _SWEEP_FATAL_KINDS:
                             if platform_failure is None:
                                 platform_failure = TSecPlatformError(
                                     kind=kind, detail=_platform_error_detail(exc)
@@ -925,7 +951,7 @@ async def run_tsec_challenges(
         raise
     except Exception as exc:
         kind = classify_platform_failure(exc)
-        if kind is not None:
+        if kind in _SWEEP_FATAL_KINDS:
             platform_error = TSecPlatformError(
                 kind=kind, detail=_platform_error_detail(exc)
             )
