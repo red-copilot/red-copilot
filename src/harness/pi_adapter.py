@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from .agent import (
-    AGENT_EVENT_FILE,
-    NORMALIZED_EVENT_FILE,
     AgentError,
     AgentResult,
     AgentRunContext,
@@ -540,7 +538,6 @@ class PiAdapter:
             environment_project=None,
             seed=seed,
             network_profile=self.spec.network_profile,
-            event_file_name=AGENT_EVENT_FILE if self.pi.mode == "rpc" else NORMALIZED_EVENT_FILE,
         )
         environment.update(
             {

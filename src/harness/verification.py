@@ -7,18 +7,6 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 EvidenceProducer = Literal["tool_adapter", "task_verifier", "benchmark_evaluator"]
-# A Harness observation is something the Harness itself saw - the platform
-# verdict on a submission, or a probe it ran - as opposed to what the Agent
-# reported. Only these may stand in for the Agent's expected observation.
-ObservationProducer = Literal["harness_probe", "benchmark_evaluator"]
-VerdictProducer = Literal[
-    "tool_adapter", "task_verifier", "benchmark_evaluator", "harness_verifier"
-]
-# "unavailable" is the honest verdict when the Harness has no independent
-# observation to compare against: the 2026-10-16 sweep produced 656 of them as
-# "pending", which read as "still being decided" and steered pointless replans.
-ActionStatus = Literal["verified", "contradicted", "pending", "unavailable"]
-ExecutionStatus = Literal["succeeded", "failed", "unknown"]
 ObjectiveStatus = Literal["verified", "contradicted", "inconclusive", "unavailable"]
 
 
@@ -43,83 +31,6 @@ class EvidenceRef(BaseModel):
             raise ValueError("captured_at must be timezone-aware")
         if self.artifact_ref is None and self.artifact_hash is None:
             raise ValueError("evidence requires an artifact_ref or artifact_hash")
-        return self
-
-
-class ObservationRecord(BaseModel):
-    """What the Harness itself saw, as opposed to what the Agent claimed.
-
-    This is the only thing an action verdict may be compared against. An Agent
-    string - its ``expected_observation`` - is not a baseline, which is why the
-    2026-10-16 runs produced 656 pending verdicts with reason
-    ``expected_observation_missing``: nothing on the Harness side ever produced
-    the other half of the comparison.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["harness/observation/v1"] = "harness/observation/v1"
-    observation_id: str = Field(min_length=1, max_length=256)
-    run_id: str = Field(min_length=1, max_length=256)
-    producer: ObservationProducer
-    captured_at: datetime
-    world_revision: int = Field(ge=0)
-    kind: str = Field(min_length=1, max_length=128)
-    summary: str = Field(min_length=1, max_length=4096)
-    artifact_hash: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
-
-    @model_validator(mode="after")
-    def validate_observation(self) -> Self:
-        if self.captured_at.tzinfo is None or self.captured_at.utcoffset() is None:
-            raise ValueError("captured_at must be timezone-aware")
-        return self
-
-
-class ActionVerdict(BaseModel):
-    """Action outcome with execution and observed-effect status kept separate."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["harness/action-verdict/v1"] = "harness/action-verdict/v1"
-    run_id: str = Field(min_length=1, max_length=256)
-    action_id: str = Field(min_length=1, max_length=256)
-    producer: VerdictProducer
-    captured_at: datetime
-    world_revision: int = Field(ge=0)
-    execution_status: ExecutionStatus
-    status: ActionStatus
-    expected_observation: str | None = None
-    actual_observation: str | None = None
-    observation: ObservationRecord | None = None
-    evidence: tuple[EvidenceRef, ...] = ()
-    replan_required: bool = False
-    replan_reasons: tuple[str, ...] = ()
-
-    @property
-    def effect_status(self) -> ActionStatus:
-        return self.status
-
-    @model_validator(mode="after")
-    def validate_verdict(self) -> Self:
-        if self.captured_at.tzinfo is None or self.captured_at.utcoffset() is None:
-            raise ValueError("captured_at must be timezone-aware")
-        if self.execution_status == "failed" and self.status == "verified":
-            raise ValueError("failed execution cannot verify an observed effect")
-        if self.status == "verified" and not self.evidence:
-            raise ValueError("verified action verdict requires evidence")
-        if self.status == "unavailable" and self.evidence:
-            raise ValueError("an unavailable verdict cannot carry evidence")
-        evidence_ids: set[str] = set()
-        for ref in self.evidence:
-            if ref.evidence_id in evidence_ids:
-                raise ValueError("action verdict cannot contain conflicting duplicate evidence IDs")
-            evidence_ids.add(ref.evidence_id)
-            if ref.run_id != self.run_id or ref.action_id != self.action_id:
-                raise ValueError("evidence run_id and action_id must match the verdict")
-            if ref.world_revision != self.world_revision:
-                raise ValueError("evidence world_revision must match the verdict")
-            if self.producer != "harness_verifier" and ref.producer != self.producer:
-                raise ValueError("evidence producer must match the verdict producer")
         return self
 
 
@@ -164,13 +75,6 @@ class VerifierAuthority:
 
 
 @dataclass(frozen=True, slots=True)
-class AuthorizedActionVerdict:
-    verdict: ActionVerdict
-    _registry_nonce: object = field(repr=False, compare=False)
-    _capability: object = field(repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
 class AuthorizedObjectiveVerdict:
     verdict: ObjectiveVerdict
     _registry_nonce: object = field(repr=False, compare=False)
@@ -191,14 +95,6 @@ class VerifierRegistry:
         self._capabilities[producer] = capability
         return VerifierAuthority(producer, self._nonce, capability)
 
-    def authorize_action(
-        self,
-        authority: VerifierAuthority,
-        verdict: ActionVerdict,
-    ) -> AuthorizedActionVerdict:
-        self._validate_authority(authority, verdict.producer)
-        return AuthorizedActionVerdict(verdict, self._nonce, authority._capability)
-
     def authorize_objective(
         self,
         authority: VerifierAuthority,
@@ -206,9 +102,6 @@ class VerifierRegistry:
     ) -> AuthorizedObjectiveVerdict:
         self._validate_authority(authority, verdict.producer)
         return AuthorizedObjectiveVerdict(verdict, self._nonce, authority._capability)
-
-    def is_authorized_action(self, authorized: object) -> bool:
-        return self._is_authorized(authorized, AuthorizedActionVerdict)
 
     def is_authorized_objective(self, authorized: object) -> bool:
         return self._is_authorized(authorized, AuthorizedObjectiveVerdict)

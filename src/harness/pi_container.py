@@ -14,8 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from .agent import (
-    AGENT_EVENT_FILE,
-    NORMALIZED_EVENT_FILE,
     AgentError,
     AgentResult,
     AgentRunContext,
@@ -56,11 +54,6 @@ RPC_RESUME_HANDSHAKE_TIMEOUT = 15.0
 # session record until it is asked to resume one, and blocking startup on a
 # record that never arrives would deadlock before the objective is sent.
 RPC_FRESH_HANDSHAKE_TIMEOUT = 1.0
-# Bounded ingestion of the Agent's own typed event file.
-MAX_AGENT_EVENT_CHUNK_BYTES = 1024 * 1024
-MAX_AGENT_EVENT_LINE_BYTES = 256 * 1024
-
-
 def _container_name(run_dir: Path) -> str:
     """Stable per-run container name.
 
@@ -119,10 +112,6 @@ class ContainerPiRpcSession:
         self.run_dir = Path(context.run_dir)
         self.container_name = _container_name(self.run_dir)
         self.event_path = self.run_dir / "events.jsonl"
-        # Agent-authored typed solver events. RPC sessions read Pi's stdout, so
-        # these reach the solver only through this cursor (see
-        # ``_consume_agent_events``).
-        self.agent_event_path = self.run_dir / AGENT_EVENT_FILE
         self.feedback_path = self.run_dir / "agent.feedback.jsonl"
         self.control_path = self.run_dir / "agent.control.jsonl"
         self.raw_path = self.run_dir / "agent.stdout.log"
@@ -150,9 +139,6 @@ class ContainerPiRpcSession:
         # and only the window's edge (not the crossing) ends the session.
         self.usage = UsageCeiling()
         self._event_offset = 0
-        self._agent_event_offset = 0
-        self._agent_event_remainder = ""
-        self._agent_event_line = 0
         self._feedback_offset = 0
         self._rpc_line = 0
         self._rpc_epoch = uuid.uuid4().hex
@@ -439,9 +425,9 @@ class ContainerPiRpcSession:
         if self.context.resume_session_id:
             initial_prompt = (
                 "Continue the existing Pi session for this Harness run. First read the current "
-                "world.context.txt and progress.json in the project workspace. Treat them as "
-                "the current Harness state, avoid repeating completed or interrupted actions, "
-                "and continue the objective using only new safe actions.\n\n" + initial_prompt
+                "world.context.txt and your notes in the project workspace. Treat them as the "
+                "current Harness state, avoid repeating completed or interrupted actions, and "
+                "continue the objective using only new safe actions.\n\n" + initial_prompt
             )
         if self._pending_observations:
             initial_prompt += "\n\nHarness state before the first model turn:\n" + "\n".join(
@@ -468,8 +454,6 @@ class ContainerPiRpcSession:
         startup_records = list(self._startup_records)
         self._startup_records.clear()
         while self.process.returncode is None:
-            for event in self._consume_agent_events():
-                yield event
             hard_deadline = task.budgets.wall_time + FINALIZE_GRACE_SECONDS
             wall_remaining = hard_deadline - (time.monotonic() - self._started)
             usage_remaining = self.usage.remaining()
@@ -563,8 +547,6 @@ class ContainerPiRpcSession:
             if self._settled:
                 break
 
-        for event in self._consume_agent_events():
-            yield event
         if not self._settled and not self._timed_out and not self._budget_exceeded:
             self.phase.transition(
                 SessionPhase.CRASHED, returncode=self.process.returncode
@@ -684,91 +666,6 @@ class ContainerPiRpcSession:
             handle.write(encoded)
             handle.flush()
             self._event_offset = handle.tell()
-
-    def _consume_agent_events(self) -> list[AgentEvent]:
-        """Read typed solver events the Agent appended to its own event file.
-
-        The RPC session consumes Pi's stdout, so anything the Agent writes to
-        ``$HARNESS_EVENT_FILE`` (``action.intent``, ``world.observe``, ...) only
-        reaches the solver through this cursor. The file is untrusted: partial
-        trailing lines are buffered, oversized lines and malformed JSON become
-        telemetry errors instead of crashing the stream, and a truncated or
-        replaced file restarts the cursor.
-        """
-        events: list[AgentEvent] = []
-        try:
-            size = self.agent_event_path.stat().st_size
-        except OSError:
-            return events
-        if size < self._agent_event_offset:
-            self._agent_event_offset = 0
-            self._agent_event_remainder = ""
-            self.adapter.trace.emit(
-                "agent.events.reset",
-                actor="harness",
-                data={"reason": "file_truncated_or_replaced"},
-            )
-        try:
-            with open_regular_file(self.agent_event_path, "r", errors="replace") as handle:
-                handle.seek(self._agent_event_offset)
-                chunk = handle.read(MAX_AGENT_EVENT_CHUNK_BYTES)
-                self._agent_event_offset = handle.tell()
-        except OSError:
-            return events
-        if not chunk:
-            return events
-
-        lines = (self._agent_event_remainder + chunk).splitlines(keepends=True)
-        if lines and not lines[-1].endswith(("\n", "\r")):
-            self._agent_event_remainder = lines.pop()
-        else:
-            self._agent_event_remainder = ""
-        if len(self._agent_event_remainder) > MAX_AGENT_EVENT_LINE_BYTES:
-            self._agent_event_remainder = ""
-            events.append(
-                self._agent_event_error("line exceeds the event size limit", line="")
-            )
-
-        for raw in lines:
-            stripped = raw.strip()
-            if not stripped:
-                continue
-            self._agent_event_line += 1
-            if len(raw) > MAX_AGENT_EVENT_LINE_BYTES:
-                events.append(
-                    self._agent_event_error("line exceeds the event size limit", line="")
-                )
-                continue
-            try:
-                payload = json.loads(stripped)
-            except json.JSONDecodeError:
-                events.append(
-                    self._agent_event_error("invalid JSON event", line=stripped[:200])
-                )
-                continue
-            if not isinstance(payload, dict):
-                events.append(
-                    self._agent_event_error("event must be a JSON object", line=stripped[:200])
-                )
-                continue
-            data = payload.get("data")
-            event = AgentEvent(
-                type=str(payload.get("type", "unknown")),
-                data=data if isinstance(data, dict) else {},
-                event_id=f"agent-event-line:{self._agent_event_line}",
-            )
-            self._persist_event(event)
-            events.append(event)
-        return events
-
-    def _agent_event_error(self, message: str, *, line: str) -> AgentEvent:
-        event = AgentEvent(
-            type="agent.telemetry_error",
-            data={"source": "agent.event_file", "message": message, "line": line},
-            event_id=f"agent-event-line:{self._agent_event_line}",
-        )
-        self._persist_event(event)
-        return event
 
     async def _send_command(self, command: dict[str, Any]) -> None:
         if self.process is None or self.process.stdin is None or self.process.stdin.is_closing():
@@ -966,9 +863,6 @@ class ContainerPiAdapter(PiAdapter):
             extra_env=pi_env,
             env_passthrough=tuple(self.pi.env_passthrough),
             interactive=self.pi.mode == "rpc",
-            event_file_name=(
-                AGENT_EVENT_FILE if self.pi.mode == "rpc" else NORMALIZED_EVENT_FILE
-            ),
             image_command=[
                 str(self.spec.image),
                 *self._command(

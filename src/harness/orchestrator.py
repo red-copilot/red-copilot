@@ -698,7 +698,7 @@ class Orchestrator:
             score=result["score"],
         )
         world.flush()
-        result["world"] = world_result(world=world, solver_loop=solver_loop, agent_id=agent.id)
+        result["world"] = world_result(world=world)
         result["world"]["resumed"] = resume_world_events is not None
         # Deterministic harvest (Cairn-style conclude fallback): every local run
         # leaves a summary of facts, intents, and exploration behind, whether or

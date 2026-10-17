@@ -127,10 +127,6 @@ def bootstrap_solver(
         context_query=context_query,
         planned_world_revision=snapshot.revision,
         context_builder=context_builder,
-        verifier_registry=verifier_registry,
-        world_inbox_path=(agent_workspace / "world.inbox.jsonl")
-        if agent_workspace is not None
-        else None,
         summary_path=(agent_workspace / "agent.summary.md")
         if agent_workspace is not None
         else None,

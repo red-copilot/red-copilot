@@ -35,10 +35,7 @@ SPINE_ROOTS = (
 )
 CONTROL_SPINE: frozenset[str] = frozenset(
     {
-        "harness.aci",
-        "harness.action_verifier",
         "harness.agent",
-        "harness.agent_events",
         "harness.agent_workspace",
         "harness.benchmark.base",
         "harness.benchmark.protocol",
@@ -99,6 +96,10 @@ DELETED_SUBSYSTEMS: frozenset[str] = frozenset(
         "harness.planner",
         "harness.skills",
         "harness.runtime.solver_profile",
+        "harness.aci",
+        "harness.agent_events",
+        "harness.action_verifier",
+        "harness.telemetry",
     }
 )
 

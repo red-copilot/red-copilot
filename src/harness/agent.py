@@ -24,18 +24,10 @@ class AgentError(RuntimeError):
     pass
 
 
-# Harness-normalized Agent event stream (the per-run artifact).
-NORMALIZED_EVENT_FILE = "events.jsonl"
 # Competing sessions share one findings file across containers. The host-side
 # layout lives in ``harness.runtime.executors``; this is the container contract.
 SHARED_FINDINGS_CONTAINER_DIR = "/run/harness-shared"
 SHARED_FINDINGS_CONTAINER_FILE = f"{SHARED_FINDINGS_CONTAINER_DIR}/shared-findings.md"
-# Agent-authored typed solver events (``action.intent``, ``world.observe``, ...).
-# RPC sessions read Pi's stdout rather than the shared file, so the Agent gets
-# its own file there; one-shot JSON sessions keep the shared file.
-AGENT_EVENT_FILE = "agent.events.jsonl"
-
-
 def task_environment(
     task: TaskSpec,
     *,
@@ -44,7 +36,6 @@ def task_environment(
     environment_project: str | None,
     seed: int,
     network_profile: str,
-    event_file_name: str = NORMALIZED_EVENT_FILE,
     knowledge_dirs: Sequence[str] = (),
     shared_findings_file: str | None = None,
 ) -> dict[str, str]:
@@ -147,7 +138,6 @@ def build_container_command(
     extra_env: Mapping[str, str] | None = None,
     env_passthrough: Sequence[str] = (),
     interactive: bool = False,
-    event_file_name: str = NORMALIZED_EVENT_FILE,
 ) -> list[str]:
     """Build the single hardened ``docker create`` command for container Agents."""
 
@@ -217,7 +207,6 @@ def build_container_command(
         environment_project=environment_project,
         seed=seed,
         network_profile=spec.network_profile,
-        event_file_name=event_file_name,
         knowledge_dirs=[container_path for _, container_path in knowledge_mounts],
         shared_findings_file=shared_findings_file,
     )

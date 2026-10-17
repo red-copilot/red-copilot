@@ -486,10 +486,11 @@ def test_session_phase_tracker_rejects_invalid_and_ignores_repeated_transitions(
 
 def test_agent_capabilities_declare_the_steer_degradation_explicitly() -> None:
     assert ONE_SHOT_AGENT_CAPABILITIES.live_steer is False
-    assert ONE_SHOT_AGENT_CAPABILITIES.typed_event_channel == "shared_event_file"
     assert RPC_AGENT_CAPABILITIES.live_steer is True
-    assert RPC_AGENT_CAPABILITIES.typed_event_channel == "agent_event_file"
-    assert "submission_inbox" in RPC_AGENT_CAPABILITIES.submission_channels
+    assert ONE_SHOT_AGENT_CAPABILITIES.submission_channels == ("submission_inbox",)
+    assert RPC_AGENT_CAPABILITIES.submission_channels == ("submission_inbox",)
+    assert not hasattr(ONE_SHOT_AGENT_CAPABILITIES, "typed_event_channel")
+    assert not hasattr(RPC_AGENT_CAPABILITIES, "typed_event_channel")
 
 
 def test_agent_run_context_is_frozen_and_derived_by_replace(tmp_path: Path) -> None:

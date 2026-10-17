@@ -271,28 +271,6 @@ class FakeSession:
         self.checkpoint_calls = 0
 
     async def events(self):
-        self.checkpoint_calls += 1
-        yield AgentEvent(
-            type="action.intent",
-            data={
-                "action_id": "action-probe-admin",
-                "description": "probe admin endpoint",
-                "expected_observations": ["admin endpoint exists"],
-                "success_conditions": ["HTTP response proves /admin is routed"],
-                "replan_conditions": ["endpoint absent"],
-            },
-        )
-        self.checkpoint_calls += 1
-        yield AgentEvent(
-            type="world.observe",
-            data={
-                "id": "obs-live",
-                "type": "web.endpoint",
-                "summary": "admin endpoint exists at /admin",
-                "content": {"path": "/admin", "status": 200},
-                "confidence": 1.0,
-            },
-        )
         path = self.run_dir / "submission.inbox.jsonl"
         path.write_text(
             json.dumps({"type": "flag", "value": "flag{live}"}) + "\n",
@@ -413,15 +391,15 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert benchmark.submissions == ["flag{live}"]
     assert benchmark.closed is True
     assert fake_agent.session is not None
-    assert fake_agent.session.checkpoint_calls == 3
+    assert fake_agent.session.checkpoint_calls == 1
     checkpoint = json.loads(
         (tmp_path / result["run_id"] / "checkpoint.json").read_text(encoding="utf-8")
     )
-    assert checkpoint["event_offset"] == 3
+    assert checkpoint["event_offset"] == 1
     assert not checkpoint["pending_actions"]
     assert fake_agent.session.closed_reason == "objective-complete"
     feedback_types = [item.type for item in fake_agent.session.feedback]
-    assert "world.state.updated" in feedback_types
+    assert "world.state.updated" not in feedback_types
     assert "solver.verification" not in feedback_types
     assert "benchmark.feedback" in feedback_types
     benchmark_feedback = next(
@@ -458,9 +436,9 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert result["metrics"]["slow_tool_calls"] == []
     assert "closing_attempt" not in result
     assert 0.0 <= result["metrics"]["submitted_at_fraction"] <= 1.0
-    assert result["world"]["revision"] >= 2
+    assert result["world"]["revision"] >= 1
     context = next(tmp_path.glob("fake_CASE-1_*/world.context.txt")).read_text(encoding="utf-8")
-    assert "obs-live" in context
+    assert "obs-live" not in context
     assert "benchmark.submission.feedback" in context
 
 
@@ -498,23 +476,6 @@ class InconsistentEvaluationBenchmark(FakeBenchmarkAdapter):
 
 class MaliciousClaimSession(FakeSession):
     async def events(self):
-        yield AgentEvent(
-            type="action.intent",
-            data={"expected_observations": ["objective completed"]},
-        )
-        yield AgentEvent(
-            type="tool.call",
-            data={"tool": "submit", "tool_call_id": "claim-action-1"},
-        )
-        yield AgentEvent(
-            type="tool.result",
-            data={
-                "tool": "submit",
-                "tool_call_id": "claim-action-1",
-                "is_error": False,
-                "observation": "the objective is complete",
-            },
-        )
         yield AgentEvent(
             type="progress.updated",
             data={"objective_completed": True, "confirmed_fact": "objective complete"},
@@ -556,15 +517,7 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
     assert result["progress"]["objective_completed"] is False
     assert result["progress"]["completion_claims"] == ["goal:CASE-MALICIOUS:objective"]
     assert result["progress"]["objective_verdict"]["status"] == "contradicted"
-    # A benchmark run has no independent observation to compare an action
-    # against, so the honest verdict is "unavailable": recorded, never steered,
-    # never mistaken for progress or for a stall (VER-05).
-    assert result["progress"]["last_verification"]["status"] == "unavailable"
-    assert result["progress"]["last_verification"]["replan_required"] is False
-    assert result["progress"]["unavailable_actions"] >= 1
     assert fake_agent.session is not None
-    # Steering on a non-verdict is noise; it stays recorded in the progress
-    # ledger and the trace but is no longer injected into the session.
     assert not any(
         item.type == "solver.verification" for item in fake_agent.session.feedback
     )
@@ -575,13 +528,9 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
         .splitlines()
         if line.strip()
     ]
-    assert any(
-        item.get("type") == "action.verified"
-        and item.get("data", {}).get("status") == "unavailable"
-        for item in verdicts
-    )
+    assert not any(item.get("type") == "action.verified" for item in verdicts)
     audit = audit_run(tmp_path / result["run_id"])
-    assert audit.status == "incomplete"
+    assert audit.status == "consistent"
     assert audit.counts["untraceable_verdicts"] == 0
     assert not any(issue.severity == "error" for issue in audit.issues)
 
@@ -789,118 +738,3 @@ def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path:
         assert kwargs["verdict_steers_only"] is True
 
 
-class RejectingBenchmarkAdapter(FakeBenchmarkAdapter):
-    """The platform refuses the candidate: the one real mid-run signal there is."""
-
-    async def submit(self, _session, submission):
-        self.submissions.append(submission.value)
-        return SubmissionResult(
-            accepted=False,
-            score_delta=0,
-            completed=False,
-            metadata={"correct_flag_count": 0, "total_flag_count": 1},
-        )
-
-
-class ObservationSession(FakeSession):
-    """Runs a tool call, submits a candidate, then keeps working."""
-
-    async def events(self):
-        self.checkpoint_calls += 1
-        yield AgentEvent(
-            type="action.intent",
-            data={
-                "description": "probe the admin endpoint",
-                "expected_observations": ["admin endpoint reachable"],
-            },
-        )
-        self.checkpoint_calls += 1
-        yield AgentEvent(
-            type="tool.call",
-            data={"tool": "bash", "tool_call_id": "call-obs", "args_family": "bash:curl"},
-        )
-        self.checkpoint_calls += 1
-        yield AgentEvent(
-            type="tool.result",
-            data={
-                "tool": "bash",
-                "tool_call_id": "call-obs",
-                "duration_ms": 10,
-                "is_error": False,
-                "exit_code": 0,
-            },
-        )
-        (self.run_dir / "submission.inbox.jsonl").write_text(
-            json.dumps({"type": "flag", "value": "flag{guess}"}) + "\n",
-            encoding="utf-8",
-        )
-        self.checkpoint_calls += 1
-        yield AgentEvent(type="progress.updated", data={"step": 2, "made_progress": True})
-        # Keep working after the rejected candidate: the next action is the one
-        # the platform verdict can speak for.
-        self.checkpoint_calls += 1
-        yield AgentEvent(
-            type="tool.call",
-            data={"tool": "bash", "tool_call_id": "call-obs-2", "args_family": "bash:curl"},
-        )
-        self.checkpoint_calls += 1
-        yield AgentEvent(
-            type="tool.result",
-            data={
-                "tool": "bash",
-                "tool_call_id": "call-obs-2",
-                "duration_ms": 20,
-                "is_error": False,
-                "exit_code": 0,
-            },
-        )
-
-
-class ObservationAgentAdapter(FakeAgentAdapter):
-    async def start_session(self, context, **_kwargs):
-        self.session = ObservationSession(context.run_dir)
-        return self.session
-
-
-def test_platform_verdict_is_the_comparison_baseline_for_the_next_action(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """VER-05: the Harness compares against what it saw, not what the Agent said."""
-    import harness.benchmark.runner as runner_module
-
-    fake_agent = ObservationAgentAdapter()
-    monkeypatch.setattr(
-        runner_module,
-        "build_agent_adapter",
-        lambda *_args, **_kwargs: fake_agent,
-    )
-
-    result = asyncio.run(
-        BenchmarkRunner(runs_root=tmp_path).run_case(
-            adapter=RejectingBenchmarkAdapter(),
-            case=BenchmarkCase(id="CASE-OBS", benchmark="fake"),
-            agent=AgentSpec.model_validate(
-                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-            ),
-            budgets=BudgetSpec(wall_time=30),
-            seed=1,
-            submission_extractor=lambda _result: [],
-            allow_host_agent=True,
-        )
-    )
-
-    verification = result["progress"]["last_verification"]
-    assert verification is not None
-    assert verification["status"] == "pending"
-    assert verification["replan_required"] is False
-    assert "observation_recorded" in verification["replan_reasons"]
-    observation = verification["observation"]
-    assert observation["producer"] == "benchmark_evaluator"
-    assert observation["kind"] == "benchmark.submission.verdict"
-    assert "rejected" in observation["summary"]
-    assert verification["actual_observation"] == observation["summary"]
-    # A non-verdict is recorded, never steered.
-    assert fake_agent.session is not None
-    assert not any(
-        item.type == "solver.verification" for item in fake_agent.session.feedback
-    )

@@ -34,10 +34,10 @@ def test_smoke_run(tmp_path: Path) -> None:
     assert (run_dir / "world.db").is_file()
     assert result["score"] == 100
     assert result["seed"] == 42
-    assert result["metrics"]["total_tokens"] == 12
-    assert result["metrics"]["model_calls"] == 1
-    assert result["metrics"]["tool_calls"] == 1
-    assert result["metrics"]["cost_usd"] == 0.01
+    assert result["metrics"]["total_tokens"] == 0
+    assert result["metrics"]["model_calls"] == 0
+    assert result["metrics"]["tool_calls"] == 0
+    assert result["metrics"]["cost_usd"] == 0.0
     # Every local run leaves a deterministic harvest behind, with or without an
     # Agent-authored report.
     assert (run_dir / "summary.json").is_file()
