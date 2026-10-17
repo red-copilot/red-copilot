@@ -63,8 +63,11 @@ asks for: it grants nothing, and the Harness-side `tool.slow` event records ever
 still runs long. It adds no network
 capability, cannot sign verdicts, never reads credentials or the run root, and everything it
 writes is Agent-side output, not evidence. The default is off; when off, behaviour is
-unchanged. Other extension sources stay disabled unless `pi.extensions: true` is set
-explicitly, which the competition profile does not do.
+unchanged. The competition profiles (`agents/examples/pi-tsec-opencode.yaml`,
+`agents/examples/zc-offensive.yaml`) opt in: the 2026-10-16 sweep lost 19 tool calls to
+180s-plus waits and one command held 927s of an 1800s window. Every other config keeps the
+default. Other extension sources stay disabled unless `pi.extensions: true` is set
+explicitly, which no config does.
 
 ## Process and network boundary
 

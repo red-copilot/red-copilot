@@ -56,7 +56,10 @@ file. The extension has three hooks: oversized `tool_result` output is spilled i
 workspace with a 600-character preview kept in context, `session_before_compact`
 produces a summary carrying the Harness retention checklist (any failure falls back to
 Pi's default compaction), and `tool_call` clamps the requested per-command timeout to
-180s so one blocking command cannot hold the run window. Default is false; when false, behaviour is unchanged. Keep
+180s so one blocking command cannot hold the run window. Default is false; when false, behaviour
+is unchanged. The competition profiles (`agents/examples/pi-tsec-opencode.yaml`,
+`agents/examples/zc-offensive.yaml`) set it true; the local, demo and other example agents keep
+the default. Keep
 `extensions: false` unless an evaluation explicitly accepts other extension sources: the
 competition profile only enables the Harness-authored file. The execution boundary for the
 extension is documented in [security/execution-boundary.md](security/execution-boundary.md).

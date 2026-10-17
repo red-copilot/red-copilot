@@ -19,6 +19,9 @@ pi:
   env_passthrough: [OPENAI_API_KEY]
   system_prompt_file: prompts/zc-solver.md
   cap_add: [NET_RAW]
+  # RUN-06: same context hooks as the TSec competition config; the TSec sweep's
+  # 180s-plus tool calls set the motivation.
+  harness_extension: true
 
 # Read-only markdown catalogues mounted at /knowledge/<name>. The Agent reads
 # them with its own file tools; nothing here is parsed or ranked by the Harness.

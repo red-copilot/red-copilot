@@ -31,3 +31,7 @@ pi:
   themes: false
   mcp: false
   offline: true
+  # RUN-06: the Harness context extension clamps one bash call to 180s and spills
+  # oversized tool output, which the 2026-10-16 sweep needed (19 calls over 180s,
+  # longest 927s of an 1800s window). Only the competition configs opt in.
+  harness_extension: true
