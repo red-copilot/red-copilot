@@ -1118,7 +1118,8 @@ def test_sweep_resume_skips_locally_solved_cases_and_seeds_the_rest(
         )
     )
 
-    assert [item["benchmark"]["case_id"] for item in results] == ["WEB-002", "WEB-003"]
+    # Fair ordering may reorder equal/solved-history cases; the set is what matters.
+    assert {item["benchmark"]["case_id"] for item in results} == {"WEB-002", "WEB-003"}
     payload = json.loads(summary.read_text(encoding="utf-8"))
     assert payload["skipped"] == [
         {"case_id": "WEB-001", "run_id": "tsec_WEB-001_deadbeef", "reason": "local-success"}
@@ -1785,3 +1786,55 @@ def test_pass_boundary_reaps_leaked_challenge_instances(monkeypatch) -> None:
 
     assert reaped == 1
     assert adapter._sessions[session.id].closed is True
+
+
+def test_case_budget_scales_with_difficulty() -> None:
+    base = BudgetSpec(wall_time=1800)
+
+    def case(difficulty: str) -> BenchmarkCase:
+        return BenchmarkCase(
+            id="WEB-001",
+            benchmark="tsec",
+            domain="web",
+            difficulty=difficulty,
+            metadata={"is_completed": False},
+        )
+
+    assert tsec_adapter._case_budget(case("hard"), base).wall_time == 3600
+    # Non-hard difficulties keep the declared budget untouched.
+    assert tsec_adapter._case_budget(case("medium"), base).wall_time == 1800
+    assert tsec_adapter._case_budget(case("easy"), base).wall_time == 1800
+    assert tsec_adapter._case_budget(case("unknown-level"), base).wall_time == 1800
+    # An explicit operator ceiling still wins over the difficulty map.
+    assert (
+        tsec_adapter._case_budget(case("hard"), base, ceiling=1800).wall_time == 1800
+    )
+
+
+def test_least_attempted_cases_are_dispatched_first(monkeypatch, tmp_path: Path) -> None:
+    _reset_probe()
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", _MultiCaseClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _ConcurrencyProbeRunner)
+
+    # WEB-001 already has two attempts in this runs root; the others have none.
+    for attempt in range(2):
+        previous = tmp_path / f"tsec_WEB-001_{attempt:08x}"
+        (previous / "agent-workspace" / "notes").mkdir(parents=True)
+        (previous / "agent-workspace" / "notes" / "n.md").write_text("x", encoding="utf-8")
+
+    asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=60),
+            runs_root=tmp_path,
+            run_all=True,
+            concurrency=3,
+            max_passes=1,
+            resume=False,
+        )
+    )
+
+    # Zero-attempt cases were dispatched before the twice-attempted one.
+    assert _ConcurrencyProbeRunner.calls[-1] == "WEB-001"
+    assert set(_ConcurrencyProbeRunner.calls[:2]) == {"WEB-002", "WEB-003"}

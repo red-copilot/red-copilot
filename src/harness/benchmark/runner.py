@@ -34,7 +34,7 @@ from ..runtime.executors import (
     prepare_executor_directories,
     prepare_shared_findings,
 )
-from ..agent_workspace import seed_notes_from_summary, sync_agent_workspace
+from ..agent_workspace import seed_notes_from_attempt, sync_agent_workspace
 from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
 from ..runtime.evidence import persist_objective_verdict
 from ..runtime.lifecycle import RunLifecycle, resolve_run_status
@@ -561,7 +561,7 @@ class BenchmarkRunner:
             prepare_executor_directories(plan)
             if seed_notes_from is not None:
                 for planned_session in plan.sessions:
-                    seed_notes_from_summary(
+                    seed_notes_from_attempt(
                         workspace=planned_session.workspace,
                         previous_run_dir=seed_notes_from,
                     )

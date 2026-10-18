@@ -65,6 +65,53 @@ def _is_instance_conflict(exc: BaseException) -> bool:
 # cases, cool the whole dispatch down before trying the next one.
 CONFLICT_STREAK_LIMIT = 2
 CONFLICT_COOLDOWN_SECONDS = 120.0
+# Per-difficulty wall time. Multi-stage relays need a foothold, lateral
+# movement and a final objective; a flat budget gives every stage the same
+# time and leaves the hard ones cut off mid-chain. Easy cases pay for that,
+# so they get less and recycle faster.
+# Only hard challenges get more than the declared budget: a relay genuinely
+# needs the extra stage time. Every other difficulty keeps the operator's
+# declared per-case budget untouched.
+DIFFICULTY_WALL_SECONDS = {
+    "hard": 3600,
+}
+
+
+def _attempt_counts(runs_root: str | Path, benchmark: str = "tsec") -> dict[str, int]:
+    """How many previous attempts each case already has in this runs root."""
+    counts: dict[str, int] = {}
+    root = Path(runs_root)
+    if not root.is_dir():
+        return counts
+    for entry in root.iterdir():
+        if not entry.is_dir() or not entry.name.startswith(f"{benchmark}_"):
+            continue
+        case_id = _case_from_run_id(entry.name)
+        if case_id is None:
+            continue
+        counts[case_id] = counts.get(case_id, 0) + 1
+    return counts
+
+
+def _case_budget(
+    case: BenchmarkCase,
+    effective: BudgetSpec,
+    *,
+    ceiling: int | None = None,
+) -> BudgetSpec:
+    difficulty = str(case.difficulty or "").strip().lower()
+    target = DIFFICULTY_WALL_SECONDS.get(difficulty)
+    if target is None:
+        return effective
+    # The declared budget stays authoritative: difficulty may extend a case
+    # (a hard relay needs more than the flat default) but never shorten what
+    # the operator asked for.
+    target = max(target, effective.wall_time)
+    if ceiling is not None:
+        target = min(target, ceiling)
+    if target == effective.wall_time:
+        return effective
+    return effective.model_copy(update={"wall_time": target})
 
 
 # A pass-boundary discover that hits a transient network blip must not be
@@ -269,7 +316,12 @@ def _latest_attempt_summary(
     case_id: str,
     benchmark: str = "tsec",
 ) -> Path | None:
-    """Newest previous attempt directory for a case that left an Agent report."""
+    """Newest previous attempt directory that left a report *or* notes.
+
+    Working notes matter as much as the final report: a session cut by its
+    budget may never write agent.summary.md, and then a notes-only attempt is
+    still the best continuation point.
+    """
     root = Path(runs_root)
     if not root.is_dir():
         return None
@@ -279,13 +331,16 @@ def _latest_attempt_summary(
             continue
         if _case_from_run_id(entry.name) != case_id:
             continue
-        summary = entry / "agent-workspace" / "agent.summary.md"
-        if not summary.is_file():
+        workspace = entry / "agent-workspace"
+        markers = [workspace / "agent.summary.md", *sorted((workspace / "notes").glob("*.md"))]
+        existing = [marker for marker in markers if marker.is_file()]
+        if not existing:
             continue
         try:
-            candidates.append((summary.stat().st_mtime, entry))
+            newest = max(marker.stat().st_mtime for marker in existing)
         except OSError:
             continue
+        candidates.append((newest, entry))
     if not candidates:
         return None
     return max(candidates, key=lambda item: item[0])[1]
@@ -865,7 +920,11 @@ async def run_tsec_challenges(
                             flush=True,
                         )
                         await asyncio.sleep(min(delay, 300.0))
-                    case_budgets = effective_budgets
+                    case_budgets = _case_budget(
+                        case,
+                        effective_budgets,
+                        ceiling=max_wall_time_seconds,
+                    )
                     if total_wall_time is not None:
                         remaining = total_wall_time - (time.monotonic() - started_at)
                         if remaining <= DISPATCH_FLOOR_SECONDS + FINALIZE_GRACE_SECONDS:
@@ -983,6 +1042,19 @@ async def run_tsec_challenges(
                     ]
                 if not pass_cases:
                     break
+                # Fair share: cases with the fewest prior attempts go first,
+                # and each pass rotates the start so platform order (which
+                # otherwise pins the same head cases) cannot monopolise the
+                # retry budget. Observed: one relay case took five full
+                # attempts while tail cases waited.
+                attempts = _attempt_counts(runs_root, pass_cases[0].benchmark)
+                indexed = list(enumerate(pass_cases))
+                indexed.sort(key=lambda item: (attempts.get(item[1].id, 0), item[0]))
+                ordered = [case for _index, case in indexed]
+                if ordered:
+                    offset = pass_index % len(ordered)
+                    ordered = ordered[offset:] + ordered[:offset]
+                pass_cases = ordered
                 if concurrency == 1:
                     pass_results = []
                     dispatch_closed = False

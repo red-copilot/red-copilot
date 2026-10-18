@@ -17,7 +17,10 @@ _HARNESS_VIEWS = ("world.context.txt", "progress.json")
 _CONTAINER_UID = 0
 _CONTAINER_GID = 0
 PRIOR_SUMMARY_NAME = "prior-summary.md"
+PRIOR_NOTES_DIRNAME = "prior-notes"
 MAX_PRIOR_SUMMARY_BYTES = 256 * 1024
+MAX_PRIOR_NOTES_FILES = 20
+MAX_PRIOR_NOTE_BYTES = 64 * 1024
 
 
 def create_agent_workspace(run_dir: Path) -> Path:
@@ -58,6 +61,67 @@ def seed_notes_from_summary(*, workspace: Path, previous_run_dir: Path) -> Path:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
     return target
+
+
+def seed_notes_from_attempt(*, workspace: Path, previous_run_dir: Path) -> list[Path]:
+    """Carry a previous attempt's working notes into this attempt.
+
+    The final summary only exists when the previous session reached its
+    finalize step; the notes the Agent wrote while working are the real
+    long-term memory across retries (stage ledger, credentials, ruled-out
+    paths). Every note the previous attempt wrote is copied into
+    ``notes/prior-notes/`` read-only-in-spirit; the summary keeps its
+    ``prior-summary.md`` name. Missing pieces are skipped, never fatal.
+    """
+    notes = workspace / "notes"
+    notes.mkdir(mode=0o700, exist_ok=True)
+    written: list[Path] = []
+    try:
+        written.append(
+            seed_notes_from_summary(
+                workspace=workspace, previous_run_dir=previous_run_dir
+            )
+        )
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+    workspace_root = (
+        previous_run_dir
+        if (previous_run_dir / "notes").is_dir()
+        else previous_run_dir / "agent-workspace"
+    )
+    source_notes = workspace_root / "notes"
+    if not source_notes.is_dir():
+        return written
+    target_dir = notes / PRIOR_NOTES_DIRNAME
+    target_dir.mkdir(mode=0o700, exist_ok=True)
+    copied = 0
+    for source in sorted(source_notes.glob("*.md")):
+        if copied >= MAX_PRIOR_NOTES_FILES:
+            break
+        if source.is_symlink() or not source.is_file():
+            continue
+        try:
+            text = read_regular_text(source, max_bytes=MAX_PRIOR_NOTE_BYTES)
+        except (OSError, ValueError):
+            continue
+        destination = target_dir / f"{copied + 1:02d}-{source.name}"
+        if destination.is_symlink():
+            continue
+        descriptor, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=target_dir)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temp_name, 0o600)
+            os.replace(temp_name, destination)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+        written.append(destination)
+        copied += 1
+    return written
 
 
 def _previous_summary_path(previous_run_dir: Path) -> Path:
