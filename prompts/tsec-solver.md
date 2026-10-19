@@ -70,6 +70,8 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 需要在内网横向、保持持久控制时，用内置的 VShell MCP 工具（27 个）：
 
 1. `add_listener`（mode=tcp，记下 vkey/salt）——在本题的 agent 容器上开监听；
+   **listen_addr 必须写 `0.0.0.0:<端口>` 或 `hostname -I` 得到的容器 IP，不要写 127.0.0.1**，
+   否则靶机上的客户端无法回连；
 2. `generate_client`（kind=stageless 或 listen，arch=linux/amd64，save_path 到工作目录）；
 3. 用你已经拿到的 RCE/webshell 把生成的客户端投递到靶机并执行（base64 分块上传或 wget 均可）；
 4. `list_hosts` 拿到 `host_id`，之后 `execute_command` 直接在靶机执行命令、`list_directory`/`read_file` 取文件；
