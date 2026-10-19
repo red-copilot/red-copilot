@@ -64,10 +64,19 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         smbclient \
         impacket-scripts \
         enum4linux \
+        netexec \
+        certipy-ad \
+        bloodhound.py \
+        chisel \
+        proxychains4 \
+        sshpass \
         snmp \
         default-mysql-client \
+        postgresql-client \
         redis-tools \
         sqlite3 \
+        awscli \
+        kubectl \
         john \
         hashcat \
         binwalk \
@@ -130,6 +139,7 @@ COPY agents /opt/red-harness/agents
 COPY prompts /opt/red-harness/prompts
 COPY knowledge /opt/red-harness/knowledge
 COPY docker/hosted/wordlists /opt/red-harness/wordlists
+COPY docker/hosted/proxychains.conf /opt/red-harness/proxychains.conf
 COPY docker/hosted/start-vshell.sh /opt/red-harness/start-vshell.sh
 
 # VShell console + vshell-mcp bridge (vendor binaries, gitignored; must be

