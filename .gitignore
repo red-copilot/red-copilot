@@ -18,3 +18,6 @@ agent*/
 docker/hosted/vshell/v_linux_amd64
 docker/hosted/vshell/vshell-mcp
 docker/hosted/vshell/conf/
+
+# nuclei templates: fetched locally, not committed
+docker/hosted/nuclei-templates/

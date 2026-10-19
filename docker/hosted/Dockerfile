@@ -66,6 +66,12 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         enum4linux \
         netexec \
         certipy-ad \
+        exploitdb \
+        nuclei \
+        radare2 \
+        checksec \
+        patchelf \
+        ropper \
         bloodhound.py \
         chisel \
         proxychains4 \
@@ -145,13 +151,25 @@ COPY docker/hosted/start-vshell.sh /opt/red-harness/start-vshell.sh
 # VShell console + vshell-mcp bridge (vendor binaries, gitignored; must be
 # present in the local build context). mcp-remote bridges the bridge's SSE
 # endpoint to the stdio transport Pi supports.
+# Templates are fetched locally (gitignored): clone
+# https://github.com/projectdiscovery/nuclei-templates into
+# docker/hosted/nuclei-templates before building.
+COPY docker/hosted/nuclei-templates /opt/nuclei-templates
 COPY docker/hosted/vshell /opt/vshell
 RUN chmod +x /opt/red-harness/start-vshell.sh \
     && test -x /opt/vshell/v_linux_amd64 \
     && test -x /opt/vshell/vshell-mcp \
     && test -f /opt/vshell/conf/setting.conf \
     && npm install -g --ignore-scripts mcp-remote@0.15.1 \
-    && command -v mcp-remote
+    && command -v mcp-remote \
+    && ln -sfn /opt/nuclei-templates /root/nuclei-templates \
+    && printf '%s\n' '#!/bin/sh' \
+        'case " $* " in' \
+        '  *" -t "*|*" -templates "*) exec /usr/bin/nuclei -duc "$@" ;;' \
+        '  *) exec /usr/bin/nuclei -duc -t /opt/nuclei-templates "$@" ;;' \
+        'esac' > /usr/local/bin/nuclei \
+    && chmod +x /usr/local/bin/nuclei \
+    && nuclei -version >/dev/null
 COPY docker/hosted/entrypoint.sh /opt/red-harness/entrypoint.sh
 
 # Fail the build when a hosted agent references a file the image does not

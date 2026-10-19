@@ -55,6 +55,11 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **Windows/AD 横向**：`netexec`（nxc）、`impacket-*`、`certipy-ad`、`bloodhound.py`、
   `kerbrute` 不在镜像内时用 `impacket-GetNPUsers` 枚举；SMB 共享用 `smbclient`。
 - **云/K8s 题**：`kubectl`、`awscli` 已装；先找 kubeconfig/凭据，再枚举工作负载与 Secret。
+- **已知 CVE / 指纹题**：`nuclei -u <url> -t /opt/nuclei-templates -severity critical,high,medium -silent`
+  （模板离线内置，不要 `-update-templates`）；`searchsploit <产品> <版本>` 查离线 PoC，
+  `searchsploit -m <EDB-ID>` 取到当前目录后按需改写。先确认版本指纹（`whatweb`/响应头/`/version`）再查。
+- **Java 反序列化**：镜像未装 JDK；优先用 Python/curl 构造 gadget 链，或从 `searchsploit` 找现成 PoC。
+- **二进制/逆向**：`checksec` 看保护、`r2 -A` 静态分析、`ROPgadget` 找 gadget、`patchelf` 改解释器/依赖。
 - **逐阶段验证**：每阶段产出是下一阶段的输入（凭据、token、内部 URL、文件），验证成立再推进。
 - **最后才提取目标**：链路走到目标服务后 flag 才可得。答案必须来自目标服务本身的输出，不能是入口处的推测。
 - **阶段账本**：`阶段 → 状态(完成/阻塞) → 证据 → 下一步`。会话被切时，账本就是交接单。

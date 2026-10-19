@@ -42,5 +42,8 @@ Coverage is a property of your wordlists and tools, not of the target.
 | Credentials | `hydra`, `john`, `hashcat` | `/usr/share/wordlists/rockyou.txt` |
 | AD / SMB | `netexec`, `impacket-*`, `certipy-ad`, `bloodhound.py`, `smbclient`, `rpcclient` | — |
 | Kerberos users | `impacket-GetNPUsers`, `kerbrute` (if present) | — |
+| Known-CVE scanning | `nuclei -t /opt/nuclei-templates -severity critical,high,medium` | templates are local; never update offline |
+| Exploit lookup | `searchsploit <product> <version>`, `searchsploit -m <edb-id>` | offline exploitdb |
+| Binary hardening / RE | `checksec`, `r2 -A`, `ROPgadget`, `patchelf`, `objdump` | — |
 | Cloud / K8s | `awscli`, `kubectl` | credentials from the target |
 | Through a tunnel | `proxychains4 -f /opt/red-harness/proxychains.conf <tool>` | socks5 in the config's last line |
