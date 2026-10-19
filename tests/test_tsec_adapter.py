@@ -747,10 +747,10 @@ def test_run_tsec_challenges_stops_when_a_pass_scores_nothing(
         )
     )
 
-    # Two consecutive zero-score passes stop the loop; the first one alone
-    # would have been retried (transient-burst tolerance).
-    assert _RetryFlipClient.discover_calls == 2
-    assert len(results) == 4
+    # A scoreless pass no longer resigns: the endgame keeps retrying until the
+    # pass budget is spent (article lesson: never stop while attempts remain).
+    assert _RetryFlipClient.discover_calls == 5
+    assert len(results) == 10
 
 
 class _FlakyCloseClient(FakeRunnerClient):

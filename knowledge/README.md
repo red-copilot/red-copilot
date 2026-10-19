@@ -13,6 +13,8 @@ category pages list which families to consider and where the bulk corpora live.
   asset, hypothesis, verification, submission, and when to abandon a path.
 - [evidence-and-reporting.md](methodology/evidence-and-reporting.md) — what
   counts as evidence, how to record it, and what a minimal report contains.
+- [discovery-coverage.md](methodology/discovery-coverage.md) — why a miss is
+  not a negative, flag-path priors, and the tool matrix for expanding coverage.
 - [multi-stage-chains.md](methodology/multi-stage-chains.md) — foothold,
   persistence, lateral movement and pivot for relay-style targets; how to
   resume a blocked chain from notes instead of re-running recon.

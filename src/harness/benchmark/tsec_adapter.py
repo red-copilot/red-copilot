@@ -1114,13 +1114,15 @@ async def run_tsec_challenges(
                 )
                 if completed_now == 0:
                     zero_score_passes += 1
-                    if zero_score_passes >= 2:
-                        print(
-                            "[tsec] two consecutive scoreless passes; stopping",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        break
+                    # Keep the endgame alive: a scoreless pass is a signal to
+                    # change the approach, not to resign while the window and
+                    # the pass budget still allow another attempt.
+                    print(
+                        f"[tsec] scoreless pass {zero_score_passes}; "
+                        "continuing the endgame",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 else:
                     zero_score_passes = 0
     except TSecPlatformError as exc:

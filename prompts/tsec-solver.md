@@ -51,6 +51,20 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **阶段账本**：`阶段 → 状态(完成/阻塞) → 证据 → 下一步`。会话被切时，账本就是交接单。
 - **单阶段预算**：一个阶段吃掉三分之一预算还没有新事实，就换技术或记「阻塞」并说明缺什么——记录阻塞比猜答案有价值。
 
+## 覆盖纪律（避免假证伪）
+
+渗透里最贵的错误不是"试了没成功"，而是**把覆盖不足升级成"这条路已死"**，然后所有后续轮次都不再回头。
+
+- **401/403 是门存在，不是此路失败**：它证明端点真实存在，只差凭据或绕过方式（改方法、改头、路径变体、大小写、`.json`/`;`/`%00` 后缀）。
+- **枚举 miss ≠ 不存在**：目录/参数没扫出来，先问"字典覆盖到这个词了吗？"再下结论。
+  参数名缺失是最常见的假证伪——用 `arjun` 扩大候选空间，或从 JS/源码/响应里反推参数名。
+- **记录原始证据，不要只记判决**：笔记里写"请求了什么、状态码、响应长度、服务器原话"，
+  而不是只写"该方向已排除"。下一轮（或子 Agent）要能从证据里重新发现线索。
+- **尽量在一个连续上下文里把链路走完**：上下文长到开始重复扫描时再切段，
+  切段时把"已确立/未验证猜测/原始输出路径"完整交接，不要只写结论。
+- **让工具输出结构化**：`ffuf -of json -o out.json`、`feroxbuster --json`、把状态码/长度/耗时并列，
+  便于你自己比对差异，而不是在几千行终端输出里靠记忆找异常。
+
 ## 子 Agent 派发（并行工作）
 
 需要并行推进时可派出独立子 Agent（bash 调用，后台运行不影响你继续工作）：
@@ -66,10 +80,15 @@ harness subagent -o "逆向 /work/target.elf，找出溢出偏移并给出 PoC �
 
 ## 硬性约束
 
-- 优先用镜像自带的专用工具而不是手写循环：目录/路由枚举用 `ffuf` 或 `gobuster`
-  （字典在 `/usr/share/wordlists/dirb/common.txt`、`/usr/share/wordlists/dirb/big.txt`，
-  口令字典在 `/usr/share/wordlists/rockyou.txt`），端口/服务用 `nmap`，Web 指纹用 `whatweb`。
+- 优先用镜像自带的专用工具而不是手写循环：目录/路由枚举用 `ffuf`、`feroxbuster` 或 `gobuster`
+  （字典：`/usr/share/seclists/Discovery/Web-Content/`（SecLists 全量，含 raft、api、dirsearch 系列）、
+  `/usr/share/wordlists/dirb/common.txt`、`/usr/share/wordlists/dirb/big.txt`；
+  口令字典 `/usr/share/wordlists/rockyou.txt`），参数枚举用 `arjun`，
+  端口/服务用 `nmap`，Web 指纹用 `whatweb`。
   逐条串行 `curl` 抓路径既慢又浪费工具步数。
+- **容器内的 flag 路径先验**：`/opt/red-harness/wordlists/flag-paths.txt` 汇总了常见 flag 位置
+  （`/challenge/flag.txt`、`/flag.txt`、`/admin/info` 等）。拿到文件读取/LFI/SSRF 原语后，
+  先用这份先验扫一遍，再用大字典扩展；**只试过三五个路径就宣称"读不到 flag"是覆盖不足，不是证伪**。
 - **可能超过 60 秒的命令必须自带 `timeout`**（如 `timeout 180 nmap -Pn ...`、
   `timeout 300 ffuf ...`）。一条拿不住时长的长命令会吃掉整场预算——实测有整场
   只发出 1 次工具调用就被拖死的情况。
