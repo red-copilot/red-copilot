@@ -21,3 +21,6 @@ docker/hosted/vshell/conf/
 
 # nuclei templates: fetched locally, not committed
 docker/hosted/nuclei-templates/
+
+# java exploitation jars: local build context only
+docker/hosted/java/*.jar

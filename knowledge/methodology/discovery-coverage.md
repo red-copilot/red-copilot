@@ -45,5 +45,6 @@ Coverage is a property of your wordlists and tools, not of the target.
 | Known-CVE scanning | `nuclei -t /opt/nuclei-templates -severity critical,high,medium` | templates are local; never update offline |
 | Exploit lookup | `searchsploit <product> <version>`, `searchsploit -m <edb-id>` | offline exploitdb |
 | Binary hardening / RE | `checksec`, `r2 -A`, `ROPgadget`, `patchelf`, `objdump` | — |
+| Java deserialization | `ysoserial <Gadget> '<cmd>'`, `marshalsec marshalsec.jndi.LDAPRefServer ...` | JDK 11 runtime for ysoserial |
 | Cloud / K8s | `awscli`, `kubectl` | credentials from the target |
 | Through a tunnel | `proxychains4 -f /opt/red-harness/proxychains.conf <tool>` | socks5 in the config's last line |

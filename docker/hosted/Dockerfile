@@ -72,6 +72,7 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         checksec \
         patchelf \
         ropper \
+        openjdk-11-jdk-headless \
         bloodhound.py \
         chisel \
         proxychains4 \
@@ -147,6 +148,7 @@ COPY knowledge /opt/red-harness/knowledge
 COPY docker/hosted/wordlists /opt/red-harness/wordlists
 COPY docker/hosted/proxychains.conf /opt/red-harness/proxychains.conf
 COPY docker/hosted/start-vshell.sh /opt/red-harness/start-vshell.sh
+COPY docker/hosted/ysoserial.sh /usr/local/bin/ysoserial
 
 # VShell console + vshell-mcp bridge (vendor binaries, gitignored; must be
 # present in the local build context). mcp-remote bridges the bridge's SSE
@@ -154,6 +156,7 @@ COPY docker/hosted/start-vshell.sh /opt/red-harness/start-vshell.sh
 # Templates are fetched locally (gitignored): clone
 # https://github.com/projectdiscovery/nuclei-templates into
 # docker/hosted/nuclei-templates before building.
+COPY docker/hosted/java /opt/java
 COPY docker/hosted/nuclei-templates /opt/nuclei-templates
 COPY docker/hosted/vshell /opt/vshell
 RUN chmod +x /opt/red-harness/start-vshell.sh \
@@ -169,7 +172,11 @@ RUN chmod +x /opt/red-harness/start-vshell.sh \
         '  *) exec /usr/bin/nuclei -duc -t /opt/nuclei-templates "$@" ;;' \
         'esac' > /usr/local/bin/nuclei \
     && chmod +x /usr/local/bin/nuclei \
-    && nuclei -version >/dev/null
+    && nuclei -version >/dev/null \
+    && printf '%s\n' '#!/bin/sh' \
+        'exec java -cp /opt/java/marshalsec-all.jar "$@"' > /usr/local/bin/marshalsec \
+    && chmod +x /usr/local/bin/marshalsec \
+    && java -version 2>&1 | head -1
 COPY docker/hosted/entrypoint.sh /opt/red-harness/entrypoint.sh
 
 # Fail the build when a hosted agent references a file the image does not
