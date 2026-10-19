@@ -27,6 +27,13 @@ from .trace import TraceRecorder
 # model through the platform gateway, so the provider written into models.json
 # uses this id and the baseUrl the agent spec declares.
 HOSTED_PROVIDER_ID = "hosted"
+# The entrypoint starts vshell-mcp on loopback; mcp-remote bridges its SSE
+# endpoint to the stdio transport Pi supports (Pi rejects SSE directly).
+VSHELL_MCP_URL = "http://127.0.0.1:19080/sse"
+VSHELL_MCP_DESCRIPTION = (
+    "VShell C2 control for authorized benchmark targets: list hosts, run "
+    "commands, manage files, listeners and SOCKS/HTTP tunnels."
+)
 
 
 class HostPiAdapter(PiAdapter):
@@ -84,6 +91,28 @@ class HostPiAdapter(PiAdapter):
             )
         return agent_dir
 
+    def _write_mcp_config(self, agent_dir: Path) -> None:
+        """Expose the local VShell MCP bridge to Pi when MCP is enabled."""
+        if not self.pi.mcp:
+            return
+        config = {
+            "mcpServers": {
+                "vshell": {
+                    "command": "mcp-remote",
+                    "args": [
+                        os.environ.get("VSHELL_MCP_URL", VSHELL_MCP_URL)
+                    ],
+                    "exposure": "direct",
+                    "timeout": 120,
+                    "description": VSHELL_MCP_DESCRIPTION,
+                }
+            }
+        }
+        (agent_dir / "mcp.json").write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     def _hosted_command(self, task) -> list[str]:
         args = self._pi_args(task, gateway_enabled=False)
         if self.pi.models_base_url:
@@ -116,6 +145,7 @@ class HostPiAdapter(PiAdapter):
         stderr_path = run_dir / "agent.stderr.log"
         raw_path.write_text("", encoding="utf-8")
         agent_dir = self._prepare_hosted_models(run_dir)
+        self._write_mcp_config(agent_dir)
 
         env = os.environ.copy()
         env.update(self.spec.env)

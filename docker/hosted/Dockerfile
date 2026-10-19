@@ -130,6 +130,18 @@ COPY agents /opt/red-harness/agents
 COPY prompts /opt/red-harness/prompts
 COPY knowledge /opt/red-harness/knowledge
 COPY docker/hosted/wordlists /opt/red-harness/wordlists
+COPY docker/hosted/start-vshell.sh /opt/red-harness/start-vshell.sh
+
+# VShell console + vshell-mcp bridge (vendor binaries, gitignored; must be
+# present in the local build context). mcp-remote bridges the bridge's SSE
+# endpoint to the stdio transport Pi supports.
+COPY docker/hosted/vshell /opt/vshell
+RUN chmod +x /opt/red-harness/start-vshell.sh \
+    && test -x /opt/vshell/v_linux_amd64 \
+    && test -x /opt/vshell/vshell-mcp \
+    && test -f /opt/vshell/conf/setting.conf \
+    && npm install -g --ignore-scripts mcp-remote@0.15.1 \
+    && command -v mcp-remote
 COPY docker/hosted/entrypoint.sh /opt/red-harness/entrypoint.sh
 
 # Fail the build when a hosted agent references a file the image does not

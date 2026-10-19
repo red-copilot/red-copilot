@@ -65,6 +65,22 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **让工具输出结构化**：`ffuf -of json -o out.json`、`feroxbuster --json`、把状态码/长度/耗时并列，
   便于你自己比对差异，而不是在几千行终端输出里靠记忆找异常。
 
+## 多段题：VShell 工具链（mcp__vshell__*）
+
+需要在内网横向、保持持久控制时，用内置的 VShell MCP 工具（27 个）：
+
+1. `add_listener`（mode=tcp，记下 vkey/salt）——在本题的 agent 容器上开监听；
+2. `generate_client`（kind=stageless 或 listen，arch=linux/amd64，save_path 到工作目录）；
+3. 用你已经拿到的 RCE/webshell 把生成的客户端投递到靶机并执行（base64 分块上传或 wget 均可）；
+4. `list_hosts` 拿到 `host_id`，之后 `execute_command` 直接在靶机执行命令、`list_directory`/`read_file` 取文件；
+5. `add_tunnel`（mode=socks5）后，通过隧道访问靶机所在内网的其它服务。
+
+纪律：
+- 只对本题靶场目标使用；**绝不对平台自身、其他容器或非授权地址使用**。
+- `execute_command` 是真实非交互 shell，`vim`/`top`/`passwd` 之类会卡住；长命令加超时。
+- 某一步 30-60 秒没反应就回退到 bash + curl/ssh/chisel，不要卡在 MCP 上。
+- VShell 为多段题服务；单段 Web 题直接打，不要为了用工具而用工具。
+
 ## 子 Agent 派发（并行工作）
 
 需要并行推进时可派出独立子 Agent（bash 调用，后台运行不影响你继续工作）：

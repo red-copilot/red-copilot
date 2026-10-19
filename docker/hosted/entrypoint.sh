@@ -28,6 +28,8 @@ CONCURRENCY="${HARNESS_CONCURRENCY:-3}"
 # window lasts, so a single stuck attempt never forfeits a question.
 MAX_PASSES="${HARNESS_MAX_PASSES:-8}"
 
+/opt/red-harness/start-vshell.sh || echo "[vshell] bridge unavailable; continuing"
+
 exec harness tsec \
   --agent /opt/red-harness/agents/hosted/pi-deepseek.yaml \
   --knowledge-root /opt/red-harness/knowledge \

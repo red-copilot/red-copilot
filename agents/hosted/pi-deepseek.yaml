@@ -24,5 +24,5 @@ pi:
   skills: false
   prompt_templates: false
   themes: false
-  mcp: false
+  mcp: true
   offline: true

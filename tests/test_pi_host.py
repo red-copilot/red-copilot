@@ -302,3 +302,68 @@ def test_run_subagent_kills_at_timeout(monkeypatch, tmp_path: Path) -> None:
 
     assert result.timed_out is True
     assert "time limit" in result.text
+
+
+def test_hosted_pi_writes_vshell_mcp_config_when_mcp_enabled(monkeypatch, tmp_path: Path) -> None:
+    adapter = _adapter(monkeypatch, tmp_path, pi={"mcp": True})
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    class Process:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self):
+            return self.returncode
+
+    captured: dict = {}
+
+    def fake_popen(command, **kwargs):
+        captured["argv"] = command
+        Path(kwargs["cwd"], "agent.stdout.log").write_text("", encoding="utf-8")
+        return Process()
+
+    monkeypatch.setattr("harness.pi_host.subprocess.Popen", fake_popen)
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+
+    adapter.run(_context(task, tmp_path))
+
+    mcp_path = tmp_path / "run-host" / "pi-agent" / "mcp.json"
+    assert mcp_path.is_file()
+    config = json.loads(mcp_path.read_text(encoding="utf-8"))
+    server = config["mcpServers"]["vshell"]
+    assert server["command"] == "mcp-remote"
+    assert server["args"][0].endswith("/sse")
+    assert server["exposure"] == "direct"
+    # MCP enabled means no --no-mcp flag reaches Pi.
+    assert "--no-mcp" not in captured["argv"]
+
+
+def test_hosted_pi_omits_mcp_config_when_disabled(monkeypatch, tmp_path: Path) -> None:
+    adapter = _adapter(monkeypatch, tmp_path, pi={"mcp": False})
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    class Process:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self):
+            return self.returncode
+
+    captured: dict = {}
+
+    def fake_popen(command, **kwargs):
+        captured["argv"] = command
+        Path(kwargs["cwd"], "agent.stdout.log").write_text("", encoding="utf-8")
+        return Process()
+
+    monkeypatch.setattr("harness.pi_host.subprocess.Popen", fake_popen)
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+
+    adapter.run(_context(task, tmp_path))
+
+    assert not (tmp_path / "run-host" / "pi-agent" / "mcp.json").exists()
+    assert "--no-mcp" in captured["argv"]
