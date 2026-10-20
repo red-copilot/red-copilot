@@ -1,3 +1,5 @@
+![Red Copilot — AI-Native Offensive Security Engineering](https://raw.githubusercontent.com/red-copilot/.github/main/assets/red-copilot-banner.svg)
+
 # Red Harness
 
 Red Harness is a reproducible evaluation runtime for security agents. It keeps benchmark tasks, agents, target environments, model/tool access, budgets, verification, telemetry, and the control loop separate so results can be independently reproduced and compared.
