@@ -102,7 +102,10 @@ class HostPiAdapter(PiAdapter):
                     "args": [
                         os.environ.get("VSHELL_MCP_URL", VSHELL_MCP_URL)
                     ],
-                    "exposure": "direct",
+                    # Deferred keeps the 27 VShell tool schemas (~6.6k
+                    # tokens) out of every request; tool_search loads them on
+                    # demand. Most cases never touch VShell.
+                    "exposure": "deferred",
                     "timeout": 120,
                     "description": VSHELL_MCP_DESCRIPTION,
                 }

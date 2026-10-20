@@ -15,6 +15,10 @@ category pages list which families to consider and where the bulk corpora live.
   counts as evidence, how to record it, and what a minimal report contains.
 - [discovery-coverage.md](methodology/discovery-coverage.md) — why a miss is
   not a negative, flag-path priors, and the tool matrix for expanding coverage.
+- [exploitation-recipes.md](methodology/exploitation-recipes.md) — concrete
+  commands for tunnels, AD, known CVE, Java, reversing and cloud work.
+- [vshell-workflow.md](methodology/vshell-workflow.md) — VShell listener,
+  client, host, tunnel and command flow, including the deferred MCP exposure.
 - [multi-stage-chains.md](methodology/multi-stage-chains.md) — foothold,
   persistence, lateral movement and pivot for relay-style targets; how to
   resume a blocked chain from notes instead of re-running recon.

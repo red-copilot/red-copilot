@@ -15,6 +15,7 @@ pi:
     - bash
     - edit
     - write
+    - tool_search
   models_base_url: http://api.deepseek.com.tsecbench.gw
   models_api_key_env: DEEPSEEK_API_KEY
   system_prompt_file: /opt/red-harness/prompts/tsec-solver.md
