@@ -2,9 +2,9 @@
 
 # Red Harness · Python Runtime
 
-**A reproducible execution and evaluation runtime for security agents.**
+**A reproducible execution and evaluation runtime for security agents and benchmark tasks.**
 
-**面向安全智能体的可复现执行与评测运行时。** 通过明确的任务、环境、智能体、模型/工具、预算、状态与验证边界，让执行过程可审计、结果可复现。
+**面向安全智能体与基准任务的可复现执行、评测运行时。** 通过明确任务、环境、智能体、模型与工具、预算、状态和验证边界，让执行过程可审计、结果可复现。
 
 > **Engineering principle:** The Agent owns cognition; the Harness owns controlled execution, state, recovery, and verification boundaries.
 >
@@ -23,7 +23,7 @@ Task / Benchmark → Harness Runtime → Isolated Agent → Target Environment
                          └──── World State ← Verifier ←─────┘
 ```
 
-## Current capabilities
+## Capabilities · 当前能力
 
 Version 0.8 provides:
 
@@ -55,7 +55,7 @@ Version 0.8 provides:
 > [!WARNING]
 > Pi is the only Agent execution path and always runs inside a restricted Docker container over RPC. `verification.type: python` still executes a trusted host process under bubblewrap. `runtime: runsc` requires gVisor to be installed and registered with Docker.
 
-## Install
+## Installation · 安装
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -63,7 +63,7 @@ python -m pip install -e ".[dev]"
 
 Python 3.11+ is required. Docker is required for the Pi Agent, Docker verifiers, and Docker Compose benchmark environments. No host Pi installation is required: the Kali image pins Pi 1.0.4. See [`docs/pi.md`](docs/pi.md) for the full integration contract.
 
-## Local run
+## Quick Start · 快速运行
 
 ```bash
 docker build -t harness/pi-kali:local docker/pi-kali
@@ -72,7 +72,7 @@ harness run benchmarks/examples/hello/task.yaml \
   --seed 42
 ```
 
-## Pi Agent Adapter
+## Pi Agent Adapter · Pi 智能体适配器
 
 Example `agents/examples/pi.yaml`:
 
@@ -127,7 +127,7 @@ metrics. The raw Pi JSONL stream is retained in `agent.stdout.log`.
 
 By default, Pi runs in Docker with a read-only root filesystem, dropped Linux capabilities, bounded CPU/RAM/PIDs, read-only task mount, writable run workspace, and a fresh per-run `PI_CODING_AGENT_DIR`. Pi sessions are ephemeral, telemetry/update checks are disabled, project trust is denied, and project context/extensions/skills/MCP/templates/themes are not loaded unless explicitly enabled.
 
-### Pi through the Harness model Gateway
+### Route Pi Through the Model Gateway · 通过模型网关调用 Pi
 
 Pi can be forced through the Harness OpenAI-compatible model proxy:
 
@@ -146,7 +146,7 @@ For that run Harness creates an isolated Pi `models.json` with a `harness` provi
 
 The Pi adapter is containerized and uses the host Gateway. For VPN-backed benchmarks such as TSec, `network: host` is available on Linux workers; Harness rewrites the Gateway URL to `127.0.0.1` in that mode.
 
-## TSec Benchmark SDK
+## TSec Benchmark Adapter · TSec 基准适配器
 
 Install the optional SDK dependency and build the Pi/Kali image:
 
@@ -165,7 +165,7 @@ Use `--challenge WEB-001` for a specific challenge or `--all` for every unfinish
 
 For VPN-backed targets, `agents/examples/pi-tsec.yaml` uses `network: host` so the Kali container shares the Linux worker's VPN routes. See [`docs/tsec.md`](docs/tsec.md).
 
-## Audit a saved run
+## Audit a Saved Run · 审计运行记录
 
 Audit the consistency of a completed run's result, trace, progress, and available
 World exports without changing those files:
@@ -180,7 +180,7 @@ Every run writes an append-only `trace.jsonl`; `harness audit-run` checks that t
 result, trace, progress, and World exports agree. A consistent report does not
 authenticate their sources or independently prove task success.
 
-## Control spine
+## Control Loop · 控制闭环
 
 Red Harness keeps a single closed feedback loop:
 
@@ -198,7 +198,7 @@ registry) were removed to keep the loop minimal. See
 pruning rationale, and [`docs/agent-engineering.md`](docs/agent-engineering.md) for the
 agent-side engineering plan.
 
-## Gateway
+## Model Gateway · 模型网关
 
 ```bash
 harness run benchmarks/examples/hello/task.yaml \
@@ -209,7 +209,7 @@ harness run benchmarks/examples/hello/task.yaml \
 
 The Pi container receives only a one-time Gateway token through `host.docker.internal`. Real provider credentials remain on the Harness/Gateway side.
 
-## Tool Gateway
+## Tool Gateway · 工具网关
 
 The built-in tools remain intentionally narrow:
 
@@ -222,7 +222,7 @@ The default policy prevents path traversal and constrains reads/writes to task/r
 
 Pi built-in tools do not pass through this Tool Gateway in v0.8; they are observed through Pi's RPC event stream and execute inside the Kali container. The container receives no Docker socket and no host filesystem mounts beyond the benchmark task/run paths.
 
-## Execution profiles
+## Execution Profiles · 执行配置
 
 Pi Agent:
 
@@ -264,7 +264,7 @@ pi
 bwrap
 ```
 
-## Budgets and result bundles
+## Budgets and Run Artifacts · 预算与运行产物
 
 Every declared budget dimension is enforced as a **soft** ceiling:
 
@@ -309,7 +309,7 @@ verifier.stderr.log
 
 For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
 
-## Architecture
+## Architecture · 架构
 
 ```text
         reference (task / TSec objective)
@@ -337,7 +337,7 @@ The current architecture and pruning rationale are documented in [`docs/agent-ar
 
 当前架构与裁剪理由以 [`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md) 为准。旧版 [`docs/agent-architecture.md`](docs/agent-architecture.md) 仅作为历史设计参考保留。
 
-## Roadmap
+## Roadmap · 路线图
 
 1. **Done:** task/environment/verifier/result execution contract.
 2. **Done:** agent execution, budgets, repeat/seed.
@@ -351,7 +351,7 @@ The current architecture and pruning rationale are documented in [`docs/agent-ar
 10. **Done:** repository slimming (production-unreachable modules and orphaned fixtures removed, stale design docs consolidated with [`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md), roadmap trimmed to item definitions, redundant tests cut).
 
 
-### Benchmark adapters
+### Benchmark Adapters · 基准适配器
 
 External benchmark platforms use a common contract:
 
@@ -374,7 +374,7 @@ never passed to the Agent. `HARNESS_FLAG=<flag>` remains a compatibility submiss
 submission values are hashed in normalized traces.
 
 
-### Solver session runtime
+### Solver Session Runtime · 求解会话运行时
 
 The benchmark runtime starts the container Pi RPC session through the typed `AgentSession`
 boundary. Sessions expose normalized events, trusted observations, checkpoints, close requests,
@@ -397,7 +397,7 @@ objective completion. A successful tool exit or accepted submission alone does n
 objective completion; the final task verifier or benchmark evaluation controls the result.
 
 
-### Agent cognition and competing sessions
+### Agent Cognition and Competing Sessions · 智能体认知与竞争会话
 
 The Harness no longer plans, ranks skills, or compiles rounds. Cognition lives in the Agent:
 it keeps its own markdown notes under `$HARNESS_NOTES_DIR`, reads read-only knowledge roots
@@ -413,7 +413,7 @@ stops the rest. Usage budgets are split evenly across sessions while the wall-cl
 whole. Findings a session wants to share with its siblings go to `$HARNESS_SHARED_FINDINGS`, the
 only cross-session writable path. See [docs/agent-engineering.md](docs/agent-engineering.md).
 
-### Operator hints
+### Operator Hints · 操作员提示
 
 An operator can inject guidance into a run at any time, including while the Agent is mid-turn:
 
@@ -431,7 +431,7 @@ for a platform hint fetched at a configured no-progress threshold, so both sourc
 they can redirect exploration, but they never verify the objective — only a verifier or benchmark
 evaluation can do that.
 
-### SQLite World State
+### SQLite World State · SQLite 世界状态
 
 SQLite is the default World State backend. `world.db` is authoritative; `world.events.jsonl` and
 `world.snapshot.json` are compatibility/debug exports. The database uses WAL mode, persistent event
