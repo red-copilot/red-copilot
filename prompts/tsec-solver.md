@@ -47,7 +47,8 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **向内枚举**：`ip addr`、`/etc/hosts`、云元数据、配置里的后端地址；`nmap -Pn` 打内部段，记录每个内部地址的来源。
 - **工具速查**：隧道（chisel / ssh -D / proxychains）、AD（nxc / impacket / certipy /
   bloodhound）、云（kubectl / aws）、已知 CVE（nuclei / searchsploit）、Java（ysoserial /
-  marshalsec）、逆向（checksec / r2 / ROPgadget）的具体命令见
+  marshalsec）、逆向（checksec / r2 / ROPgadget）、**固件/嵌入式（qemu-arm/aarch64/mipsel、
+  unsquashfs/sasquatch、binwalk -e、gdb-multiarch）** 的具体命令见
   `$HARNESS_KNOWLEDGE_DIRS/methodology/exploitation-recipes.md`。命令写进笔记，重连比重找入口便宜。
 - **逐阶段验证**：每阶段产出是下一阶段的输入（凭据、token、内部 URL、文件），验证成立再推进。
 - **最后才提取目标**：链路走到目标服务后 flag 才可得。答案必须来自目标服务本身的输出，不能是入口处的推测。
@@ -92,7 +93,7 @@ harness subagent -o "逆向 /work/target.elf，找出溢出偏移并给出 PoC �
 ## 硬性约束
 
 - 优先用镜像自带的专用工具而不是手写循环：目录/路由枚举用 `ffuf`、`feroxbuster` 或 `gobuster`
-  （字典：`/usr/share/seclists/Discovery/Web-Content/`（SecLists 全量，含 raft、api、dirsearch 系列）、
+  （字典：`/usr/share/seclists/Discovery/Web-Content/`（含 raft、api、dirsearch 系列）、
   `/usr/share/wordlists/dirb/common.txt`、`/usr/share/wordlists/dirb/big.txt`；
   口令字典 `/usr/share/wordlists/rockyou.txt`），参数枚举用 `arjun`，
   端口/服务用 `nmap`，Web 指纹用 `whatweb`。

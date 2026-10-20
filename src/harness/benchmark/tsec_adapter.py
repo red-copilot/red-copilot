@@ -65,6 +65,11 @@ def _is_instance_conflict(exc: BaseException) -> bool:
 # cases, cool the whole dispatch down before trying the next one.
 CONFLICT_STREAK_LIMIT = 2
 CONFLICT_COOLDOWN_SECONDS = 120.0
+# A case that dies within this window never produced a real attempt (agent
+# process failed to start, provider error at the first call, immediate exit).
+# Waiting for the next pass can take hours; retry once in place.
+RAPID_FAILURE_SECONDS = 120
+RAPID_RETRY_LIMIT = 1
 # Per-difficulty wall time. Multi-stage relays need a foothold, lateral
 # movement and a final objective; a flat budget gives every stage the same
 # time and leaves the hard ones cut off mid-chain. Easy cases pay for that,
@@ -941,18 +946,35 @@ async def run_tsec_challenges(
                                 update={"wall_time": int(remaining)}
                             )
                     try:
-                        result = await runner.run_case(
-                            adapter=adapter,
-                            case=case,
-                            agent=agent,
-                            budgets=case_budgets,
-                            seed=pass_seed + index,
-                            submission_extractor=_extract_submissions,
-                            allow_host_agent=allow_host_agent,
-                            max_unconfirmed_progress=max_unconfirmed_progress,
-                            hint_threshold=hint_threshold,
-                            seed_notes_from=attempt_seed(case.id),
-                        )
+                        rapid_retries = 0
+                        while True:
+                            attempt_started = time.monotonic()
+                            result = await runner.run_case(
+                                adapter=adapter,
+                                case=case,
+                                agent=agent,
+                                budgets=case_budgets,
+                                seed=pass_seed + index,
+                                submission_extractor=_extract_submissions,
+                                allow_host_agent=allow_host_agent,
+                                max_unconfirmed_progress=max_unconfirmed_progress,
+                                hint_threshold=hint_threshold,
+                                seed_notes_from=attempt_seed(case.id),
+                            )
+                            elapsed = time.monotonic() - attempt_started
+                            if (
+                                result.get("success")
+                                or elapsed >= RAPID_FAILURE_SECONDS
+                                or rapid_retries >= RAPID_RETRY_LIMIT
+                            ):
+                                break
+                            rapid_retries += 1
+                            print(
+                                f"[tsec] {case.id} failed in {elapsed:.0f}s; "
+                                "retrying once immediately",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                     except Exception as exc:  # noqa: BLE001 - classified below
                         kind = classify_platform_failure(exc)
                         failures.append(

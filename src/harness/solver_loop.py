@@ -107,6 +107,9 @@ class SolverLoopStats:
     # and the feedback file it mirrors.
     steer_counts: dict[str, int] = field(default_factory=empty_steer_counts)
     tool_calls: int = 0
+    # Long-chain observability: how often the agent actually reached for the
+    # VShell/MCP surface instead of plain bash.
+    mcp_tool_calls: int = 0
     tool_failures: int = 0
     tool_time_ms: int = 0
     slow_tool_calls: list[dict] = field(default_factory=list)
@@ -580,6 +583,9 @@ class SolverLoop:
         duration = max(duration, 0)
         self.stats.tool_calls += 1
         self.stats.tool_time_ms += duration
+        tool_name = data.get("tool")
+        if isinstance(tool_name, str) and tool_name.startswith("mcp__"):
+            self.stats.mcp_tool_calls += 1
         exit_code = data.get("exit_code")
         failed = bool(data.get("is_error")) or (
             isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0

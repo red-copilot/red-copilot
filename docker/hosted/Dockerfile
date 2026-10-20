@@ -72,7 +72,7 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         checksec \
         patchelf \
         ropper \
-        openjdk-11-jdk-headless \
+        openjdk-11-jre-headless \
         bloodhound.py \
         chisel \
         proxychains4 \
@@ -100,11 +100,27 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
         python3-pil \
         python3-pycryptodome \
         python3-paramiko \
+        qemu-user \
+        gdb-multiarch \
+        squashfs-tools \
+        sasquatch \
+        libc6-i386 \
+        lib32z1 \
+        cpio \
+        lz4 \
+        zstd \
+        device-tree-compiler \
+        7zip \
         nodejs \
         npm \
     && node -e 'const [M,m]=process.versions.node.split(".").map(Number); if (M < 22 || (M === 22 && m < 19)) { console.error("Pi requires Node >= 22.19"); process.exit(1) }' \
     && test -s /usr/share/wordlists/dirb/common.txt \
-    && gunzip -kf /usr/share/wordlists/rockyou.txt.gz \
+    && gunzip -kf /usr/share/wordlists/rockyou.txt \
+    && rm -f /usr/share/wordlists/rockyou.txt.gz \
+    # Seclists ships 1.9GB; keep the web-discovery, username, fuzzing and
+    # payload corpora an engagement actually uses, drop the password dumps
+    # (rockyou is already unpacked) and the miscellaneous archive.
+    && rm -rf /usr/share/seclists/Passwords /usr/share/seclists/Miscellaneous \
     && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && pi --version \
     && apt-get clean \
