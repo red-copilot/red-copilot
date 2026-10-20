@@ -4,6 +4,29 @@
 
 Red Harness is a reproducible evaluation runtime for security agents. It keeps benchmark tasks, agents, target environments, model/tool access, budgets, verification, telemetry, and the control loop separate so results can be independently reproduced and compared.
 
+**面向安全智能体的原生执行与可复现评测运行时。** Red Harness 通过明确的工程边界连接任务、智能体、目标环境、模型与工具访问、预算、世界状态和独立验证，让执行过程可审计、结果可复现。
+
+> **Core principle / 核心原则:** The Agent owns cognition; the Harness owns controlled execution, state, recovery, and verification boundaries. 智能体负责认知与决策；Harness 负责受控执行、状态、恢复与验证边界。
+
+```text
+Task / Benchmark
+       │
+       ▼
+Harness Runtime ───── Budget / Trace / World State
+       │
+       ▼
+Agent Session (Pi RPC)
+       │
+       ▼
+Isolated Tools ────── Target Environment
+       │
+       ▼
+Verifier / Evaluator
+       │
+       ▼
+Authoritative Result
+```
+
 ## Current capabilities
 
 Version 0.8 provides:
@@ -314,10 +337,9 @@ Core separation rule:
 Task != Environment != Agent != Model != Tool != Verifier
 ```
 
-The closed-loop control spine, the module that owns each stage, and the pruning
-rationale are documented in [`docs/agent-architecture.md`](docs/agent-architecture.md)
-together with the agent-side architecture as a whole (adapter/session contracts,
-solver loop, rounds, trust tiers, recovery).
+The current architecture and pruning rationale are documented in [`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md). The older [`docs/agent-architecture.md`](docs/agent-architecture.md) is retained as a historical design reference; use v2 as the current entry point.
+
+当前架构与裁剪理由以 [`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md) 为准。旧版 [`docs/agent-architecture.md`](docs/agent-architecture.md) 仅作为历史设计参考保留。
 
 ## Roadmap
 
@@ -330,7 +352,7 @@ solver loop, rounds, trust tiers, recovery).
 7. **Done:** control-spine simplification (open-loop subsystems removed, single feedback loop).
 8. **Done:** dead-contract removal and duplicate-path consolidation (Firecracker stub, file world store, unreferenced schemas removed; single Docker command builder, usage accounting and TSec path).
 9. Containerized Pi adapter hardening and snapshot pooling.
-10. **Done:** repository slimming (production-unreachable modules and orphaned fixtures removed, stale design docs merged into [`docs/agent-architecture.md`](docs/agent-architecture.md), roadmap trimmed to item definitions, redundant tests cut).
+10. **Done:** repository slimming (production-unreachable modules and orphaned fixtures removed, stale design docs consolidated with [`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md), roadmap trimmed to item definitions, redundant tests cut).
 
 
 ### Benchmark adapters
