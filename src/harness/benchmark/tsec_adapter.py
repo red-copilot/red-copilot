@@ -70,6 +70,12 @@ CONFLICT_COOLDOWN_SECONDS = 120.0
 # Waiting for the next pass can take hours; retry once in place.
 RAPID_FAILURE_SECONDS = 120
 RAPID_RETRY_LIMIT = 1
+# A multi-flag challenge is not done because the Agent's turn ended. When a
+# session stops well before its budget (the model decided it had nothing left)
+# or when it gained flags, continue in the same slot with a fresh session - the
+# notes carry the foothold - instead of closing the target and waiting a pass.
+MAX_SESSIONS_PER_CASE = 3
+EARLY_EXIT_FRACTION = 0.6
 # Per-difficulty wall time. Multi-stage relays need a foothold, lateral
 # movement and a final objective; a flat budget gives every stage the same
 # time and leaves the hard ones cut off mid-chain. Easy cases pay for that,
@@ -946,15 +952,32 @@ async def run_tsec_challenges(
                                 update={"wall_time": int(remaining)}
                             )
                     try:
-                        rapid_retries = 0
+                        sessions_done = 0
+                        best_correct = 0
+                        result: dict = {}
+                        slot_deadline = (
+                            time.monotonic() + case_budgets.wall_time
+                        )
                         while True:
+                            remaining = slot_deadline - time.monotonic()
+                            if remaining < min(
+                                RAPID_FAILURE_SECONDS,
+                                max(1.0, case_budgets.wall_time / 2),
+                            ):
+                                break
                             attempt_started = time.monotonic()
                             result = await runner.run_case(
                                 adapter=adapter,
                                 case=case,
                                 agent=agent,
-                                budgets=case_budgets,
-                                seed=pass_seed + index,
+                                budgets=(
+                                    case_budgets
+                                    if sessions_done == 0
+                                    else case_budgets.model_copy(
+                                        update={"wall_time": int(remaining)}
+                                    )
+                                ),
+                                seed=pass_seed + index + sessions_done,
                                 submission_extractor=_extract_submissions,
                                 allow_host_agent=allow_host_agent,
                                 max_unconfirmed_progress=max_unconfirmed_progress,
@@ -962,16 +985,27 @@ async def run_tsec_challenges(
                                 seed_notes_from=attempt_seed(case.id),
                             )
                             elapsed = time.monotonic() - attempt_started
-                            if (
-                                result.get("success")
-                                or elapsed >= RAPID_FAILURE_SECONDS
-                                or rapid_retries >= RAPID_RETRY_LIMIT
-                            ):
+                            sessions_done += 1
+                            correct = int(
+                                (result.get("flags") or {}).get("correct") or 0
+                            )
+                            gained = correct > best_correct
+                            best_correct = max(best_correct, correct)
+                            if result.get("success"):
                                 break
-                            rapid_retries += 1
+                            if sessions_done >= MAX_SESSIONS_PER_CASE:
+                                break
+                            early_exit = elapsed < (
+                                case_budgets.wall_time * EARLY_EXIT_FRACTION
+                            )
+                            if not early_exit and not gained:
+                                # A full-length attempt that gained nothing;
+                                # another session would repeat it.
+                                break
                             print(
-                                f"[tsec] {case.id} failed in {elapsed:.0f}s; "
-                                "retrying once immediately",
+                                f"[tsec] {case.id} session {sessions_done} ended in "
+                                f"{elapsed:.0f}s (flags {correct}); continuing in the "
+                                "same slot",
                                 file=sys.stderr,
                                 flush=True,
                             )
@@ -1015,6 +1049,15 @@ async def run_tsec_challenges(
                             "message": f"case failed: {type(exc).__name__}",
                         }
 
+                    if not result:
+                        return {
+                            "run_id": None,
+                            "benchmark": {"challenge": case.id, "case_id": case.id},
+                            "status": "skipped",
+                            "success": False,
+                            "score": 0.0,
+                            "message": "no session budget left in this slot",
+                        }
                     evaluation = result.get("evaluation", {})
                     session_meta = result.get("benchmark", {}).get("session", {})
                     result["benchmark"].update(
