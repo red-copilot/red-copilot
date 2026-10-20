@@ -6,7 +6,7 @@
 
 **面向安全智能体与基准任务的可复现执行、评测运行时。** 通过明确任务、环境、智能体、模型与工具、预算、状态和验证边界，让执行过程可审计、结果可复现。
 
-> **Engineering principle:** The Agent owns cognition; the Harness owns controlled execution, state, recovery, and verification boundaries.
+> **Engineering principle:** The agent owns cognition; the Harness owns controlled execution, state, recovery, and verification boundaries.
 >
 > **工程原则：** 智能体负责认知与决策；Harness 负责受控执行、状态、恢复与验证边界。
 
