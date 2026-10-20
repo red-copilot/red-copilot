@@ -53,7 +53,7 @@ Accept: each landed item either improves its metric or is rolled back; RUN-07 (s
 and VER-05 (`unavailable` semantics) are checked first because they can hide real feedback.
 State: pending platform availability; the VPN health check still fails as of 2026-10-16.
 
-### BEN-08 [ ] P1 — Hosted-run compliance
+### BEN-08 [!] P1 — Hosted-run compliance (descoped 2026-10-20)
 Deliver: whatever the platform runs has to satisfy rules that the local sweep never exercised, so
 each one is stated as an acceptance line before any packaging work: the container must **start
 solving on launch** (the platform injects `BENCHMARK_BASE_URL` and `BENCHMARK_TOKEN` and does not
@@ -61,8 +61,9 @@ drive a solve loop from outside); model traffic must go through the platform gat
 "append `.tsecbench.gw` to the provider domain and use `http://`", against a fixed 22-provider
 allowlist; the uploaded image is capped at 3 GB; the whole submission gets 8 vCPU and 16 GB; and
 nothing task-specific may be baked in - no previous flags, answers or per-challenge notes.
-State: pending, and deliberately unspecified: this records the constraints, not the design. The
-known gaps, measured against the tree on 2026-10-17: the competition configs point at
+State: descoped with the hosted local execution path. The Harness now requires Docker to launch
+the Pi RPC container, so a single-image runner with no nested Docker is not a supported contract.
+The historical constraints, measured against the tree on 2026-10-17, were: the competition configs point at
 `opencode-go` and `openai`, neither of which is on the allowlist and neither of which has an
 env-driven endpoint (only `env_passthrough` for the key); `harness run`/`harness tsec` drive the
 container from outside, so "starts solving on launch" needs an in-image entrypoint that owns the

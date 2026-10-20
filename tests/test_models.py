@@ -11,20 +11,16 @@ def test_example_contracts_are_valid() -> None:
     docker_verifier = load_task(
         Path("benchmarks/examples/hello-docker-verifier/task.yaml")
     )
-    agent = load_agent(Path("agents/examples/demo.yaml"))
     pi_agent = load_agent(Path("agents/examples/pi.yaml"))
     hackathon_agent = load_agent(Path("agents/examples/pi-tsec-hackathon.yaml"))
     assert task.api_version == "harness/v1"
     assert task.budgets.wall_time == 30
     assert docker_verifier.verification.type == "docker"
     assert docker_verifier.verification.network == "none"
-    assert agent.type == "cli"
-    assert pi_agent.type == "pi"
-    assert pi_agent.image == "harness-pi-kali:latest"
+    assert pi_agent.image == "harness/pi-kali:local"
     assert pi_agent.pi is not None
     assert pi_agent.pi.model == "gpt-5.6-sol"
     assert pi_agent.pi.cap_add == ["NET_RAW"]
-    assert hackathon_agent.type == "pi"
     assert hackathon_agent.pi is not None
     assert hackathon_agent.pi.system_prompt_file == "prompts/tsec-solver.md"
 
@@ -37,38 +33,27 @@ def test_competition_agents_opt_into_the_harness_context_extension() -> None:
         assert agent.pi is not None
         assert agent.pi.harness_extension is True, name
 
-    for name in ("pi.yaml", "pi-tsec.yaml", "pi-tsec-hackathon.yaml", "demo.yaml"):
+    for name in ("pi.yaml", "pi-tsec.yaml", "pi-tsec-hackathon.yaml"):
         path = Path("agents/examples") / name
         agent = load_agent(path)
-        assert agent.pi is None or agent.pi.harness_extension is False, name
-
-
-def test_docker_agent_requires_image() -> None:
-    with pytest.raises(ValidationError):
-        AgentSpec.model_validate(
-            {
-                "apiVersion": "harness/v1",
-                "id": "bad-docker",
-                "type": "docker",
-            }
-        )
+        assert agent.pi is not None
+        assert agent.pi.harness_extension is False, name
 
 
 def test_pi_agent_requires_pi_config_and_image() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="pi configuration"):
         AgentSpec.model_validate(
             {
                 "apiVersion": "harness/v1",
                 "id": "bad-pi",
-                "type": "pi",
+                "image": "pi:test",
             }
         )
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="container image"):
         AgentSpec.model_validate(
             {
                 "apiVersion": "harness/v1",
                 "id": "bad-pi-image",
-                "type": "pi",
                 "pi": {"model": "m"},
             }
         )
@@ -79,7 +64,6 @@ def test_pi_accepts_container_runtime() -> None:
         {
             "apiVersion": "harness/v1",
             "id": "pi-runsc",
-            "type": "pi",
             "image": "pi:test",
             "runtime": "runsc",
             "pi": {"model": "m"},
@@ -94,25 +78,101 @@ def test_pi_accepts_container_runtime() -> None:
     "agent_data",
     [
         {
-            "apiVersion": "harness/v1", "id": "container-agent", "type": "docker",
-            "image": "agent:test", "env": {"BENCHMARK_TOKEN": "leak"},
-        },
-        {
-            "apiVersion": "harness/v1", "id": "pi-agent", "type": "pi",
-            "image": "pi:test", "pi": {"model": "m", "env_passthrough": ["BENCHMARK_TOKEN"]},
-        },
-        {
-            "apiVersion": "harness/v1", "id": "pi-agent", "type": "pi",
-            "image": "pi:test", "pi": {"model": "m", "env_passthrough": ["HARNESS_CONTROL_TOKEN"]},
-        },
-        {
-            "apiVersion": "harness/v1", "id": "pi-agent", "type": "pi",
-            "image": "pi:test", "env": {"HARNESS_MODEL_API_KEY": "leak"},
+            "apiVersion": "harness/v1",
+            "id": "legacy-type",
+            "type": "pi",
+            "image": "pi:test",
             "pi": {"model": "m"},
         },
         {
-            "apiVersion": "harness/v1", "id": "pi-agent", "type": "pi",
-            "image": "pi:test", "pi": {"model": "m", "env_passthrough": ["CUSTOM_SERVICE_TOKEN"]},
+            "apiVersion": "harness/v1",
+            "id": "legacy-command",
+            "image": "pi:test",
+            "command": ["echo"],
+            "pi": {"model": "m"},
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "legacy-cwd",
+            "image": "pi:test",
+            "cwd": "/tmp",
+            "pi": {"model": "m"},
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "legacy-mode",
+            "image": "pi:test",
+            "pi": {"model": "m", "mode": "json"},
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "legacy-hosted-model",
+            "image": "pi:test",
+            "pi": {
+                "model": "m",
+                "models_base_url": "https://example.invalid",
+                "models_api_key_env": "MODEL_KEY",
+            },
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "legacy-cli",
+            "type": "cli",
+            "command": ["echo"],
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "legacy-docker",
+            "type": "docker",
+            "image": "agent:test",
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "legacy-pi-host",
+            "type": "pi-host",
+            "pi": {"model": "m"},
+        },
+    ],
+)
+def test_retired_agent_contract_fields_are_rejected(agent_data) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        AgentSpec.model_validate(agent_data)
+
+
+@pytest.mark.parametrize(
+    "agent_data",
+    [
+        {
+            "apiVersion": "harness/v1",
+            "id": "container-agent",
+            "image": "agent:test",
+            "env": {"BENCHMARK_TOKEN": "leak"},
+            "pi": {"model": "m"},
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "pi-agent",
+            "image": "pi:test",
+            "pi": {"model": "m", "env_passthrough": ["BENCHMARK_TOKEN"]},
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "pi-agent",
+            "image": "pi:test",
+            "pi": {"model": "m", "env_passthrough": ["HARNESS_CONTROL_TOKEN"]},
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "pi-agent",
+            "image": "pi:test",
+            "env": {"HARNESS_MODEL_API_KEY": "leak"},
+            "pi": {"model": "m"},
+        },
+        {
+            "apiVersion": "harness/v1",
+            "id": "pi-agent",
+            "image": "pi:test",
+            "pi": {"model": "m", "env_passthrough": ["CUSTOM_SERVICE_TOKEN"]},
         },
     ],
 )
@@ -124,8 +184,10 @@ def test_container_agents_cannot_passthrough_harness_or_benchmark_credentials(ag
 def test_pi_can_passthrough_explicit_model_provider_api_key() -> None:
     spec = AgentSpec.model_validate(
         {
-            "apiVersion": "harness/v1", "id": "pi-agent", "type": "pi",
-            "image": "pi:test", "pi": {"model": "m", "env_passthrough": ["OPENAI_API_KEY"]},
+            "apiVersion": "harness/v1",
+            "id": "pi-agent",
+            "image": "pi:test",
+            "pi": {"model": "m", "env_passthrough": ["OPENAI_API_KEY"]},
         }
     )
 
@@ -150,7 +212,6 @@ def _pi_agent(**overrides) -> AgentSpec:
     payload = {
         "apiVersion": "harness/v1",
         "id": "pi-agent",
-        "type": "pi",
         "image": "pi:test",
         "pi": {"provider": "openai", "model": "base-model", "thinking": "low"},
     }
@@ -182,18 +243,10 @@ def test_executors_derive_one_validated_session_each() -> None:
     assert all(session.executors == [] for session in sessions)
 
 
-def test_executor_overrides_are_validated_at_load_time() -> None:
+def test_executor_overrides_and_fields_are_validated_at_load_time() -> None:
     with pytest.raises(ValidationError):
         _pi_agent(executors=[{"id": "dup"}, {"id": "dup"}])
     with pytest.raises(ValidationError):
         _pi_agent(executors=[{"id": "blank-model", "model": ""}])
-    with pytest.raises(ValidationError):
-        AgentSpec.model_validate(
-            {
-                "apiVersion": "harness/v1",
-                "id": "cli-agent",
-                "type": "cli",
-                "command": ["echo"],
-                "executors": [{"id": "a"}],
-            }
-        )
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        _pi_agent(executors=[{"id": "legacy", "type": "pi"}])

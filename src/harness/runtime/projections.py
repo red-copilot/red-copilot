@@ -74,20 +74,18 @@ def network_result(agent: AgentSpec) -> dict:
     strict_profile = agent.network_profile in {
         "offline",
         "target-only",
-        "model-allowed",
         "fully-offline",
     }
     enforcement = {
         "fully-offline": "docker-none",
         "offline": "docker-none",
         "target-only": "docker-internal-network",
-        "model-allowed": "docker-internal-network-gateway-proxy",
     }.get(agent.network_profile)
     return {
         "profile": agent.network_profile,
         "enforcement": (
             enforcement
-            if enforcement and agent.type in {"docker", "pi"}
+            if enforcement
             else "advisory"
             if agent.network_profile == "benchmark-only" or strict_profile
             else "unrestricted"

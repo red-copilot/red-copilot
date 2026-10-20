@@ -63,7 +63,7 @@
   A/B 段共享 `src/harness/solver_loop.py`、`src/harness/benchmark/runner.py`、`src/harness/cli.py`，
   hunk 级拆分的成本高于收益，因此合并为一个工作流域 PR、子项分提交。
 - 验收/证据：两个 PR 均通过 CI 同款 namespace 扫描、`ruff check .`、`pytest -q` 与
-  `pytest tests/test_docs_consistency.py -q`；hosted CI 绿；PR-1 在描述里说明不拆分的原因。
+  `pytest tests/test_docs_consistency.py -q`；容器 Pi RPC、host Gateway 与 verifier 的 CI 绿；PR-1 在描述里说明不拆分的原因。
 - 依赖：无。
 - 停止条件：CI 或 docs 一致性未绿前不启动 D2 的新工作。
 

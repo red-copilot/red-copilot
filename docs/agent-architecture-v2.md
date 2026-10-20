@@ -41,14 +41,13 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 这层刻意留白（对齐 For Future 的 "Less Than Nothing" 与 Antix 的
 "只暴露一个执行入口"）：工程做得越少，越少挤压模型的推理空间。
 
-## 3. 执行层：Pi 优先 + 可插拔 executor
+## 3. 执行层：唯一 Pi RPC + 可插拔 executor
 
-- `type: pi` 是默认执行内核（容器内 Pi RPC），保持既有硬化：只读根文件系统、
+- Agent 契约不再声明 `type` / `mode`；唯一执行内核是容器内 Pi RPC，保持既有硬化：只读根文件系统、
   `--cap-drop ALL`、no-new-privileges、无 docker socket、只读 `/task` 与 `/knowledge/*`、
   可写 `/run/harness`。
-- `ExecutorSpec` 声明同一道题上并行的多个 solver 会话（不同 provider / model / thinking /
-  `extra_args` / system prompt）。`type: cli` / `type: docker` 复用既有适配器契约，
-  因此外部 coding agent 走同一 `build_agent_adapter` 入口。
+- `ExecutorSpec` 声明同一道题上并行的多个 Pi solver 会话（不同 provider / model / thinking /
+  `extra_args` / system prompt），全部走同一容器 RPC 入口。
 - 并行度：**最多 3 道题并行**（平台并发实例上限），**每题可由多个 executor 竞争**。
   竞争单元共享一次 provision（同一个靶机实例）与同一 `submitted_keys` 去重集合，
   任一会话提交成功即结束该题。

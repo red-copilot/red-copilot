@@ -17,7 +17,19 @@ from harness.benchmark.base import (
 from harness.benchmark.runner import BenchmarkRunner
 from harness.budget import UsageMetrics
 from harness.models import AgentSpec, BudgetSpec, ObjectiveSpec
-from harness.session import AgentCheckpoint, AgentEvent
+from harness.session import RPC_AGENT_CAPABILITIES, AgentCheckpoint, AgentEvent
+
+
+def _pi_agent(*, agent_id: str = "demo", network: str = "host") -> AgentSpec:
+    return AgentSpec.model_validate(
+        {
+            "apiVersion": "harness/v1",
+            "id": agent_id,
+            "image": "pi:test",
+            "network": network,
+            "pi": {"model": "fake-model"},
+        }
+    )
 
 
 class FakeBenchmarkAdapter:
@@ -60,15 +72,7 @@ def test_invalid_container_network_is_rejected_before_benchmark_provision(tmp_pa
             return await super().provision(case)
 
     adapter = ProvisionProbe()
-    agent = AgentSpec.model_validate(
-        {
-            "apiVersion": "harness/v1",
-            "id": "container",
-            "type": "docker",
-            "image": "probe",
-            "network": "environment",
-        }
-    )
+    agent = _pi_agent(agent_id="container", network="environment")
 
     with pytest.raises(ValueError, match="do not provide a Harness environment network"):
         asyncio.run(
@@ -104,13 +108,10 @@ def test_benchmark_tears_down_provisioned_session_when_solver_bootstrap_fails(
             BenchmarkRunner(runs_root=tmp_path).run_case(
                 adapter=adapter,
                 case=BenchmarkCase(id="CASE-BOOTSTRAP", benchmark="fake"),
-                agent=AgentSpec.model_validate(
-                    {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-                ),
+                agent=_pi_agent(),
                 budgets=BudgetSpec(wall_time=30),
                 seed=1,
                 submission_extractor=lambda _result: [],
-                allow_host_agent=True,
             )
         )
 
@@ -126,13 +127,10 @@ def test_benchmark_provision_error_leaves_no_run_directory(tmp_path: Path) -> No
             BenchmarkRunner(runs_root=tmp_path).run_case(
                 adapter=FailingProvision(),
                 case=BenchmarkCase(id="CASE-PROVISION-ERROR", benchmark="fake"),
-                agent=AgentSpec.model_validate(
-                    {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-                ),
+                agent=_pi_agent(),
                 budgets=BudgetSpec(wall_time=30),
                 seed=1,
                 submission_extractor=lambda _result: [],
-                allow_host_agent=True,
             )
         )
 
@@ -161,13 +159,10 @@ def test_benchmark_teardown_error_does_not_persist_exception_details(
         BenchmarkRunner(runs_root=tmp_path).run_case(
             adapter=FailingTeardown(),
             case=BenchmarkCase(id="CASE-TEARDOWN-ERROR", benchmark="fake"),
-            agent=AgentSpec.model_validate(
-                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-            ),
+            agent=_pi_agent(),
             budgets=BudgetSpec(wall_time=30),
             seed=1,
             submission_extractor=lambda _result: [],
-            allow_host_agent=True,
         )
     )
 
@@ -204,13 +199,10 @@ def test_benchmark_teardown_finishes_when_run_is_cancelled_during_cleanup(
             BenchmarkRunner(runs_root=tmp_path).run_case(
                 adapter=benchmark,
                 case=BenchmarkCase(id="CASE-CANCEL-TEARDOWN", benchmark="fake"),
-                agent=AgentSpec.model_validate(
-                    {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-                ),
+                agent=_pi_agent(),
                 budgets=BudgetSpec(wall_time=30),
                 seed=1,
                 submission_extractor=lambda _result: [],
-                allow_host_agent=True,
             )
         )
         await asyncio.wait_for(benchmark.teardown_started.wait(), timeout=5)
@@ -250,13 +242,10 @@ def test_benchmark_teardown_timeout_cancels_stuck_cleanup(monkeypatch, tmp_path:
         BenchmarkRunner(runs_root=tmp_path).run_case(
             adapter=benchmark,
             case=BenchmarkCase(id="CASE-TEARDOWN-TIMEOUT", benchmark="fake"),
-            agent=AgentSpec.model_validate(
-                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-            ),
+            agent=_pi_agent(),
             budgets=BudgetSpec(wall_time=30),
             seed=1,
             submission_extractor=lambda _result: [],
-            allow_host_agent=True,
         )
     )
 
@@ -329,6 +318,8 @@ class FakeSession:
 
 
 class FakeAgentAdapter:
+    capabilities = RPC_AGENT_CAPABILITIES
+
     def __init__(self) -> None:
         self.session: FakeSession | None = None
 
@@ -358,14 +349,7 @@ def _run_case_with_agent(monkeypatch, tmp_path: Path, agent_adapter, budgets, *,
         "build_agent_adapter",
         lambda *_args, **_kwargs: agent_adapter,
     )
-    agent = AgentSpec.model_validate(
-        {
-            "apiVersion": "harness/v1",
-            "id": "demo",
-            "type": "cli",
-            "command": ["true"],
-        }
-    )
+    agent = _pi_agent()
     return asyncio.run(
         BenchmarkRunner(runs_root=tmp_path).run_case(
             adapter=adapter if adapter is not None else FakeBenchmarkAdapter(),
@@ -374,7 +358,6 @@ def _run_case_with_agent(monkeypatch, tmp_path: Path, agent_adapter, budgets, *,
             budgets=budgets,
             seed=1,
             submission_extractor=lambda _result: [],
-            allow_host_agent=True,
         )
     )
 def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path: Path) -> None:
@@ -388,14 +371,7 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     )
     benchmark = FakeBenchmarkAdapter()
     case = BenchmarkCase(id="CASE-1", benchmark="fake")
-    agent = AgentSpec.model_validate(
-        {
-            "apiVersion": "harness/v1",
-            "id": "demo",
-            "type": "cli",
-            "command": ["true"],
-        }
-    )
+    agent = _pi_agent()
 
     result = asyncio.run(
         BenchmarkRunner(runs_root=tmp_path).run_case(
@@ -405,7 +381,6 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
             budgets=BudgetSpec(wall_time=30),
             seed=1,
             submission_extractor=lambda _result: [],
-            allow_host_agent=True,
         )
     )
 
@@ -472,9 +447,7 @@ def test_benchmark_runner_tears_down_after_agent_stream_crash(monkeypatch, tmp_p
         lambda *_args, **_kwargs: fake_agent,
     )
     benchmark = FakeBenchmarkAdapter()
-    agent = AgentSpec.model_validate(
-        {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-    )
+    agent = _pi_agent()
     with pytest.raises(RuntimeError, match="injected agent session crash"):
         asyncio.run(
             BenchmarkRunner(runs_root=tmp_path).run_case(
@@ -484,7 +457,6 @@ def test_benchmark_runner_tears_down_after_agent_stream_crash(monkeypatch, tmp_p
                 budgets=BudgetSpec(wall_time=30),
                 seed=1,
                 submission_extractor=lambda _result: [],
-                allow_host_agent=True,
             )
         )
     assert benchmark.closed is True
@@ -540,13 +512,10 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
         BenchmarkRunner(runs_root=tmp_path).run_case(
             adapter=InconsistentEvaluationBenchmark(),
             case=BenchmarkCase(id="CASE-MALICIOUS", benchmark="fake"),
-            agent=AgentSpec.model_validate(
-                {"apiVersion": "harness/v1", "id": "agent", "type": "cli", "command": ["true"]}
-            ),
+            agent=_pi_agent(agent_id="agent"),
             budgets=BudgetSpec(wall_time=30),
             seed=1,
             submission_extractor=lambda _result: [],
-            allow_host_agent=True,
         )
     )
 
@@ -617,13 +586,10 @@ def test_checkpoint_keeps_dispatched_action_pending_after_stream_crash(
             runner.run_case(
                 adapter=FakeBenchmarkAdapter(),
                 case=BenchmarkCase(id="CASE-CRASH", benchmark="fake"),
-                agent=AgentSpec.model_validate(
-                    {"apiVersion": "harness/v1", "id": "agent", "type": "cli", "command": ["true"]}
-                ),
+                agent=_pi_agent(agent_id="agent"),
                 budgets=BudgetSpec(wall_time=30),
                 seed=1,
                 submission_extractor=lambda _result: [],
-                allow_host_agent=True,
             )
         )
 
@@ -768,13 +734,10 @@ def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path:
         BenchmarkRunner(runs_root=tmp_path).run_case(
             adapter=FakeBenchmarkAdapter(),
             case=BenchmarkCase(id="CASE-SWITCHES", benchmark="fake"),
-            agent=AgentSpec.model_validate(
-                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-            ),
+            agent=_pi_agent(),
             budgets=BudgetSpec(wall_time=30),
             seed=1,
             submission_extractor=lambda _result: [],
-            allow_host_agent=True,
         )
     )
 
@@ -876,13 +839,10 @@ def test_platform_verdict_is_the_comparison_baseline_for_the_next_action(
         BenchmarkRunner(runs_root=tmp_path).run_case(
             adapter=RejectingBenchmarkAdapter(),
             case=BenchmarkCase(id="CASE-OBS", benchmark="fake"),
-            agent=AgentSpec.model_validate(
-                {"apiVersion": "harness/v1", "id": "demo", "type": "cli", "command": ["true"]}
-            ),
+            agent=_pi_agent(),
             budgets=BudgetSpec(wall_time=30),
             seed=1,
             submission_extractor=lambda _result: [],
-            allow_host_agent=True,
         )
     )
 

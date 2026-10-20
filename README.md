@@ -15,9 +15,8 @@ Version 0.8 provides:
 - TSec Benchmark adapter over the official SDK (`list/start/submit/close`) with Harness-owned benchmark credentials
 - optional Pi model routing through the Red Harness credential-isolating Gateway
 - Docker Compose or no-op benchmark environments
-- trusted CLI agents and restricted Docker agents
 - Python or Docker-sandboxed verifiers
-- host or isolated Docker-sidecar Tool/Model Gateway
+- host Tool/Model Gateway reachable from the Pi container
 - OpenAI-compatible streaming and non-streaming model proxy
 - token, model-call, tool-call, cost, and wall-time budgets
 - provider credential isolation
@@ -30,10 +29,10 @@ Version 0.8 provides:
 - competing solver sessions per provisioned case (`AgentSpec.executors`) with
   per-session workspaces, shared submission dedupe and one authoritative result;
   see [docs/agent-engineering.md](docs/agent-engineering.md)
-- GitHub Actions coverage for Pi 1.0.4, Docker Agent, sidecar Gateway, and Docker Verifier
+- GitHub Actions coverage for the container Pi RPC path, host Gateway, and Docker Verifier
 
 > [!WARNING]
-> CLI agents and `verification.type: python` execute trusted host processes. Pi runs inside a restricted Docker container by default. `runtime: runsc` requires gVisor to be installed and registered with Docker.
+> Pi is the only Agent execution path and always runs inside a restricted Docker container over RPC. `verification.type: python` still executes a trusted host process under bubblewrap. `runtime: runsc` requires gVisor to be installed and registered with Docker.
 
 ## Install
 
@@ -41,23 +40,14 @@ Version 0.8 provides:
 python -m pip install -e ".[dev]"
 ```
 
-Python 3.11+ is required. Docker is required for Docker agents, sidecar Gateway mode, Docker verifiers, and Docker Compose benchmark environments.
-
-For Pi support, install Pi separately. Red Harness CI pins Pi 1.0.4:
-
-```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
-pi --version
-```
-
-Pi requires Node.js 22.19 or newer. See [`docs/pi.md`](docs/pi.md) for the full integration contract.
+Python 3.11+ is required. Docker is required for the Pi Agent, Docker verifiers, and Docker Compose benchmark environments. No host Pi installation is required: the Kali image pins Pi 1.0.4. See [`docs/pi.md`](docs/pi.md) for the full integration contract.
 
 ## Local run
 
 ```bash
+docker build -t harness/pi-kali:local docker/pi-kali
 harness run benchmarks/examples/hello/task.yaml \
-  --agent agents/examples/demo.yaml \
-  --allow-host-agent \
+  --agent agents/examples/pi.yaml \
   --seed 42
 ```
 
@@ -68,7 +58,8 @@ Example `agents/examples/pi.yaml`:
 ```yaml
 apiVersion: harness/v1
 id: pi-openai-sol
-type: pi
+image: harness/pi-kali:local
+network: environment
 
 pi:
   provider: openai
@@ -91,20 +82,18 @@ Direct-provider mode uses the provider's normal environment credential:
 export OPENAI_API_KEY="..."
 
 harness run benchmark/task.yaml \
-  --agent agents/examples/pi.yaml \
-  --allow-host-agent
+  --agent agents/examples/pi.yaml
 ```
 
-The adapter defaults to Pi's long-lived RPC mode. Harness sends the initial objective and plan
-through `prompt`, streams normalized Pi events, and injects verification, world, and benchmark
-feedback with `steer` before Pi's next model turn. It waits for `agent_settled`, since `agent_end`
-can precede automatic retry or queued work. Set `pi.mode: json` to retain the one-shot compatibility
-path.
+The adapter always uses Pi's long-lived `--mode rpc` protocol. Harness sends the initial
+objective through `prompt`, streams normalized Pi events, and injects verification, world, and
+benchmark feedback with `steer` before Pi's next model turn. It waits for `agent_settled`, since
+`agent_end` can precede automatic retry or queued work.
 
 The normalized event mapping is:
 
 ```text
-Pi session header (JSON mode) -> pi.session
+Pi session header              -> pi.session
 assistant message_start       -> model.request
 assistant message_end         -> model.response + model.usage
 tool_execution_start          -> tool.call
@@ -126,7 +115,6 @@ export HARNESS_MODEL_API_KEY="real-provider-key"
 
 harness run benchmark/task.yaml \
   --agent agents/examples/pi.yaml \
-  --allow-host-agent \
   --gateway \
   --model-upstream https://provider.example/v1 \
   --input-price-per-million 2.0 \
@@ -135,7 +123,7 @@ harness run benchmark/task.yaml \
 
 For that run Harness creates an isolated Pi `models.json` with a `harness` provider whose API key is the one-time `HARNESS_GATEWAY_TOKEN`. The real upstream credential remains inside the Gateway process. Gateway model events are authoritative in this mode, so Pi's copy of model usage is not counted twice.
 
-The Pi adapter is containerized and supports both host Gateway mode and Docker sidecar Gateway mode. For VPN-backed benchmarks such as TSec, `network: host` is available on Linux workers; sidecar Gateway mode is intentionally incompatible with `network: host` because the Agent must join the private Gateway network.
+The Pi adapter is containerized and uses the host Gateway. For VPN-backed benchmarks such as TSec, `network: host` is available on Linux workers; Harness rewrites the Gateway URL to `127.0.0.1` in that mode.
 
 ## TSec Benchmark SDK
 
@@ -189,47 +177,16 @@ registry) were removed to keep the loop minimal. See
 pruning rationale, and [`docs/agent-engineering.md`](docs/agent-engineering.md) for the
 agent-side engineering plan.
 
-## Gateway modes
-
-### Host mode
-
-Useful for trusted local development and the first-class Pi adapter:
+## Gateway
 
 ```bash
 harness run benchmarks/examples/hello/task.yaml \
-  --agent agents/examples/gateway-demo.yaml \
-  --allow-host-agent \
+  --agent agents/examples/pi.yaml \
   --gateway \
   --gateway-policy examples/gateway-policy.yaml
 ```
 
-The Agent receives only a one-time Gateway token. Real provider credentials remain on the Harness/Gateway side.
-
-### Isolated Docker sidecar
-
-```bash
-docker build -f docker/gateway/Dockerfile \
-  -t harness-gateway:local .
-
-harness run benchmarks/examples/hello/task.yaml \
-  --agent agents/examples/docker-gateway.yaml \
-  --gateway \
-  --gateway-mode sidecar \
-  --gateway-image harness-gateway:local \
-  --gateway-policy examples/gateway-policy.yaml
-```
-
-Sidecar mode creates a per-run Docker `--internal` network:
-
-```text
-Docker Agent ───── private internal network ───── Gateway sidecar
-     │                                               │
-     │                                               └─ optional provider egress
-     │
-     └─ benchmark target network
-```
-
-The Gateway publishes no host port. When a provider upstream is configured, only the sidecar is additionally attached to an egress-capable Docker bridge.
+The Pi container receives only a one-time Gateway token through `host.docker.internal`. Real provider credentials remain on the Harness/Gateway side.
 
 ## Tool Gateway
 
@@ -242,19 +199,21 @@ file.write
 
 The default policy prevents path traversal and constrains reads/writes to task/run roots. No host-side arbitrary shell tool is exposed.
 
-Pi built-in tools do not pass through this Tool Gateway in v0.8; they are observed through Pi's JSON event stream and execute inside the Kali container. The container receives no Docker socket and no host filesystem mounts beyond the benchmark task/run paths.
+Pi built-in tools do not pass through this Tool Gateway in v0.8; they are observed through Pi's RPC event stream and execute inside the Kali container. The container receives no Docker socket and no host filesystem mounts beyond the benchmark task/run paths.
 
 ## Execution profiles
 
-Docker Agent:
+Pi Agent:
 
 ```yaml
 apiVersion: harness/v1
-id: isolated-agent
-type: docker
-image: my-agent:latest
-network: environment
+id: pi-runsc
+image: harness/pi-kali:local
+network: host
 runtime: runsc
+pi:
+  provider: openai
+  model: gpt-5.6-sol
 ```
 
 Docker Verifier:
@@ -361,11 +320,11 @@ solver loop, rounds, trust tiers, recovery).
 ## Roadmap
 
 1. **Done:** task/environment/verifier/result execution contract.
-2. **Done:** Docker Agent, budgets, repeat/seed.
+2. **Done:** agent execution, budgets, repeat/seed.
 3. **Done:** Tool Gateway, model proxy, credential isolation, streaming accounting.
-4. **Done:** Docker Verifier sandbox and Docker Agent Gateway support.
-5. **Done:** isolated Gateway sidecar, Docker runtime profiles.
-6. **Done:** first-class Pi JSON adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
+4. **Done:** Docker Verifier sandbox and host Gateway support.
+5. **Done:** Docker runtime profiles.
+6. **Done:** first-class Pi RPC adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
 7. **Done:** control-spine simplification (open-loop subsystems removed, single feedback loop).
 8. **Done:** dead-contract removal and duplicate-path consolidation (Firecracker stub, file world store, unreferenced schemas removed; single Docker command builder, usage accounting and TSec path).
 9. Containerized Pi adapter hardening and snapshot pooling.
@@ -397,9 +356,9 @@ submission values are hashed in normalized traces.
 
 ### Solver session runtime
 
-The benchmark runtime can now start Agents through a bidirectional `AgentSession` compatibility
-boundary while retaining the legacy `run()` API. Sessions expose normalized events, trusted
-observations, checkpoints, close requests, and the eventual `AgentResult`.
+The benchmark runtime starts the container Pi RPC session through the typed `AgentSession`
+boundary. Sessions expose normalized events, trusted observations, checkpoints, close requests,
+and the eventual `AgentResult`.
 
 Externally evaluated benchmarks may accept structured submissions through
 `HARNESS_SUBMISSION_INBOX` and write trusted evaluator feedback to
@@ -445,8 +404,8 @@ echo "flag format is zc{...}" | harness hint .harness/runs/run_...
 
 Hints are appended to the run's `hints.jsonl`, outside the container-writable workspace. The
 SolverLoop polls the file on every event, records each hint in World state as an evidence-tier
-`human.hint` observation, and steers the running Agent with a `solver.hint` observation (one-shot
-Agents read it from `agent.feedback.jsonl`). The benchmark adapter steers the same observation type
+`human.hint` observation, and steers the running Pi RPC Agent with a `solver.hint` observation.
+The benchmark adapter steers the same observation type
 for a platform hint fetched at a configured no-progress threshold, so both sources share
 `solver.hint` and are told apart by `data.source` (`operator` or `platform`). Hints are advisory:
 they can redirect exploration, but they never verify the objective — only a verifier or benchmark

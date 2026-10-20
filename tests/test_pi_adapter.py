@@ -19,18 +19,16 @@ from harness.session import AgentEvent, AgentObservation
 from harness.trace import TraceRecorder
 
 
-def _pi_spec(mode: str = "rpc", *, harness_extension: bool = False) -> AgentSpec:
+def _pi_spec(*, harness_extension: bool = False) -> AgentSpec:
     return AgentSpec.model_validate(
         {
             "apiVersion": "harness/v1",
             "id": "pi-container-test",
-            "type": "pi",
             "image": "harness-pi-kali:test",
             "network": "environment",
             "pi": {
                 "provider": "fake",
                 "model": "fake-model",
-                "mode": mode,
                 "thinking": "medium",
                 "harness_extension": harness_extension,
                 "env_passthrough": ["FAKE_PROVIDER_KEY"],
@@ -42,14 +40,12 @@ def _pi_spec(mode: str = "rpc", *, harness_extension: bool = False) -> AgentSpec
 def _adapter(
     monkeypatch,
     tmp_path: Path,
-    mode: str = "rpc",
     *,
     harness_extension: bool = False,
 ) -> ContainerPiAdapter:
     monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
     return ContainerPiAdapter(
-        _pi_spec(mode, harness_extension=harness_extension),
-        allow_host=False,
+        _pi_spec(harness_extension=harness_extension),
         trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
     )
 
@@ -146,22 +142,6 @@ def test_pi_rpc_command_can_select_a_checkpointed_session(monkeypatch, tmp_path:
         assert "invalid Pi session ID" in str(exc)
     else:
         raise AssertionError("unsafe session references must be rejected")
-
-
-def test_pi_json_mode_remains_available_for_compatibility(monkeypatch, tmp_path: Path) -> None:
-    spec = _pi_spec(mode="json")
-    monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
-    adapter = ContainerPiAdapter(
-        spec,
-        allow_host=False,
-        trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
-    )
-    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
-
-    command = adapter._command(task, gateway_enabled=False)
-
-    assert command[command.index("--mode") + 1] == "json"
-    assert command[-1].startswith(task.objective.description)
 
 
 def test_pi_gateway_writes_container_visible_provider(monkeypatch, tmp_path: Path) -> None:
@@ -271,33 +251,6 @@ def test_pi_container_command_is_restricted_and_passes_direct_secret(
     assert "harness-pi-kali:test" in command
 
 
-def test_json_mode_container_command_keeps_the_shared_event_file(
-    monkeypatch, tmp_path: Path
-) -> None:
-    adapter = _adapter(monkeypatch, tmp_path, mode="json")
-    monkeypatch.setenv("FAKE_PROVIDER_KEY", "secret")
-    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
-    run_dir = tmp_path / "run-json"
-    run_dir.mkdir()
-    workspace = run_dir / "agent-workspace"
-    workspace.mkdir()
-
-    command = adapter._container_command(
-        task,
-        task_dir=Path("benchmarks/examples/hello").resolve(),
-        run_dir=workspace,
-        container_name="pi-json-test",
-        network="bridge",
-        environment_project=None,
-        seed=1,
-        gateway_url=None,
-        gateway_token=None,
-        host_gateway=False,
-    )
-    assert "HARNESS_EVENT_FILE=/run/harness/events.jsonl" in command
-    assert "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl" not in command
-
-
 def _rpc_session_for_ingest(tmp_path: Path) -> ContainerPiRpcSession:
     session = object.__new__(ContainerPiRpcSession)
     session.run_dir = tmp_path
@@ -382,7 +335,8 @@ def test_strict_pi_profile_clears_docker_proxy_and_rejects_proxy_passthrough(
     monkeypatch, tmp_path: Path
 ) -> None:
     adapter = _adapter(monkeypatch, tmp_path)
-    adapter.spec.network_profile = "model-allowed"
+    monkeypatch.setenv("FAKE_PROVIDER_KEY", "secret")
+    adapter.spec.network_profile = "target-only"
     task = load_task(Path("benchmarks/examples/hello/task.yaml"))
     run_dir = tmp_path / "run-strict-proxy"
     run_dir.mkdir()
@@ -392,11 +346,11 @@ def test_strict_pi_profile_clears_docker_proxy_and_rejects_proxy_passthrough(
         task_dir=Path("benchmarks/examples/hello").resolve(),
         run_dir=run_dir,
         container_name="pi-strict-proxy",
-        network="gateway-internal",
+        network="internal-task",
         environment_project=None,
         seed=1,
-        gateway_url="http://harness-gateway:8765",
-        gateway_token="gateway-token",
+        gateway_url=None,
+        gateway_token=None,
         host_gateway=False,
     )
     assert "HTTP_PROXY=" in command
@@ -487,61 +441,6 @@ def test_pi_gateway_does_not_pass_direct_provider_secret(monkeypatch, tmp_path: 
     assert "HARNESS_GATEWAY_TOKEN=one-time-token" in command
 
 
-def test_pi_json_protocol_normalizes_model_and_tool_events(monkeypatch, tmp_path: Path) -> None:
-    adapter = _adapter(monkeypatch, tmp_path)
-    event_file = tmp_path / "events.jsonl"
-    event_file.write_text("", encoding="utf-8")
-    records = [
-        {"type": "session", "version": 3, "id": "s1", "cwd": "/run/harness"},
-        {
-            "type": "message_start",
-            "message": {"role": "assistant", "provider": "fake", "model": "fake-model"},
-        },
-        {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "bash"},
-        {
-            "type": "tool_execution_end",
-            "toolCallId": "c1",
-            "toolName": "bash",
-            "isError": False,
-        },
-        {
-            "type": "message_end",
-            "message": {
-                "role": "assistant",
-                "provider": "fake",
-                "model": "fake-model",
-                "stopReason": "stop",
-                "usage": {
-                    "input": 10,
-                    "output": 5,
-                    "totalTokens": 15,
-                    "cost": {"total": 0.01},
-                },
-            },
-        },
-        {"type": "agent_settled"},
-    ]
-    for record in records:
-        adapter._translate_line(
-            json.dumps(record),
-            event_file=event_file,
-            account_model=True,
-        )
-
-    types = [
-        json.loads(line)["type"] for line in event_file.read_text(encoding="utf-8").splitlines()
-    ]
-    assert types == [
-        "pi.session",
-        "model.request",
-        "tool.call",
-        "tool.result",
-        "model.response",
-        "model.usage",
-        "pi.agent_settled",
-    ]
-
-
 def test_pi_usage_with_malformed_counters_degrades_without_terminating(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -582,7 +481,7 @@ def test_pi_usage_with_malformed_counters_degrades_without_terminating(
     assert session._metrics.total_tokens == 0
 
 
-def test_gateway_mode_accounts_model_usage_from_gateway_only(monkeypatch, tmp_path: Path) -> None:
+def test_host_gateway_accounts_model_usage_from_gateway_only(monkeypatch, tmp_path: Path) -> None:
     adapter = _adapter(monkeypatch, tmp_path)
     session = ContainerPiRpcSession(
         adapter,
@@ -1042,7 +941,6 @@ def test_pi_offline_network_profile_forces_none(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
     adapter = ContainerPiAdapter(
         spec,
-        allow_host=False,
         trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
     )
     task = load_task(Path("benchmarks/examples/hello/task.yaml"))
@@ -1068,6 +966,7 @@ def test_pi_offline_network_profile_forces_none(monkeypatch, tmp_path: Path) -> 
 def test_pi_rpc_uses_verified_target_network_id(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("FAKE_PROVIDER_KEY", "test-provider-key")
     adapter = _adapter(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_PROVIDER_KEY", "secret")
     adapter.spec.network_profile = "target-only"
     task = load_task(Path("benchmarks/examples/hello/task.yaml"))
     run_dir = tmp_path / "run-strict-rpc"
@@ -1127,60 +1026,12 @@ def test_pi_rpc_uses_verified_target_network_id(monkeypatch, tmp_path: Path) -> 
     assert len(docker_commands) == 2
     assert docker_commands[0][1] == "inspect"
 
-def test_legacy_pi_json_runner_uses_verified_target_network_id(monkeypatch, tmp_path: Path) -> None:
-    from harness.pi_adapter import PiAdapter
-
-    adapter_spec = _pi_spec(mode="json").model_copy(
-        update={"network_profile": "target-only"}
-    )
-    monkeypatch.setattr("harness.pi_adapter.shutil.which", lambda _: "/usr/bin/docker")
-    adapter = PiAdapter(
-        adapter_spec,
-        allow_host=False,
-        trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
-    )
-    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
-    run_dir = tmp_path / "run-strict-json"
-    run_dir.mkdir()
-    commands = []
-
-    def fake_subprocess_run(command, **kwargs):
-        commands.append(command)
-        stdout = f"{'c' * 64} true\n" if command[:3] == ["docker", "network", "inspect"] else ""
-        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
-
-    class Process:
-        returncode = 0
-
-        def poll(self):
-            return self.returncode
-
-        def wait(self):
-            return self.returncode
-
-    monkeypatch.setattr("harness.network_policy.subprocess.run", fake_subprocess_run)
-    monkeypatch.setattr("harness.pi_adapter.subprocess.Popen", lambda *args, **kwargs: Process())
-
-    adapter.run(
-        task,
-        task_dir=Path("benchmarks/examples/hello").resolve(),
-        run_dir=run_dir,
-        environment_project=None,
-        environment_network="task-internal",
-        seed=1,
-    )
-
-    create = next(command for command in commands if command[:2] == ["docker", "create"])
-    assert create[create.index("--network") + 1] == "c" * 64
-
-
 def _adapter_with_system_prompt(monkeypatch, tmp_path: Path, prompt_file: str) -> ContainerPiAdapter:
     monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
     spec = AgentSpec.model_validate(
         {
             "apiVersion": "harness/v1",
             "id": "pi-system-prompt",
-            "type": "pi",
             "image": "harness-pi-kali:test",
             "network": "environment",
             "pi": {
@@ -1192,7 +1043,6 @@ def _adapter_with_system_prompt(monkeypatch, tmp_path: Path, prompt_file: str) -
     )
     return ContainerPiAdapter(
         spec,
-        allow_host=False,
         trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
     )
 
@@ -1278,7 +1128,7 @@ def test_pi_rpc_session_survives_missing_usage_mid_stream(monkeypatch, tmp_path:
     """A provider response without usage data must not end the session.
 
     Only wall_time is enforced; missing usage degrades accounting for that one
-    call instead of killing a one-shot evaluation run.
+    call instead of killing an evaluation run.
     """
     import asyncio
 

@@ -4,7 +4,7 @@
 `src/harness/` is the Python package (a modular monolith). Subpackages: `benchmark/`
 (adapter contracts plus the TSec SDK integration), `world/` (event-sourced state), `runtime/`
 (lifecycle, checkpoints, evidence). Top-level modules include `cli.py`, `orchestrator.py`,
-`agent.py`, `solver_loop.py`, and `gateway.py` (the FastAPI sidecar tool proxy — there is no
+`agent.py`, `solver_loop.py`, and `gateway.py` (the FastAPI host tool/model proxy — there is no
 `harness/api/` package; it was deliberately deleted). Cognition belongs to the Agent, not the
 Harness: the runtime only keeps deterministic infrastructure and the bounded stop law
 (`solver_policy.py`, `budget.py`, `extract.py`, `progress.py`), all of which must stay testable
@@ -36,7 +36,8 @@ module:
 - Removed subsystems (the test's `DELETED_SUBSYSTEMS` set: `harness.api`, `control_plane`,
   `queue`, `worker`, `coordination`, `otel`, `scoring`, `suite`, `evaluation`, `registry`, plus
   the v2-cut cognition scaffolding `cognition`, `planner`, `skills`, `crew`,
-  `runtime.solver_profile`) must not reappear anywhere, including via dynamic imports or
+  `runtime.solver_profile`, plus the retired host paths `pi_host` and `process_guard`) must not
+  reappear anywhere, including via dynamic imports or
   `eval`/`exec`. The retired frontier lives on as an offline baseline under `tests/ablation/`.
 - See [docs/architecture.md](docs/architecture.md) for the boundary rationale.
 
@@ -45,8 +46,8 @@ module:
   (Python 3.11+); add `.[tsec]` for the optional TSec SDK.
 - `ruff check .` - lint. `pytest -q` - full test suite; add
   `pytest tests/test_architecture.py -q` whenever you add, move, or delete a module.
-- `harness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml
-  --allow-host-agent --seed 42` - run one task.
+- `harness run benchmarks/examples/hello/task.yaml --agent agents/examples/pi.yaml
+  --seed 42` - run one task in the container Pi RPC path.
 - `harness validate`, `harness preflight` - check task and agent contracts.
 - `harness hint <run_dir> --text "..."` - append operator guidance to a run's
   `hints.jsonl`; the SolverLoop records it in World state and steers the Agent with it on the
@@ -58,11 +59,11 @@ module:
   plane is unusable (fix the platform; never wrap the sweep in a retry loop), 4 when some case
   produced no run; `gc-runs` reports artifact-free run directories (dry run unless `--apply`).
 
-Prerequisites: Docker for Docker agents, sidecar Gateway, and Docker verifiers;
-`sudo apt-get install -y bubblewrap` for the verifier sandbox; Pi 1.0.4 via
-`npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4` (Node 22.19+);
-gVisor only when a run sets `runtime: runsc`. Run `harness capabilities` to see which
-execution backends the current machine actually has before assuming a run will work.
+Prerequisites: Docker for the Pi RPC Agent and Docker verifiers;
+`sudo apt-get install -y bubblewrap` for the verifier sandbox; gVisor only when a run sets
+`runtime: runsc`. Pi 1.0.4 and Node are baked into `docker/pi-kali`, so no host Pi install is
+required. Run `harness capabilities` to see which execution backends the current machine
+actually has before assuming a run will work.
 
 ## Known Gotchas
 - CI's `enforce harness namespace` step scans every file (except `.git` and the workflow
@@ -72,9 +73,9 @@ execution backends the current machine actually has before assuming a run will w
   for the exact token list before writing names, env vars, or run-dir paths — and note that
   quoting the tokens in a file like this one fails the build just as hard as using them in
   code.
-- `--allow-host-agent` is a deliberate trust gate, not a convenience flag. Trusted host
-  CLI agents and `verification.type: python` verifiers execute unsandboxed host processes;
-  never remove or widen that gate without maintainer review.
+- There is no host Agent execution path. `verification.type: python` still executes a trusted
+  host process under bubblewrap; keep benchmark credentials out of its environment and request
+  maintainer review before changing that trust boundary.
 - `harness gateway` refuses to start without the gateway token env var (default
   `HARNESS_GATEWAY_TOKEN`; model proxy key via `HARNESS_MODEL_API_KEY`). Credentials come
   from the environment only — keep them out of YAML, traces, and `.harness/` artifacts.
@@ -98,8 +99,9 @@ execution backends the current machine actually has before assuming a run will w
 - The control plane, worker queue, coordination blackboard, OTLP export and benchmark registry
   were removed as open-loop complexity; `docs/roadmap/operations.md` was deleted with them, so
   do not reintroduce OPS items. `docs/roadmap/README.md` is the index.
-- CI no longer builds the Pi/Kali image or the fake-Pi resume probe; `docker/pi-kali/` is
-  guarded by `tests/test_pi_kali_image.py` as a static contract check.
+- CI builds a lightweight fake Pi RPC image for the end-to-end `harness run` and `harness
+  subagent` checks; `docker/pi-kali/` remains guarded by `tests/test_pi_kali_image.py` as a
+  static contract check.
 
 ## Coding Style & Naming Conventions
 Python 3.11+, 4-space indentation, `from __future__ import annotations`, and type hints on

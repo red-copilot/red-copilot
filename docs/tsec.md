@@ -24,7 +24,6 @@ The worker must already have the Benchmark VPN connected.
 ```yaml
 apiVersion: harness/v1
 id: pi-kali-tsec
-type: pi
 image: harness/pi-kali:local
 network: host
 pi:

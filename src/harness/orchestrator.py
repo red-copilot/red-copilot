@@ -39,7 +39,7 @@ from .runtime.lifecycle import RunLifecycle, resolve_run_status
 from .runtime.projections import finalize_world_goal, network_result, run_summary, world_result
 from .runtime.results import persist_run_result
 from .secureio import read_regular_text
-from .session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
+from .session import AgentObservation
 from .trace import TraceRecorder
 from .verifier import VerifierError, run_verifier
 from .world import Goal, SQLiteWorldRepository, WorldRepository
@@ -123,7 +123,6 @@ class Orchestrator:
         task_path: Path,
         agent: AgentSpec,
         agent_path: Path,
-        allow_host_agent: bool = False,
         seed: int = 0,
         gateway_config: GatewayConfig | None = None,
         resume_world_events: Path | None = None,
@@ -137,7 +136,6 @@ class Orchestrator:
                 task_path=task_path,
                 agent=agent,
                 agent_path=agent_path,
-                allow_host_agent=allow_host_agent,
                 seed=seed,
                 gateway_config=gateway_config,
                 resume_world_events=resume_world_events,
@@ -165,7 +163,6 @@ class Orchestrator:
                 task_path=task_path,
                 agent=agent,
                 agent_path=agent_path,
-                allow_host_agent=allow_host_agent,
                 seed=seed,
                 gateway_config=gateway_config,
                 resume_world_events=resume_world_events,
@@ -184,7 +181,6 @@ class Orchestrator:
         task_path: Path,
         agent: AgentSpec,
         agent_path: Path,
-        allow_host_agent: bool = False,
         seed: int = 0,
         gateway_config: GatewayConfig | None = None,
         resume_world_events: Path | None = None,
@@ -205,8 +201,8 @@ class Orchestrator:
                 raise ValueError("run_id cannot be set when resuming an existing run")
             run_dir = self._validate_resume_directory(resume_run_dir)
             run_id = run_dir.name
-            if agent.type != "pi" or agent.pi is None or agent.pi.mode != "rpc":
-                raise ValueError("only Pi RPC runs can resume an agent session")
+            if agent.pi is None:
+                raise ValueError("resume requires Pi configuration")
             workspace_stat = (run_dir / "agent-workspace").stat(follow_symlinks=False)
             if not stat.S_ISDIR(workspace_stat.st_mode):
                 raise ValueError("agent workspace must be a real directory")
@@ -226,14 +222,10 @@ class Orchestrator:
             run_dir.mkdir(parents=True, exist_ok=False)
             agent_workspace = create_agent_workspace(run_dir)
         task_dir = task_path.resolve().parent
-        agent_task_dir = (
-            prepare_agent_task_view(
-                task_dir=task_dir,
-                run_root=run_dir,
-                verifier_entrypoint=task.verification.entrypoint,
-            )
-            if agent.type in {"docker", "pi"}
-            else None
+        agent_task_dir = prepare_agent_task_view(
+            task_dir=task_dir,
+            run_root=run_dir,
+            verifier_entrypoint=task.verification.entrypoint,
         )
         trace = TraceRecorder(run_dir / "trace.jsonl", run_id, task.id)
         world_event_path = run_dir / "world.events.jsonl"
@@ -329,28 +321,19 @@ class Orchestrator:
             handle = environment.start()
             run_phase = "gateway_startup"
             if gateway_config is not None:
-                if agent.type in {"docker", "pi"} and agent.network == "none":
-                    raise ValueError(
-                        "Container Agent network:none is incompatible with per-run Gateway"
-                    )
+                if agent.network == "none":
+                    raise ValueError("Pi network:none is incompatible with per-run Gateway")
                 gateway_runtime = build_gateway_runtime(
                     config=gateway_config,
                     run_dir=agent_workspace,
-                    task_dir=(
-                        agent_task_dir
-                        if agent.type in {"docker", "pi"} and agent_task_dir is not None
-                        else task_dir
-                    ),
-                    run_id=run_id,
+                    task_dir=agent_task_dir,
                     trace=trace,
-                    agent_type=agent.type,
                 )
                 gateway_runtime.start()
 
             run_phase = "agent_execution"
             adapter = build_agent_adapter(
                 agent,
-                allow_host_agent=allow_host_agent,
                 trace=trace,
             )
             # Unknown adapters (test doubles, future types) degrade to the
@@ -358,7 +341,7 @@ class Orchestrator:
             trace.emit(
                 "agent.capabilities",
                 actor="harness",
-                data=asdict(getattr(adapter, "capabilities", ONE_SHOT_AGENT_CAPABILITIES)),
+                data=asdict(adapter.capabilities),
             )
             run_context = AgentRunContext(
                 task=session_task,
@@ -370,17 +353,13 @@ class Orchestrator:
                 seed=seed,
                 gateway_url=gateway_runtime.url if gateway_runtime else None,
                 gateway_token=gateway_runtime.token if gateway_runtime else None,
-                gateway_network=gateway_runtime.network_name if gateway_runtime else None,
             )
-            pi_rpc_gateway = bool(
-                gateway_runtime and agent.type == "pi" and agent.pi and agent.pi.mode == "rpc"
-            )
-            if pi_rpc_gateway:
+            if gateway_runtime:
                 run_context = replace(
                     run_context,
                     gateway_usage_path=gateway_runtime.usage_event_path,
                 )
-            if is_resume and pi_rpc_gateway:
+            if is_resume and gateway_runtime:
                 run_context = replace(
                     run_context,
                     resume_gateway_event_offset=recovery_checkpoint.gateway_event_offset,
@@ -498,12 +477,8 @@ class Orchestrator:
                             )
                     raise
 
-            start_session = getattr(adapter, "start_session", None)
             with run_action_owner(run_dir):
-                if callable(start_session):
-                    agent_result = asyncio.run(run_session())
-                else:
-                    agent_result = adapter.run(run_context)
+                agent_result = asyncio.run(run_session())
             usage = UsageMetrics(**_sum_usage(recovered_usage, agent_result.metrics.as_dict()))
 
             if agent_result.timed_out:
@@ -669,8 +644,7 @@ class Orchestrator:
             "gateway": {
                 "enabled": gateway_config is not None,
                 "model_proxy": bool(gateway_config and gateway_config.model_upstream),
-                "docker_access": bool(gateway_config and agent.type in {"docker", "pi"}),
-                "mode": gateway_config.mode if gateway_config else None,
+                "docker_access": bool(gateway_config),
             },
             "metrics": metrics,
             "progress": progress.model_dump(mode="json"),

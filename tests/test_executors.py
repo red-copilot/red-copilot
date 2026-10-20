@@ -30,7 +30,7 @@ from harness.runtime.executors import (
     prepare_shared_findings,
     split_budgets,
 )
-from harness.session import AgentCheckpoint, AgentEvent
+from harness.session import RPC_AGENT_CAPABILITIES, AgentCheckpoint, AgentEvent
 from harness.trace import TraceRecorder
 
 
@@ -38,7 +38,6 @@ def _pi_agent(executors: list[dict] | None = None) -> AgentSpec:
     payload: dict = {
         "apiVersion": "harness/v1",
         "id": "demo",
-        "type": "pi",
         "image": "probe",
         "network": "host",
         "pi": {"model": "test-model", "provider": "openai"},
@@ -134,6 +133,8 @@ class ScriptedSession:
 
 
 class ScriptedAgentAdapter:
+    capabilities = RPC_AGENT_CAPABILITIES
+
     """Per-session behaviour keyed by the session root directory name."""
 
     def __init__(
@@ -507,12 +508,10 @@ def test_container_agent_gets_the_shared_findings_mount(
             {
                 "apiVersion": "harness/v1",
                 "id": "pi-agent",
-                "type": "pi",
-                "image": "harness-pi-kali:test",
-                "pi": {"provider": "fake", "model": "m", "mode": "json"},
+                        "image": "harness-pi-kali:test",
+                "pi": {"provider": "fake", "model": "m"},
             }
         ),
-        allow_host=False,
         trace=TraceRecorder(tmp_path / "trace.jsonl", "run", "task"),
     )
     task_dir = Path("benchmarks/examples/hello").resolve()
@@ -623,6 +622,8 @@ def test_single_session_run_carries_no_executor_attribution(
 
 
 class SummaryAgentAdapter:
+    capabilities = RPC_AGENT_CAPABILITIES
+
     """Session double that writes (or omits) the final report."""
 
     def __init__(self, summary: str | None) -> None:
@@ -765,6 +766,8 @@ def test_seed_notes_requires_a_previous_summary(tmp_path: Path) -> None:
 
 
 class RestartableAgentAdapter:
+    capabilities = RPC_AGENT_CAPABILITIES
+
     """Session double that can be restarted, like the container Pi adapter."""
 
     def __init__(self, *, events_per_session: list[int]) -> None:

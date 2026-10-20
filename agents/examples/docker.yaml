@@ -1,7 +1,0 @@
-apiVersion: harness/v1
-id: docker-agent-example
-type: docker
-image: ghcr.io/example/security-agent:latest
-network: environment
-command: []
-env: {}

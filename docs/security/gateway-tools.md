@@ -29,7 +29,7 @@ metadata, immutable content-hash references explicitly marked untrusted, 409 on
 duplicate call IDs (including after a Gateway restart) and `unknown` status for
 interrupted executions. Output hashes never prove objective effects.
 
-For container Agents, pass the verifier-free task snapshot as `task_dir` to the
+For the Pi container, pass the verifier-free task snapshot as `task_dir` to the
 Gateway. Never mount the original task directory into a Gateway reachable by an
 untrusted Agent.
 

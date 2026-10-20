@@ -9,24 +9,21 @@ import shutil
 import subprocess
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from .agent import (
     AGENT_EVENT_FILE,
-    NORMALIZED_EVENT_FILE,
     AgentError,
     AgentResult,
     AgentRunContext,
     ContainerLimits,
-    _terminate_process,
     build_container_command,
 )
 from .agent_workspace import prepare_agent_task_view
 from .budget import (
     FINALIZE_GRACE_SECONDS,
-    BudgetMonitor,
     UsageCeiling,
     UsageMetrics,
     charge_usage_event,
@@ -40,7 +37,6 @@ from .session import (
     AgentCheckpoint,
     AgentEvent,
     AgentObservation,
-    OneShotAgentSession,
     SessionPhase,
     SessionPhaseTracker,
     append_control,
@@ -71,24 +67,6 @@ def _container_name(run_dir: Path) -> str:
     """
     digest = hashlib.sha256(str(run_dir.resolve()).encode("utf-8")).hexdigest()[:24]
     return f"harness_pi_{digest}"
-
-
-class ContainerPiSession(OneShotAgentSession):
-    """Session wrapper that can actively terminate the running Pi container."""
-
-    def __init__(self, adapter, *, context: AgentRunContext, poll_interval=0.05) -> None:
-        super().__init__(adapter, context=context, poll_interval=poll_interval)
-        self.container_name = _container_name(self.run_dir)
-
-    async def close(self, reason: str) -> None:
-        await super().close(reason)
-        await asyncio.to_thread(
-            subprocess.run,
-            ["docker", "kill", self.container_name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
 
 
 class ContainerPiRpcSession:
@@ -213,12 +191,10 @@ class ContainerPiRpcSession:
         environment_network = context.environment_network
         gateway_url = context.gateway_url
         gateway_token = context.gateway_token
-        gateway_network = context.gateway_network
         gateway_enabled = bool(gateway_url and gateway_token)
         enforced = enforced_network(
             self.adapter.spec,
             environment_network=environment_network,
-            gateway_network=gateway_network,
             gateway_enabled=gateway_enabled,
         )
         if gateway_enabled and (
@@ -226,15 +202,10 @@ class ContainerPiRpcSession:
         ):
             raise AgentError("Pi offline networking is incompatible with per-run Gateway")
 
-        sidecar_gateway = gateway_enabled and gateway_network is not None
         if enforced is not None:
             primary_network = enforced.primary
         elif self.adapter.spec.network_profile == "offline":
             primary_network = "none"
-        elif sidecar_gateway:
-            if self.adapter.spec.network == "host":
-                raise AgentError("Pi network:host is incompatible with sidecar Gateway mode")
-            primary_network = str(gateway_network)
         elif self.adapter.spec.network == "host":
             primary_network = "host"
             if gateway_enabled:
@@ -256,7 +227,7 @@ class ContainerPiRpcSession:
             gateway_url=gateway_url,
             gateway_token=gateway_token,
         )
-        host_gateway = gateway_enabled and not sidecar_gateway and primary_network != "host"
+        host_gateway = gateway_enabled and primary_network != "host"
         create_command = self.adapter._container_command(
             task,
             task_dir=task_dir,
@@ -291,24 +262,6 @@ class ContainerPiRpcSession:
             },
         )
         await asyncio.to_thread(self.adapter._docker, create_command, cwd=task_dir)
-        enforced_target = enforced.environment if enforced is not None else None
-        target_differs = (
-            enforced_target is not None and enforced_target != primary_network
-            if enforced is not None
-            else bool(environment_network and environment_network != gateway_network)
-        )
-        if sidecar_gateway and environment_network and target_differs:
-            await asyncio.to_thread(
-                self.adapter._docker,
-                [
-                    "docker",
-                    "network",
-                    "connect",
-                    str(enforced_target or environment_network),
-                    self.container_name,
-                ],
-                cwd=task_dir,
-            )
         self._stderr_handle = open_regular_file(self.stderr_path, "ab")
         self.process = await asyncio.create_subprocess_exec(
             "docker",
@@ -876,8 +829,15 @@ class ContainerPiRpcSession:
 class ContainerPiAdapter(PiAdapter):
     """Run Pi inside a restricted Docker container while reusing Pi JSON parsing."""
 
-    def __init__(self, spec: AgentSpec, *, allow_host: bool, trace: TraceRecorder) -> None:
-        del allow_host
+    def __init__(
+        self,
+        spec: AgentSpec,
+        *,
+        trace: TraceRecorder,
+        include_solver_protocol: bool = True,
+        extra_mounts: Sequence[tuple[Path, str]] = (),
+        workdir: str = "/run/harness",
+    ) -> None:
         if shutil.which("docker") is None:
             raise AgentError("docker executable was not found")
         if spec.pi is None:
@@ -887,6 +847,9 @@ class ContainerPiAdapter(PiAdapter):
         self.spec = spec
         self.pi = spec.pi
         self.trace = trace
+        self.include_solver_protocol = include_solver_protocol
+        self.extra_mounts = tuple(extra_mounts)
+        self.workdir = workdir
         self._tool_started: dict[str, float] = {}
 
     @staticmethod
@@ -948,7 +911,8 @@ class ContainerPiAdapter(PiAdapter):
             host_gateway=host_gateway,
             agent_task_dir=agent_task_dir,
             shared_findings_dir=shared_findings_dir,
-            workdir="/run/harness",
+            extra_mounts=self.extra_mounts,
+            workdir=self.workdir,
             limits=ContainerLimits(
                 pids=512,
                 memory="4g",
@@ -962,10 +926,7 @@ class ContainerPiAdapter(PiAdapter):
             extra_cap_add=tuple(self.pi.cap_add),
             extra_env=pi_env,
             env_passthrough=tuple(self.pi.env_passthrough),
-            interactive=self.pi.mode == "rpc",
-            event_file_name=(
-                AGENT_EVENT_FILE if self.pi.mode == "rpc" else NORMALIZED_EVENT_FILE
-            ),
+            interactive=True,
             image_command=[
                 str(self.spec.image),
                 *self._command(
@@ -978,243 +939,7 @@ class ContainerPiAdapter(PiAdapter):
 
     @property
     def capabilities(self) -> AgentCapabilities:
-        from .session import ONE_SHOT_AGENT_CAPABILITIES
+        return RPC_AGENT_CAPABILITIES
 
-        if self.pi.mode == "rpc":
-            return RPC_AGENT_CAPABILITIES
-        return ONE_SHOT_AGENT_CAPABILITIES
-
-    async def start_session(
-        self,
-        context: AgentRunContext,
-    ) -> ContainerPiSession | ContainerPiRpcSession:
-        if self.pi.mode == "rpc":
-            return await ContainerPiRpcSession.start(self, context=context)
-        if context.resume_session_id is not None:
-            raise AgentError("Pi JSON mode cannot restore an Agent session")
-        return await ContainerPiSession.start(self, context=context)
-
-    def run(self, context: AgentRunContext) -> AgentResult:
-        if self.pi.mode == "rpc":
-            raise AgentError(
-                "Pi RPC mode requires start_session(); use mode: json for one-shot runs"
-            )
-        if context.resume_session_id is not None:
-            raise AgentError("Pi JSON mode cannot restore an Agent session")
-        from .network_policy import enforced_network
-
-        task = context.task
-        task_dir = context.task_dir
-        run_dir = context.run_dir
-        environment_network = context.environment_network
-        gateway_url = context.gateway_url
-        gateway_token = context.gateway_token
-        gateway_network = context.gateway_network
-        gateway_enabled = context.gateway_enabled
-        enforced = enforced_network(
-            self.spec,
-            environment_network=environment_network,
-            gateway_network=gateway_network,
-            gateway_enabled=gateway_enabled,
-        )
-        if gateway_enabled and (
-            self.spec.network == "none" or self.spec.network_profile == "offline"
-        ):
-            raise AgentError("Pi offline networking is incompatible with per-run Gateway")
-
-        if self.spec.network == "host" and gateway_url and gateway_network is None:
-            gateway_url = gateway_url.replace("host.docker.internal", "127.0.0.1")
-
-        event_file = run_dir / "events.jsonl"
-        event_file.write_text("", encoding="utf-8")
-        raw_path = run_dir / "agent.stdout.log"
-        stderr_path = run_dir / "agent.stderr.log"
-        raw_path.write_text("", encoding="utf-8")
-        self._prepare_agent_dir(
-            run_dir=run_dir,
-            gateway_url=gateway_url,
-            gateway_token=gateway_token,
-        )
-        (run_dir / "pi-sessions").mkdir(parents=True, exist_ok=True)
-        (run_dir / "home").mkdir(parents=True, exist_ok=True)
-
-        container_name = _container_name(run_dir)
-        sidecar_gateway = gateway_enabled and gateway_network is not None
-        host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
-        if enforced is not None:
-            primary_network = enforced.primary
-        elif self.spec.network_profile == "offline":
-            primary_network = "none"
-        elif sidecar_gateway:
-            if self.spec.network == "host":
-                raise AgentError("Pi network:host is incompatible with sidecar Gateway mode")
-            primary_network = str(gateway_network)
-        elif self.spec.network == "host":
-            primary_network = "host"
-        elif self.spec.network == "environment":
-            primary_network = environment_network or "bridge"
-        else:
-            primary_network = "none"
-
-        create_command = self._container_command(
-            task,
-            task_dir=task_dir,
-            run_dir=run_dir,
-            container_name=container_name,
-            network=primary_network,
-            environment_project=context.environment_project,
-            seed=context.seed,
-            gateway_url=gateway_url,
-            gateway_token=gateway_token,
-            host_gateway=host_gateway,
-            agent_session_id=None,
-            agent_task_dir=context.agent_task_dir,
-            shared_findings_dir=context.shared_findings_dir,
-        )
-
-        self.trace.emit(
-            "agent.started",
-            actor="agent",
-            data={
-                "agent_id": self.spec.id,
-                "type": "pi",
-                "execution": "docker",
-                "image": self.spec.image,
-                "network": primary_network,
-                "target_network": environment_network,
-                "runtime": self.spec.runtime,
-                "cap_add": self.pi.cap_add,
-                "model": self.pi.model,
-                "provider": "harness" if gateway_enabled else self.pi.provider,
-                "thinking": self.pi.thinking,
-                "tools": self.pi.tools,
-                "gateway_injected": gateway_enabled,
-                "gateway_network": gateway_network,
-                "network_profile": self.spec.network_profile,
-                "network_profile_enforcement": (
-                    "docker-none"
-                    if self.spec.network_profile in {"offline", "fully-offline"}
-                    else "docker-internal-network"
-                    if self.spec.network_profile == "target-only"
-                    else "docker-internal-network-gateway-proxy"
-                    if self.spec.network_profile == "model-allowed"
-                    else "advisory"
-                    if self.spec.network_profile == "benchmark-only"
-                    else "unrestricted"
-                ),
-            },
-        )
-
-        monitor = BudgetMonitor(event_file, task.budgets, self.trace)
-        timed_out = False
-        started = time.monotonic()
-        offset = 0
-        remainder = ""
-
-        try:
-            self._docker(create_command, cwd=task_dir)
-            enforced_target = enforced.environment if enforced is not None else None
-            target_differs = (
-                enforced_target is not None and enforced_target != primary_network
-                if enforced is not None
-                else bool(environment_network and environment_network != gateway_network)
-            )
-            if sidecar_gateway and environment_network and target_differs:
-                self._docker(
-                    [
-                        "docker",
-                        "network",
-                        "connect",
-                        enforced_target or environment_network,
-                        container_name,
-                    ],
-                    cwd=task_dir,
-                )
-
-            with (
-                open_regular_file(raw_path, "ab") as stdout_handle,
-                open_regular_file(stderr_path, "wb") as stderr_handle,
-            ):
-                proc = subprocess.Popen(
-                    ["docker", "start", "-a", container_name],
-                    cwd=task_dir,
-                    env=os.environ.copy(),
-                    stdout=stdout_handle,
-                    stderr=stderr_handle,
-                    start_new_session=True,
-                )
-                while proc.poll() is None:
-                    offset, remainder = self._poll_output(
-                        raw_path,
-                        offset=offset,
-                        remainder=remainder,
-                        event_file=event_file,
-                        account_model=not gateway_enabled,
-                    )
-                    exceeded = monitor.poll()
-                    if exceeded:
-                        _terminate_process(proc)
-                        break
-                    if (
-                        time.monotonic() - started
-                        > task.budgets.wall_time + FINALIZE_GRACE_SECONDS
-                    ):
-                        timed_out = True
-                        self.trace.emit(
-                            "budget.exceeded",
-                            data={
-                                "budget": "wall_time",
-                                "limit": task.budgets.wall_time,
-                                "value": time.monotonic() - started,
-                            },
-                        )
-                        _terminate_process(proc)
-                        break
-                    time.sleep(0.05)
-                returncode = proc.wait()
-        finally:
-            subprocess.run(
-                ["docker", "rm", "-f", container_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-
-        offset, remainder = self._poll_output(
-            raw_path,
-            offset=offset,
-            remainder=remainder,
-            event_file=event_file,
-            account_model=not gateway_enabled,
-        )
-        del offset
-        if remainder.strip():
-            self._translate_line(
-                remainder.strip(),
-                event_file=event_file,
-                account_model=not gateway_enabled,
-            )
-        monitor.finish()
-
-        result = AgentResult(
-            returncode=returncode,
-            timed_out=timed_out,
-            budget_exceeded=monitor.exceeded,
-            stdout=read_regular_text(raw_path),
-            stderr=read_regular_text(stderr_path),
-            metrics=monitor.metrics,
-        )
-        self.trace.emit(
-            "agent.finished",
-            actor="agent",
-            data={
-                "returncode": result.returncode,
-                "timed_out": result.timed_out,
-                "budget_exceeded": result.budget_exceeded,
-                "metrics": result.metrics.as_dict(),
-                "pi_protocol": "json",
-                "execution": "docker",
-                "image": self.spec.image,
-            },
-        )
-        return result
+    async def start_session(self, context: AgentRunContext) -> ContainerPiRpcSession:
+        return await ContainerPiRpcSession.start(self, context=context)

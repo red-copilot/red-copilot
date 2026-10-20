@@ -50,7 +50,6 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.network_policy",
         "harness.pi_adapter",
         "harness.pi_container",
-        "harness.pi_host",
         "harness.progress",
         "harness.runtime",
         "harness.runtime.bootstrap",
@@ -99,6 +98,9 @@ DELETED_SUBSYSTEMS: frozenset[str] = frozenset(
         "harness.planner",
         "harness.skills",
         "harness.runtime.solver_profile",
+        # Host-only execution paths retired in favour of container Pi RPC.
+        "harness.pi_host",
+        "harness.process_guard",
     }
 )
 

@@ -54,8 +54,6 @@ def run_preflight(
     tsec_base_url_env: str = "BENCHMARK_BASE_URL",
     tsec_token_env: str = "BENCHMARK_TOKEN",
     gateway_enabled: bool = False,
-    gateway_mode: str = "host",
-    gateway_image: str | None = None,
     model_upstream: str | None = None,
 ) -> PreflightReport:
     """Check only local prerequisites; this function never contacts a registry."""
@@ -146,59 +144,43 @@ def run_preflight(
             )
         )
 
-    if agent.type == "cli":
-        executable = agent.command[0] if agent.command else ""
-        available = bool(executable and shutil.which(executable))
+    image = agent.image or ""
+    available = _local_image_available(image)
+    checks.append(
+        PreflightCheck(
+            name="agent_image",
+            ok=available,
+            detail=(
+                f"local image available: {image}"
+                if available
+                else f"local image unavailable: {image}; build or load it before running"
+            ),
+        )
+    )
+
+    try:
+        validate_agent_task_inputs(
+            task_dir=task_root,
+            verifier_entrypoint=task.verification.entrypoint,
+        )
+    except (OSError, ValueError) as exc:
         checks.append(
             PreflightCheck(
-                name="agent_command",
-                ok=available,
-                detail=(
-                    f"executable available: {executable}"
-                    if available
-                    else f"executable unavailable: {executable or '(empty command)'}"
-                ),
+                name="agent_task_inputs",
+                ok=False,
+                detail=f"Agent task input snapshot is unsafe: {exc}",
             )
         )
     else:
-        image = agent.image or ""
-        available = _local_image_available(image)
         checks.append(
             PreflightCheck(
-                name="agent_image",
-                ok=available,
-                detail=(
-                    f"local image available: {image}"
-                    if available
-                    else f"local image unavailable: {image}; build or load it before running"
-                ),
+                name="agent_task_inputs",
+                ok=True,
+                detail="Agent task input tree is readable and within snapshot limits",
             )
         )
 
-    if agent.type in {"docker", "pi"}:
-        try:
-            validate_agent_task_inputs(
-                task_dir=task_root,
-                verifier_entrypoint=task.verification.entrypoint,
-            )
-        except (OSError, ValueError) as exc:
-            checks.append(
-                PreflightCheck(
-                    name="agent_task_inputs",
-                    ok=False,
-                    detail=f"Agent task input snapshot is unsafe: {exc}",
-                )
-            )
-        else:
-            checks.append(
-                PreflightCheck(
-                    name="agent_task_inputs",
-                    ok=True,
-                    detail="Agent task input tree is readable and within snapshot limits",
-                )
-            )
-
-    if agent.type == "pi" and not gateway_enabled and agent.pi is not None and agent.pi.provider:
+    if not gateway_enabled and agent.pi is not None and agent.pi.provider:
         key_names = {
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
@@ -223,31 +205,9 @@ def run_preflight(
             )
 
     profile = agent.network_profile
-    strict_profiles = {"offline", "target-only", "model-allowed", "fully-offline"}
-    host_agent = agent.type == "cli" and profile in strict_profiles
     legacy_advisory = profile == "benchmark-only"
-    network_ready = not host_agent
+    network_ready = True
     topology_errors: list[str] = []
-    if gateway_enabled and gateway_mode not in {"host", "sidecar"}:
-        network_ready = False
-        topology_errors.append("gateway mode must be host or sidecar")
-    if gateway_enabled and gateway_mode == "sidecar":
-        if not gateway_image:
-            network_ready = False
-            topology_errors.append("sidecar Gateway mode requires a local Gateway image")
-        else:
-            sidecar_available = _local_image_available(gateway_image)
-            checks.append(
-                PreflightCheck(
-                    name="gateway_image",
-                    ok=sidecar_available,
-                    detail=(
-                        f"local image available: {gateway_image}"
-                        if sidecar_available
-                        else f"local image unavailable: {gateway_image}; build or load it before running"
-                    ),
-                )
-            )
     if profile in {"offline", "fully-offline"} and gateway_enabled:
         network_ready = False
         topology_errors.append("fully-offline networking cannot use a Gateway")
@@ -258,19 +218,7 @@ def run_preflight(
         if gateway_enabled:
             network_ready = False
             topology_errors.append("target-only networking cannot use a Gateway")
-    if profile == "model-allowed":
-        if agent.type != "docker":
-            network_ready = False
-            topology_errors.append("model-allowed currently requires a Docker Agent")
-        if not gateway_enabled or gateway_mode != "sidecar" or not gateway_image:
-            network_ready = False
-            topology_errors.append(
-                "model-allowed requires --gateway --gateway-mode sidecar --gateway-image"
-            )
-        elif not model_upstream:
-            network_ready = False
-            topology_errors.append("model-allowed requires --model-upstream")
-    if agent.type == "pi" and gateway_enabled and not model_upstream:
+    if gateway_enabled and not model_upstream:
         network_ready = False
         topology_errors.append("Pi Gateway mode requires --model-upstream for model access")
     effective_network = (
@@ -278,17 +226,13 @@ def run_preflight(
         if profile in {"offline", "fully-offline"}
         else "environment (must be Docker-internal)"
         if profile == "target-only"
-        else "internal Gateway + internal environment (sidecar required)"
-        if profile == "model-allowed"
         else agent.network
     )
     network_detail = (
         f"network_profile={profile}; configured_network={agent.network}; "
         f"effective_agent_network={effective_network}; "
         + (
-            "strict profiles require a Docker Agent"
-            if host_agent
-            else "legacy profile is advisory and does not isolate public egress"
+            "legacy profile is advisory and does not isolate public egress"
             if legacy_advisory
             else "strict network topology is checked at runtime; no connectivity probe performed"
         )

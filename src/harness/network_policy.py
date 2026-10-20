@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from .agent import AgentError
 from .models import AgentSpec
 
-STRICT_PROFILES = {"offline", "target-only", "model-allowed", "fully-offline"}
+STRICT_PROFILES = {"offline", "target-only", "fully-offline"}
 PROXY_ENV_NAMES = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -42,7 +42,6 @@ class EnforcedNetworks:
 
     primary: str
     environment: str | None = None
-    gateway: str | None = None
 
 
 def _require_internal_network(name: str, *, purpose: str) -> str:
@@ -74,20 +73,18 @@ def enforced_network(
     spec: AgentSpec,
     *,
     environment_network: str | None,
-    gateway_network: str | None,
     gateway_enabled: bool,
 ) -> EnforcedNetworks | None:
-    """Return the enforced primary network, or None for legacy profiles.
+    """Return the enforced primary network, or None for advisory profiles.
 
-    Strict profiles fail closed on host CLI Agents, unverified target networks,
-    or missing model Gateway routing. ``benchmark-only`` remains a legacy,
-    advisory alias for compatibility and must not be treated as isolation.
+    Strict profiles fail closed on unverified target networks; model Gateway
+    access is incompatible with offline and target-only profiles.
+    ``benchmark-only`` remains a legacy, advisory alias for compatibility and
+    must not be treated as isolation.
     """
     profile = spec.network_profile
     if profile not in STRICT_PROFILES:
         return None
-    if spec.type not in {"docker", "pi"}:
-        raise AgentError(f"network profile {profile!r} requires a Docker Agent")
 
     if profile in {"offline", "fully-offline"}:
         if gateway_enabled:
@@ -102,18 +99,4 @@ def enforced_network(
             raise AgentError("target-only networking is incompatible with Gateway access")
         return EnforcedNetworks(primary=environment_id, environment=environment_id)
 
-    if not gateway_enabled or not gateway_network:
-        raise AgentError("model-allowed networking requires a sidecar model Gateway")
-    if spec.type != "docker":
-        raise AgentError("model-allowed networking currently requires a Docker Agent")
-    gateway_id = _require_internal_network(gateway_network, purpose=profile)
-    environment_id = (
-        _require_internal_network(environment_network, purpose=profile)
-        if environment_network
-        else None
-    )
-    return EnforcedNetworks(
-        primary=gateway_id,
-        environment=environment_id,
-        gateway=gateway_id,
-    )
+    raise AgentError(f"unsupported strict network profile: {profile}")

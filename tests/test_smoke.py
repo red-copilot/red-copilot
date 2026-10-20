@@ -10,20 +10,73 @@ from harness.models import load_agent, load_task
 from harness.orchestrator import Orchestrator
 from harness.runtime.bootstrap import bootstrap_solver
 from harness.runtime.checkpoint import save_session_checkpoint
-from harness.session import AgentCheckpoint, AgentEvent
+from harness.session import RPC_AGENT_CAPABILITIES, AgentCheckpoint, AgentEvent
 from harness.trace import TraceRecorder
 from harness.world import Goal
 
 
-def test_smoke_run(tmp_path: Path) -> None:
+class _ProofSession:
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+
+    async def events(self):
+        if False:
+            yield AgentEvent(type="unused", data={})
+
+    async def result(self):
+        return AgentResult(
+            returncode=0,
+            timed_out=False,
+            budget_exceeded=None,
+            stdout="",
+            stderr="",
+            metrics=UsageMetrics(
+                input_tokens=7,
+                output_tokens=5,
+                total_tokens=12,
+                model_calls=1,
+                tool_calls=1,
+                cost_usd=0.01,
+            ),
+        )
+
+    async def checkpoint(self):
+        return AgentCheckpoint("proof-checkpoint", 0, 0, "pi-session-proof")
+
+    async def observe(self, _observation):
+        return None
+
+    async def close(self, _reason):
+        return None
+
+
+class _ProofAdapter:
+    capabilities = RPC_AGENT_CAPABILITIES
+
+    async def start_session(self, context, **_kwargs):
+        (Path(context.run_dir) / "proof.txt").write_text("red-harness-ok", encoding="utf-8")
+        return _ProofSession(Path(context.run_dir))
+
+
+def _install_proof_adapter(monkeypatch) -> None:
+    import harness.orchestrator as orchestrator_module
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: _ProofAdapter(),
+    )
+
+
+def test_smoke_run(monkeypatch, tmp_path: Path) -> None:
+    _install_proof_adapter(monkeypatch)
     task_path = Path("benchmarks/examples/hello/task.yaml")
-    agent_path = Path("agents/examples/demo.yaml")
+    agent_path = Path("agents/examples/pi.yaml")
     result = Orchestrator(tmp_path / "runs").run(
         task=load_task(task_path),
         task_path=task_path,
         agent=load_agent(agent_path),
         agent_path=agent_path,
-        allow_host_agent=True,
         seed=42,
         run_id="run_worker_owned",
     )
@@ -52,15 +105,15 @@ def test_unavailable_task_verifier_is_recorded_and_run_fails_closed(monkeypatch,
     def unavailable(*_args, **_kwargs):
         raise VerifierError("simulated verifier timeout with private details")
 
+    _install_proof_adapter(monkeypatch)
     monkeypatch.setattr("harness.orchestrator.run_verifier", unavailable)
     task_path = Path("benchmarks/examples/hello/task.yaml")
-    agent_path = Path("agents/examples/demo.yaml")
+    agent_path = Path("agents/examples/pi.yaml")
     result = Orchestrator(tmp_path / "runs").run(
         task=load_task(task_path),
         task_path=task_path,
         agent=load_agent(agent_path),
         agent_path=agent_path,
-        allow_host_agent=True,
         seed=1,
     )
 
@@ -91,13 +144,12 @@ def test_environment_start_failure_is_classified_separately_from_solver_failure(
         "harness.orchestrator.build_environment", lambda *_args, **_kwargs: FailingEnvironment()
     )
     task_path = Path("benchmarks/examples/hello/task.yaml")
-    agent_path = Path("agents/examples/demo.yaml")
+    agent_path = Path("agents/examples/pi.yaml")
     result = Orchestrator(tmp_path / "runs").run(
         task=load_task(task_path),
         task_path=task_path,
         agent=load_agent(agent_path),
         agent_path=agent_path,
-        allow_host_agent=True,
         seed=1,
     )
 
@@ -111,9 +163,10 @@ def test_environment_start_failure_is_classified_separately_from_solver_failure(
         for path in run_dir.iterdir()
         if path.is_file() and path.suffix in {".json", ".jsonl"}
     )
-def test_smoke_resume_world_state(tmp_path: Path) -> None:
+def test_smoke_resume_world_state(monkeypatch, tmp_path: Path) -> None:
+    _install_proof_adapter(monkeypatch)
     task_path = Path("benchmarks/examples/hello/task.yaml")
-    agent_path = Path("agents/examples/demo.yaml")
+    agent_path = Path("agents/examples/pi.yaml")
     orchestrator = Orchestrator(tmp_path / "runs")
 
     first = orchestrator.run(
@@ -121,7 +174,6 @@ def test_smoke_resume_world_state(tmp_path: Path) -> None:
         task_path=task_path,
         agent=load_agent(agent_path),
         agent_path=agent_path,
-        allow_host_agent=True,
         seed=1,
     )
     first_dir = tmp_path / "runs" / first["run_id"]
@@ -137,7 +189,6 @@ def test_smoke_resume_world_state(tmp_path: Path) -> None:
         task_path=task_path,
         agent=load_agent(agent_path),
         agent_path=agent_path,
-        allow_host_agent=True,
         seed=2,
         resume_world_events=world_events,
     )
@@ -146,9 +197,10 @@ def test_smoke_resume_world_state(tmp_path: Path) -> None:
     assert second["world"]["revision"] >= first["world"]["revision"]
 
 
-def test_smoke_resume_sqlite_world_state(tmp_path: Path) -> None:
+def test_smoke_resume_sqlite_world_state(monkeypatch, tmp_path: Path) -> None:
+    _install_proof_adapter(monkeypatch)
     task_path = Path("benchmarks/examples/hello/task.yaml")
-    agent_path = Path("agents/examples/demo.yaml")
+    agent_path = Path("agents/examples/pi.yaml")
     orchestrator = Orchestrator(tmp_path / "runs")
 
     first = orchestrator.run(
@@ -156,7 +208,6 @@ def test_smoke_resume_sqlite_world_state(tmp_path: Path) -> None:
         task_path=task_path,
         agent=load_agent(agent_path),
         agent_path=agent_path,
-        allow_host_agent=True,
         seed=3,
     )
     first_dir = tmp_path / "runs" / first["run_id"]
@@ -168,7 +219,6 @@ def test_smoke_resume_sqlite_world_state(tmp_path: Path) -> None:
         task_path=task_path,
         agent=load_agent(agent_path),
         agent_path=agent_path,
-        allow_host_agent=True,
         seed=4,
         resume_world_events=world_db,
     )
@@ -197,6 +247,8 @@ class _ResumeSession:
 
 
 class _ResumeAdapter:
+    capabilities = RPC_AGENT_CAPABILITIES
+
     def __init__(self) -> None:
         self.resume_session_id = None
         self.session_task = None

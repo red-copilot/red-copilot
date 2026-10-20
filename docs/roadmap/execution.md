@@ -1,6 +1,6 @@
 # EXE — Agents, tools, containers and gateway
 
-**Scope:** `agent.py`, `session.py`, `pi_adapter.py`, `pi_container.py`, `gateway.py`, `gateway_runtime.py`, `tool_adapter.py`, `environment.py`, `docker/pi-kali/`. Pi runs inside Kali Rolling containers with long-lived RPC where configured.
+**Scope:** `agent.py`, `session.py`, `pi_adapter.py`, `pi_container.py`, `subagent.py`, `gateway.py`, `gateway_runtime.py`, `tool_adapter.py`, `environment.py`, `docker/pi-kali/`. Pi RPC inside a Kali Rolling container is the only Agent execution path; the Gateway is host-only.
 
 ### EXE-01 [x] P0 — Execution trust boundary
 Deliver: documented threat model plus enforceable mounts, secret isolation, rootfs permissions, capability/PID/CPU/RAM limits, network rules, a non-privileged default and artifact handoff; the Agent must not reach the authoritative World DB, verifier source or credentials.
@@ -13,7 +13,7 @@ Accept: fake Pi and real Docker smoke tests covering malformed RPC streams, sett
 State: strict typed adapters (`AgentRunContext`, `SessionPhaseTracker`, `AgentCapabilities`), trusted Gateway-side usage accounting, fail-closed telemetry validation and multi-dimension soft budgets riding the wall-clock finalize path with `FINALIZE_GRACE_SECONDS` are implemented. Outstanding: live Docker Pi/Gateway smoke and the live container budget smoke.
 
 ### EXE-03 [~] P1 — Offline profiles and deterministic build
-Deliver: separate `target-only`, `model-allowed` and `fully-offline` networking, pinned image dependencies and pre-installed tools with no package installation while solving.
+Deliver: separate `target-only` and `fully-offline` networking, pinned image dependencies and pre-installed tools with no package installation while solving.
 Accept: a no-public-egress smoke suite in a clean runner plus network policy tests.
 State: profiles are enforced from inspected internal-network IDs, preflight describes the required topology, and the Pi image pins the Kali OCI digest, rewrites `kali-rolling` to `kali-last-snapshot`, pins the Pi version and ships wordlists. Internal-target egress denial now runs in CI (`tests/test_network_profiles_docker.py`) and passed locally; clean-runner image reproducibility evidence remains outstanding.
 
@@ -23,7 +23,7 @@ Accept: contract tests across filesystem, local process and authorized network t
 State: implemented in `tool_adapter.py` with Gateway allowlisting, fail-closed deduplication and untrusted content-hash evidence. The optional sandboxed process and CIDR-restricted HTTP plugins were removed on 2026-10-15 as unused production code; the contract and Gateway authorization remain.
 
 ### EXE-05 [~] P1 — Agent session contract consolidation
-Deliver: one typed `AgentRunContext`, an observable session phase machine and declared `AgentCapabilities` with traced negotiation so one-shot degradation is contract rather than accident.
+Deliver: one typed `AgentRunContext`, an observable Pi RPC session phase machine and the single live-steer capability record mirrored into the trace.
 Accept: all adapter call sites use the context object; phase transitions are validated and mirrored into the trace; capability emission appears in local and benchmark traces.
 State: implemented in `agent.py` and `session.py`; live Docker/RPC smoke remains before acceptance.
 

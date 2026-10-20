@@ -52,9 +52,9 @@ def subagent_command(
     as unverified input.
     """
     from .models import load_agent
-    from .pi_host import run_subagent
+    from .subagent import run_subagent
 
-    agent_path = agent or Path(os.environ.get("HARNESS_AGENT", "agents/hosted/pi-deepseek.yaml"))
+    agent_path = agent or Path(os.environ.get("HARNESS_AGENT", "agents/examples/pi.yaml"))
     spec = load_agent(agent_path)
     result = run_subagent(spec, objective, timeout=timeout, cwd=workdir)
     if result.text:
@@ -126,25 +126,15 @@ def _gateway_config(
     model_api_key_env: str,
     input_price: float,
     output_price: float,
-    mode: str,
-    sidecar_image: str | None,
-    sidecar_runtime: str | None,
 ) -> GatewayConfig | None:
     if not enabled:
         return None
-    if mode not in {"host", "sidecar"}:
-        raise typer.BadParameter("--gateway-mode must be host or sidecar")
-    if mode == "sidecar" and not sidecar_image:
-        raise typer.BadParameter("--gateway-image is required for sidecar mode")
     return GatewayConfig(
         policy_path=policy.resolve() if policy else None,
         model_upstream=model_upstream,
         model_api_key=os.environ.get(model_api_key_env),
         input_price_per_million_usd=input_price,
         output_price_per_million_usd=output_price,
-        mode=mode,
-        sidecar_image=sidecar_image,
-        sidecar_runtime=sidecar_runtime,
     )
 
 
@@ -171,8 +161,6 @@ def preflight(
         str, typer.Option("--benchmark-token-env")
     ] = "BENCHMARK_TOKEN",
     gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
-    gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
-    gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
     model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
 ) -> None:
     """Check local run prerequisites without fetching images or contacting services."""
@@ -185,8 +173,6 @@ def preflight(
             tsec_base_url_env=base_url_env,
             tsec_token_env=benchmark_token_env,
             gateway_enabled=gateway_enabled,
-            gateway_mode=gateway_mode,
-            gateway_image=gateway_image,
             model_upstream=model_upstream,
         )
     except (ValidationError, ValueError, TypeError) as exc:
@@ -209,9 +195,6 @@ def run(
         Path | None,
         typer.Option("--gateway-policy", exists=True, dir_okay=False),
     ] = None,
-    gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
-    gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
-    gateway_runtime: Annotated[str | None, typer.Option("--gateway-runtime")] = None,
     model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
     model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
         "HARNESS_MODEL_API_KEY"
@@ -226,13 +209,6 @@ def run(
         Path | None,
         typer.Option("--resume-run", exists=True, file_okay=False),
     ] = None,
-    allow_host_agent: Annotated[
-        bool,
-        typer.Option(
-            "--allow-host-agent",
-            help="Allow trusted CLI agent command to execute on the host.",
-        ),
-    ] = False,
     context_token_budget: Annotated[
         int | None,
         typer.Option("--context-token-budget", min=1, help="Bound world.context.txt assembly by an offline token estimate."),
@@ -261,9 +237,6 @@ def run(
         model_api_key_env=model_api_key_env,
         input_price=input_price,
         output_price=output_price,
-        mode=gateway_mode,
-        sidecar_image=gateway_image,
-        sidecar_runtime=gateway_runtime,
     )
     orchestrator = Orchestrator(runs_root)
     results = [
@@ -272,7 +245,6 @@ def run(
             task_path=task,
             agent=agent_spec,
             agent_path=agent,
-            allow_host_agent=allow_host_agent,
             seed=seed + index,
             gateway_config=gateway_config,
             resume_world_events=resume_world,
@@ -354,13 +326,6 @@ def tsec(
     ] = 0,
     start_retries: Annotated[int, typer.Option("--start-retries", min=0, max=10)] = 2,
     retry_delay: Annotated[float, typer.Option("--retry-delay", min=0)] = 2.0,
-    allow_host_agent: Annotated[
-        bool,
-        typer.Option(
-            "--allow-host-agent",
-            help="Allow a trusted CLI agent to execute on the host.",
-        ),
-    ] = False,
     max_unconfirmed_progress: Annotated[
         int, typer.Option("--max-unconfirmed-progress", min=1)
     ] = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
@@ -482,8 +447,7 @@ def tsec(
                 hint_threshold=hint_threshold,
                 start_retries=start_retries,
                 retry_delay=retry_delay,
-                allow_host_agent=allow_host_agent,
-                max_unconfirmed_progress=max_unconfirmed_progress,
+                    max_unconfirmed_progress=max_unconfirmed_progress,
                 parallel=parallel,
                 concurrency=concurrency,
                 total_wall_time=total_wall_time,

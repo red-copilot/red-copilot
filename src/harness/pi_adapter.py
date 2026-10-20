@@ -2,25 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-from .agent import (
-    AGENT_EVENT_FILE,
-    NORMALIZED_EVENT_FILE,
-    AgentError,
-    AgentResult,
-    AgentRunContext,
-    _terminate_process,
-    gateway_environment,
-    task_environment,
-)
-from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor
+from .agent import AgentError
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 
@@ -111,10 +99,15 @@ def _tool_exit_code(event: object) -> int | None:
 
 
 class PiAdapter:
-    """Run Pi inside a constrained Docker/Kali container and consume Pi JSONL."""
+    """Normalize a container Pi ``--mode rpc`` stream and build its argv."""
 
-    def __init__(self, spec: AgentSpec, *, allow_host: bool, trace: TraceRecorder) -> None:
-        del allow_host
+    def __init__(
+        self,
+        spec: AgentSpec,
+        *,
+        trace: TraceRecorder,
+        include_solver_protocol: bool = True,
+    ) -> None:
         if spec.pi is None:
             raise AgentError("Pi agent requires a pi configuration block")
         if not spec.image:
@@ -124,24 +117,8 @@ class PiAdapter:
         self.spec = spec
         self.pi = spec.pi
         self.trace = trace
+        self.include_solver_protocol = include_solver_protocol
         self._tool_started: dict[str, float] = {}
-
-    @staticmethod
-    def _append_event(path: Path, event_type: str, data: dict[str, Any]) -> None:
-        payload = {"type": event_type, "data": data}
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
-            handle.flush()
-
-    def _translate_line(
-        self,
-        line: str,
-        *,
-        event_file: Path,
-        account_model: bool,
-    ) -> None:
-        for event_type, data in self._normalize_line(line, account_model=account_model):
-            self._append_event(event_file, event_type, data)
 
     def _normalize_line(
         self,
@@ -292,40 +269,6 @@ class PiAdapter:
         )
         return normalized
 
-    async def start_session(self, context: AgentRunContext):
-        from .session import OneShotAgentSession
-
-        return await OneShotAgentSession.start(self, context=context)
-
-    def _poll_output(
-        self,
-        raw_path: Path,
-        *,
-        offset: int,
-        remainder: str,
-        event_file: Path,
-        account_model: bool,
-    ) -> tuple[int, str]:
-        with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
-            handle.seek(offset)
-            chunk = handle.read()
-            offset = handle.tell()
-        if not chunk:
-            return offset, remainder
-        text = remainder + chunk
-        lines = text.splitlines(keepends=True)
-        remainder = ""
-        for line in lines:
-            if not line.endswith(("\n", "\r")):
-                remainder = line
-                continue
-            self._translate_line(
-                line.strip(),
-                event_file=event_file,
-                account_model=account_model,
-            )
-        return offset, remainder
-
     def _prepare_agent_dir(
         self,
         *,
@@ -365,18 +308,15 @@ class PiAdapter:
 
     def _pi_args(
         self,
-        task: TaskSpec,
         *,
         gateway_enabled: bool,
         session_id: str | None = None,
     ) -> list[str]:
-        args = [*self.pi.launcher_args, "--mode", self.pi.mode]
+        args = [*self.pi.launcher_args, "--mode", "rpc"]
         if session_id is not None:
             if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", session_id):
                 raise AgentError("invalid Pi session ID in recovery checkpoint")
             args.extend(["--session", session_id])
-        elif self.pi.mode != "rpc":
-            args.append("--no-session")
         args.append("--approve" if self.pi.approve_project else "--no-approve")
         for enabled, flag in (
             (self.pi.context_files, "--no-context-files"),
@@ -403,9 +343,7 @@ class PiAdapter:
         if self.pi.thinking:
             args.extend(["--thinking", self.pi.thinking])
         args.extend(self.pi.extra_args)
-        if self.pi.mode == "json":
-            args.append(self._prompt_text(task))
-        elif any(argument.startswith("@") for argument in self.pi.extra_args):
+        if any(argument.startswith("@") for argument in self.pi.extra_args):
             raise AgentError("Pi RPC mode does not accept @file prompt arguments")
         return args
 
@@ -436,7 +374,8 @@ class PiAdapter:
             "Treat Internet access as optional and non-essential; solve from benchmark targets "
             "and local tools first."
         )
-        return self._system_prompt() + task.objective.description + world_protocol
+        protocol = world_protocol if self.include_solver_protocol else ""
+        return self._system_prompt() + task.objective.description + protocol
 
     def _system_prompt(self) -> str:
         reference = self.pi.system_prompt_file
@@ -450,281 +389,6 @@ class PiAdapter:
             raise AgentError("Pi system prompt file exceeds 64 KiB")
         return text.rstrip() + "\n\n"
 
-    def _create_command(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        container_name: str,
-        network: str,
-        seed: int,
-        gateway_url: str | None,
-        gateway_token: str | None,
-        host_gateway: bool,
-    ) -> list[str]:
-        command = [
-            "docker",
-            "create",
-            "--rm",
-            "--pull=never",
-            "--name",
-            container_name,
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "1024",
-            "--memory",
-            "8g",
-            "--cpus",
-            "4",
-            "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=1g",
-            "--tmpfs",
-            "/home/agent:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
-            "--network",
-            network,
-        ]
-        if self.spec.runtime:
-            command.extend(["--runtime", self.spec.runtime])
-        for capability in self.pi.cap_add:
-            command.extend(["--cap-add", capability])
-        if host_gateway:
-            command.extend(["--add-host", "host.docker.internal:host-gateway"])
-        command.extend(
-            [
-                "-v",
-                f"{task_dir.resolve()}:/task:ro",
-                "-v",
-                f"{run_dir.resolve()}:/run/harness:rw",
-                "-w",
-                "/run/harness",
-            ]
-        )
-        # Same canonical HARNESS_* contract as every other container Agent;
-        # only the Pi-specific extras differ. Later entries win, so the gateway
-        # block stays last and passthrough stays overridable by spec env.
-        environment = task_environment(
-            task,
-            task_dir="/task",
-            run_dir="/run/harness",
-            environment_project=None,
-            seed=seed,
-            network_profile=self.spec.network_profile,
-            event_file_name=AGENT_EVENT_FILE if self.pi.mode == "rpc" else NORMALIZED_EVENT_FILE,
-        )
-        environment.update(
-            {
-                "PI_CODING_AGENT_DIR": "/run/harness/pi-agent",
-                "PI_CODING_AGENT_SESSION_DIR": "/run/harness/pi-sessions",
-                "PI_TELEMETRY": "0",
-                "PI_SKIP_VERSION_CHECK": "1",
-            }
-        )
-        if self.pi.offline or self.spec.network_profile != "unrestricted":
-            environment["PI_OFFLINE"] = "1"
-        for name in self.pi.env_passthrough:
-            value = os.environ.get(name)
-            if value is not None:
-                environment[name] = value
-        environment.update(dict(sorted(self.spec.env.items())))
-        if gateway_url and gateway_token:
-            environment.update(gateway_environment(gateway_url, gateway_token))
-        for key, value in environment.items():
-            command.extend(["-e", f"{key}={value}"])
-        command.extend(
-            [
-                str(self.spec.image),
-                self.pi.binary,
-                *self._pi_args(task, gateway_enabled=bool(gateway_url and gateway_token)),
-            ]
-        )
-        return command
-
-    def run(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        environment_project: str | None,
-        environment_network: str | None,
-        seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-        gateway_network: str | None = None,
-    ) -> AgentResult:
-        del environment_project
-        from .network_policy import enforced_network
-
-        gateway_enabled = bool(gateway_url and gateway_token)
-        enforced = enforced_network(
-            self.spec,
-            environment_network=environment_network,
-            gateway_network=gateway_network,
-            gateway_enabled=gateway_enabled,
-        )
-        sidecar_gateway = gateway_enabled and gateway_network is not None
-        if self.spec.network == "none" and gateway_enabled:
-            raise AgentError("Pi network:none is incompatible with Gateway access")
-        if sidecar_gateway and self.spec.network == "host":
-            raise AgentError("Pi network:host is incompatible with sidecar Gateway mode")
-
-        if enforced is not None:
-            primary_network = enforced.primary
-        elif self.spec.network_profile == "offline":
-            primary_network = "none"
-        elif sidecar_gateway:
-            primary_network = str(gateway_network)
-        elif self.spec.network == "host":
-            primary_network = "host"
-        elif self.spec.network == "environment":
-            primary_network = environment_network or "bridge"
-        else:
-            primary_network = "none"
-
-        event_file = run_dir / "events.jsonl"
-        event_file.write_text("", encoding="utf-8")
-        raw_path = run_dir / "agent.stdout.log"
-        stderr_path = run_dir / "agent.stderr.log"
-        raw_path.write_text("", encoding="utf-8")
-        (run_dir / "pi-sessions").mkdir(parents=True, exist_ok=True)
-        self._prepare_agent_dir(
-            run_dir=run_dir,
-            gateway_url=gateway_url,
-            gateway_token=gateway_token,
-        )
-
-        container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
-        command = self._create_command(
-            task,
-            task_dir=task_dir,
-            run_dir=run_dir,
-            container_name=container_name,
-            network=primary_network,
-            seed=seed,
-            gateway_url=gateway_url,
-            gateway_token=gateway_token,
-            host_gateway=gateway_enabled and not sidecar_gateway and primary_network != "host",
-        )
-        self.trace.emit(
-            "agent.started",
-            actor="agent",
-            data={
-                "agent_id": self.spec.id,
-                "type": "pi",
-                "image": self.spec.image,
-                "network": primary_network,
-                "runtime": self.spec.runtime,
-                "model": self.pi.model,
-                "provider": "harness" if gateway_enabled else self.pi.provider,
-                "tools": self.pi.tools,
-                "network_profile": self.spec.network_profile,
-            },
-        )
-
-        create = subprocess.run(command, capture_output=True, text=True, check=False)
-        if create.returncode != 0:
-            raise AgentError(f"docker create Pi failed: {create.stderr.strip()}")
-        try:
-            if sidecar_gateway and environment_network and environment_network != gateway_network:
-                connected = subprocess.run(
-                    ["docker", "network", "connect", environment_network, container_name],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if connected.returncode != 0:
-                    raise AgentError(f"docker network connect failed: {connected.stderr.strip()}")
-
-            monitor = BudgetMonitor(event_file, task.budgets, self.trace)
-            timed_out = False
-            started = time.monotonic()
-            offset = 0
-            remainder = ""
-            with raw_path.open("ab") as stdout_handle, stderr_path.open("wb") as stderr_handle:
-                proc = subprocess.Popen(
-                    ["docker", "start", "-a", container_name],
-                    stdout=stdout_handle,
-                    stderr=stderr_handle,
-                    start_new_session=True,
-                )
-                while proc.poll() is None:
-                    offset, remainder = self._poll_output(
-                        raw_path,
-                        offset=offset,
-                        remainder=remainder,
-                        event_file=event_file,
-                        account_model=not gateway_enabled,
-                    )
-                    if monitor.poll():
-                        _terminate_process(proc)
-                        subprocess.run(
-                            ["docker", "kill", container_name], capture_output=True, check=False
-                        )
-                        break
-                    if (
-                        time.monotonic() - started
-                        > task.budgets.wall_time + FINALIZE_GRACE_SECONDS
-                    ):
-                        timed_out = True
-                        self.trace.emit("budget.exceeded", data={"budget": "wall_time"})
-                        _terminate_process(proc)
-                        subprocess.run(
-                            ["docker", "kill", container_name], capture_output=True, check=False
-                        )
-                        break
-                    time.sleep(0.05)
-                returncode = proc.wait()
-
-            offset, remainder = self._poll_output(
-                raw_path,
-                offset=offset,
-                remainder=remainder,
-                event_file=event_file,
-                account_model=not gateway_enabled,
-            )
-            del offset
-            if remainder.strip():
-                self._translate_line(
-                    remainder.strip(),
-                    event_file=event_file,
-                    account_model=not gateway_enabled,
-                )
-            monitor.finish()
-            result = AgentResult(
-                returncode=returncode,
-                timed_out=timed_out,
-                budget_exceeded=monitor.exceeded,
-                stdout=raw_path.read_text(encoding="utf-8", errors="replace"),
-                stderr=stderr_path.read_text(encoding="utf-8", errors="replace"),
-                metrics=monitor.metrics,
-            )
-        finally:
-            subprocess.run(
-                ["docker", "rm", "-f", container_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-
-        self.trace.emit(
-            "agent.finished",
-            actor="agent",
-            data={
-                "returncode": result.returncode,
-                "timed_out": result.timed_out,
-                "budget_exceeded": result.budget_exceeded,
-                "metrics": result.metrics.as_dict(),
-                "pi_protocol": "json",
-                "containerized": True,
-            },
-        )
-        return result
-
     def _command(
         self,
         task: TaskSpec,
@@ -734,7 +398,5 @@ class PiAdapter:
     ) -> list[str]:
         return [
             self.pi.binary,
-            *self._pi_args(
-                task, gateway_enabled=gateway_enabled, session_id=session_id
-            ),
+            *self._pi_args(gateway_enabled=gateway_enabled, session_id=session_id),
         ]

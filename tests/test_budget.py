@@ -1,6 +1,4 @@
 import json
-import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -12,7 +10,7 @@ from harness.budget import (
     enforced_budget_limits,
     usage_budget_exceeded,
 )
-from harness.models import BudgetSpec, load_task
+from harness.models import BudgetSpec
 from harness.trace import TraceRecorder
 
 
@@ -271,72 +269,6 @@ def test_budget_monitor_fails_closed_if_agent_replaces_telemetry_file(tmp_path: 
 
     assert monitor.poll() == "invalid_telemetry"
     assert monitor.metrics.total_tokens == 7
-
-
-@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no-follow file access is required")
-def test_budget_monitor_fails_closed_if_agent_replaces_telemetry_with_symlink(
-    tmp_path: Path,
-) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    event_file.write_text(
-        json.dumps({"type": "model.usage", "data": {"total_tokens": 7}}) + "\n",
-        encoding="utf-8",
-    )
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    assert monitor.poll() is None
-
-    event_file.unlink()
-    outside = tmp_path / "outside.jsonl"
-    outside.write_text(
-        json.dumps({"type": "model.usage", "data": {"total_tokens": 100}}) + "\n",
-        encoding="utf-8",
-    )
-    event_file.symlink_to(outside)
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.total_tokens == 7
-
-
-def test_budget_monitor_fails_closed_if_agent_removes_telemetry_file(tmp_path: Path) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    event_file.write_text(
-        json.dumps({"type": "model.usage", "data": {"total_tokens": 7}}) + "\n",
-        encoding="utf-8",
-    )
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    assert monitor.poll() is None
-    event_file.unlink()
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.total_tokens == 7
-
-
-@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no-follow file access is required")
-def test_supervisor_stops_agent_that_replaces_telemetry_with_symlink(tmp_path: Path) -> None:
-    from harness.agent import _run_monitored
-
-    event_file = tmp_path / "events.jsonl"
-    outside = tmp_path / "outside.jsonl"
-    outside.write_text("{}\n", encoding="utf-8")
-    script = (
-        "from pathlib import Path; import time; "
-        f"event=Path({str(event_file)!r}); outside=Path({str(outside)!r}); "
-        "event.unlink(); event.symlink_to(outside); time.sleep(30)"
-    )
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    result = _run_monitored(
-        [sys.executable, "-c", script],
-        cwd=tmp_path,
-        env={"PATH": os.environ.get("PATH", "")},
-        run_dir=tmp_path,
-        task=load_task(Path("benchmarks/examples/hello/task.yaml")),
-        trace=trace,
-    )
-
-    assert result.budget_exceeded == "invalid_telemetry"
-    assert result.returncode != 0
 
 
 def test_budget_monitor_rejects_oversized_telemetry_file_before_reading(

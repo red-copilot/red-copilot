@@ -79,8 +79,9 @@ class TaskSpec(BaseModel):
 
 
 class PiSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     binary: str = Field(default="pi", min_length=1)
-    mode: Literal["rpc", "json"] = "rpc"
     launcher_args: list[str] = Field(default_factory=list)
     provider: str | None = None
     model: str = Field(min_length=1)
@@ -99,23 +100,18 @@ class PiSpec(BaseModel):
     env_passthrough: list[str] = Field(default_factory=list)
     cap_add: list[str] = Field(default_factory=list)
     extra_args: list[str] = Field(default_factory=list)
-    # Hosted (platform-managed) model routing: write a Pi models.json whose
-    # provider points at the evaluation platform's model gateway instead of a
-    # public API endpoint. The key itself stays in the environment.
-    models_base_url: str | None = None
-    models_api_key_env: str | None = None
 
 
 class ExecutorSpec(BaseModel):
     """One competing solver session for a single provisioned challenge.
 
-    Only the session-level overrides are declared here. ``type``, ``image``,
-    ``command`` and the tool set stay on ``AgentSpec``: changing those changes
-    the adapter contract itself, not just how one competing session is
-    configured. Everything omitted is inherited from the agent's base config.
+    Only the session-level overrides are declared here. The image, network and
+    tool set stay on ``AgentSpec``: changing those changes the execution
+    contract itself, not just how one competing Pi session is configured.
+    Everything omitted is inherited from the agent's base config.
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     id: str = Field(min_length=1)
     provider: str | None = None
@@ -132,13 +128,10 @@ MAX_EXECUTOR_SESSIONS = 4
 
 
 class AgentSpec(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     api_version: Literal["harness/v1"] = Field(default="harness/v1", alias="apiVersion")
     id: str = Field(min_length=1)
-    type: Literal["cli", "docker", "pi", "pi-host"] = "cli"
-    command: list[str] = Field(default_factory=list)
-    cwd: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     image: str | None = None
     network: Literal["environment", "none", "host"] = "environment"
@@ -147,7 +140,6 @@ class AgentSpec(BaseModel):
         "benchmark-only",
         "unrestricted",
         "target-only",
-        "model-allowed",
         "fully-offline",
     ] = "unrestricted"
     runtime: str | None = None
@@ -197,8 +189,6 @@ class AgentSpec(BaseModel):
     def validate_executors(self) -> AgentSpec:
         if not self.executors:
             return self
-        if self.type != "pi":
-            raise ValueError("competing executors require a pi agent")
         if len(self.executors) > MAX_EXECUTOR_SESSIONS:
             raise ValueError(
                 f"at most {MAX_EXECUTOR_SESSIONS} competing executors are supported per case"
@@ -211,40 +201,18 @@ class AgentSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_adapter(self) -> AgentSpec:
-        if self.type == "cli" and not self.command:
-            raise ValueError("cli agents require command")
-        if self.type == "docker" and not self.image:
-            raise ValueError("docker agents require image")
-        if self.type == "pi":
-            if self.pi is None:
-                raise ValueError("pi agents require pi configuration")
-            if not self.image:
-                raise ValueError("pi agents require a container image")
-            if self.command:
-                raise ValueError("pi agents use pi.launcher_args instead of command")
-        if self.type == "pi-host":
-            if self.pi is None:
-                raise ValueError("pi-host agents require pi configuration")
-            if self.image:
-                raise ValueError("pi-host agents run Pi as a local process, not a container")
-            if self.command:
-                raise ValueError("pi-host agents use pi.launcher_args instead of command")
-            if bool(self.pi.models_base_url) != bool(self.pi.models_api_key_env):
-                raise ValueError(
-                    "pi-host agents set models_base_url and models_api_key_env together"
-                )
-        if self.type not in {"docker", "pi"} and self.runtime is not None:
-            raise ValueError("runtime is only valid for container agents")
-        if self.type in {"docker", "pi"}:
-            passthrough = set(self.env)
-            if self.pi is not None:
-                passthrough.update(self.pi.env_passthrough)
-            forbidden = sorted(name for name in passthrough if _is_reserved_credential_env(name))
-            if forbidden:
-                raise ValueError(
-                    "container Agent cannot receive token-named or reserved credential "
-                    f"environment variables: {', '.join(forbidden)}"
-                )
+        if self.pi is None:
+            raise ValueError("Pi agents require pi configuration")
+        if not self.image:
+            raise ValueError("Pi agents require a container image")
+        passthrough = set(self.env)
+        passthrough.update(self.pi.env_passthrough)
+        forbidden = sorted(name for name in passthrough if _is_reserved_credential_env(name))
+        if forbidden:
+            raise ValueError(
+                "container Agent cannot receive token-named or reserved credential "
+                f"environment variables: {', '.join(forbidden)}"
+            )
         return self
 
 

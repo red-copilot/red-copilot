@@ -232,6 +232,8 @@ def build_docker_verifier_command(
         ),
         "--network",
         network,
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
     ]
     if task.verification.runtime:
         command.extend(["--runtime", task.verification.runtime])

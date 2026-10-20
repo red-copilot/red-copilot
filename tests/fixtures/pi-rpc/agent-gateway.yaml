@@ -1,0 +1,9 @@
+apiVersion: harness/v1
+id: fake-pi-rpc-gateway
+image: harness-pi-rpc:ci
+network: environment
+pi:
+  binary: fake-pi
+  model: fake-model
+  tools: []
+  offline: true

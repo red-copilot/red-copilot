@@ -35,13 +35,9 @@ Treat a target as multi-stage when any of these is true:
 4. **Pivot.** Reach the internal service with a forward or by replaying an
    internal URL through the SSRF. Working options in this image:
 
-   - VShell: `add_tunnel` (socks5) bound to an online host -> local port.
-   - chisel: `chisel server -p 8080 --reverse` in the agent container, then
-     `chisel client <agent-ip>:8080 R:socks` on the target -> local 1080.
    - ssh: `ssh -D 1080 -N user@host` once credentials exist.
-   - For tools that cannot speak SOCKS (smbclient, impacket, redis-cli):
-     `proxychains4 -f /opt/red-harness/proxychains.conf <tool>` with the last
-     line of the config pointing at your tunnel port.
+   - socat: `socat TCP-LISTEN:<local-port>,fork TCP:<internal-host>:<port>` for
+     one reachable service at a time.
 
    Keep the pivot command in your notes; a re-established tunnel is much
    cheaper than rediscovering the foothold.

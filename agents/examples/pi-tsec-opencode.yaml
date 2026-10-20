@@ -1,6 +1,5 @@
 apiVersion: harness/v1
 id: pi-tsec-opencode
-type: pi
 image: harness/pi-kali:local
 network: host
 network_profile: benchmark-only
@@ -8,10 +7,8 @@ env: {}
 pi:
   provider: opencode-go
   model: longcat-2.5-preview-free
-  # RPC keeps the control loop closed: Harness delivers the objective via
-  # `prompt` and injects verification/plan/world feedback via `steer`. The
-  # one-shot `json` mode only wrote feedback to a file the Agent never read.
-  mode: rpc
+  # Harness delivers the objective via `prompt` and injects verification,
+  # plan and world feedback via `steer`.
   thinking: medium
   tools:
     - read

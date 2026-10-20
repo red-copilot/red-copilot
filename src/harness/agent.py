@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 import os
-import shutil
-import signal
-import subprocess
-import sys
-import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,9 +9,8 @@ from .agent_workspace import (
     prepare_agent_task_view,
     prepare_agent_workspace_for_container,
 )
-from .budget import FINALIZE_GRACE_SECONDS, BudgetMonitor, UsageMetrics
+from .budget import UsageMetrics
 from .models import AgentSpec, TaskSpec, _is_reserved_credential_env
-from .secureio import open_regular_file, read_regular_text
 from .trace import TraceRecorder
 
 
@@ -24,16 +18,12 @@ class AgentError(RuntimeError):
     pass
 
 
-# Harness-normalized Agent event stream (the per-run artifact).
-NORMALIZED_EVENT_FILE = "events.jsonl"
+# Agent-authored typed solver events (``action.intent``, ``world.observe``, ...).
+AGENT_EVENT_FILE = "agent.events.jsonl"
 # Competing sessions share one findings file across containers. The host-side
 # layout lives in ``harness.runtime.executors``; this is the container contract.
 SHARED_FINDINGS_CONTAINER_DIR = "/run/harness-shared"
 SHARED_FINDINGS_CONTAINER_FILE = f"{SHARED_FINDINGS_CONTAINER_DIR}/shared-findings.md"
-# Agent-authored typed solver events (``action.intent``, ``world.observe``, ...).
-# RPC sessions read Pi's stdout rather than the shared file, so the Agent gets
-# its own file there; one-shot JSON sessions keep the shared file.
-AGENT_EVENT_FILE = "agent.events.jsonl"
 
 
 def task_environment(
@@ -44,11 +34,10 @@ def task_environment(
     environment_project: str | None,
     seed: int,
     network_profile: str,
-    event_file_name: str = NORMALIZED_EVENT_FILE,
     knowledge_dirs: Sequence[str] = (),
     shared_findings_file: str | None = None,
 ) -> dict[str, str]:
-    """Canonical ``HARNESS_*`` task contract for host and container Agents."""
+    """Canonical ``HARNESS_*`` task contract for the container Pi Agent."""
 
     run_root = Path(run_dir)
     environment = {
@@ -57,7 +46,7 @@ def task_environment(
         "HARNESS_RUN_DIR": str(run_root),
         "HARNESS_OBJECTIVE": task.objective.description,
         "HARNESS_ENV_PROJECT": environment_project or "",
-        "HARNESS_EVENT_FILE": str(run_root / event_file_name),
+        "HARNESS_EVENT_FILE": str(run_root / AGENT_EVENT_FILE),
         "HARNESS_WORLD_INBOX": str(run_root / "world.inbox.jsonl"),
         "HARNESS_WORLD_CONTEXT": str(run_root / "world.context.txt"),
         "HARNESS_SUBMISSION_INBOX": str(run_root / "submission.inbox.jsonl"),
@@ -98,11 +87,6 @@ def plan_knowledge_mounts(
     return mounts
 
 
-def host_knowledge_dirs(spec: AgentSpec) -> list[str]:
-    """Host-visible knowledge roots for trusted non-container Agents."""
-    return [str(path.resolve()) for path, _ in plan_knowledge_mounts(spec.knowledge)]
-
-
 def gateway_environment(gateway_url: str, gateway_token: str) -> dict[str, str]:
     """Environment that routes an Agent's model traffic through the Harness Gateway."""
 
@@ -116,7 +100,7 @@ def gateway_environment(gateway_url: str, gateway_token: str) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class ContainerLimits:
-    """Docker resource limits shared by container Agent adapters."""
+    """Docker resource limits shared by every container the Harness launches."""
 
     pids: int = 256
     memory: str = "2g"
@@ -143,16 +127,16 @@ def build_container_command(
     image_command: Sequence[str],
     agent_task_dir: Path | None = None,
     shared_findings_dir: Path | None = None,
+    extra_mounts: Sequence[tuple[Path, str]] = (),
     workdir: str = "/task",
     limits: ContainerLimits = DEFAULT_CONTAINER_LIMITS,
     reserved_env_names: frozenset[str] | None = None,
     extra_cap_add: Sequence[str] = (),
-    extra_env: Mapping[str, str] | None = None,
+    extra_env: dict[str, str] | None = None,
     env_passthrough: Sequence[str] = (),
     interactive: bool = False,
-    event_file_name: str = NORMALIZED_EVENT_FILE,
 ) -> list[str]:
-    """Build the single hardened ``docker create`` command for container Agents."""
+    """Build the hardened Docker command for the container Pi Agent."""
 
     from .network_policy import proxy_environment_overrides, reject_agent_proxy_env
 
@@ -200,6 +184,13 @@ def build_container_command(
             f"{run_dir.resolve()}:/run/harness:rw",
         ]
     )
+    for host_path, container_path in extra_mounts:
+        mount_source = Path(host_path)
+        if mount_source.is_symlink() or not mount_source.is_dir():
+            raise AgentError("extra container mount must be a real directory")
+        if not container_path.startswith("/"):
+            raise AgentError("extra container mount target must be absolute")
+        command.extend(["-v", f"{mount_source.resolve()}:{container_path}:rw"])
     shared_findings_file: str | None = None
     if shared_findings_dir is not None:
         shared_root = Path(shared_findings_dir)
@@ -220,7 +211,6 @@ def build_container_command(
         environment_project=environment_project,
         seed=seed,
         network_profile=spec.network_profile,
-        event_file_name=event_file_name,
         knowledge_dirs=[container_path for _, container_path in knowledge_mounts],
         shared_findings_file=shared_findings_file,
     )
@@ -256,13 +246,7 @@ class AgentResult:
 
 @dataclass(frozen=True)
 class AgentRunContext:
-    """The single typed parameter object for every adapter run/session path.
-
-    Adapters used to take 12+ loose keywords duplicated across four classes;
-    one frozen context keeps the call sites and the session constructors from
-    drifting apart. ``dataclasses.replace`` builds derived contexts (for
-    example filling the one-shot cancel path) without mutation.
-    """
+    """The single typed parameter object for the Pi RPC session path."""
 
     task: TaskSpec
     task_dir: Path
@@ -273,7 +257,6 @@ class AgentRunContext:
     agent_task_dir: Path | None = None
     gateway_url: str | None = None
     gateway_token: str | None = None
-    gateway_network: str | None = None
     gateway_usage_path: Path | str | None = None
     resume_gateway_event_offset: int = 0
     resume_session_id: str | None = None
@@ -285,115 +268,6 @@ class AgentRunContext:
     @property
     def gateway_enabled(self) -> bool:
         return bool(self.gateway_url and self.gateway_token)
-
-
-def _terminate_process(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=2)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=2)
-
-
-def _run_monitored(
-    command: list[str],
-    *,
-    cwd: Path,
-    env: dict[str, str],
-    run_dir: Path,
-    task: TaskSpec,
-    trace: TraceRecorder,
-    cancel_path: Path | None = None,
-    guard_parent_death: bool = False,
-) -> AgentResult:
-    event_file = run_dir / "events.jsonl"
-    event_file.write_text("", encoding="utf-8")
-    stdout_path = run_dir / "agent.stdout.log"
-    stderr_path = run_dir / "agent.stderr.log"
-    monitor = BudgetMonitor(event_file, task.budgets, trace)
-    timed_out = False
-    started = time.monotonic()
-
-    with (
-        open_regular_file(stdout_path, "wb") as stdout_handle,
-        open_regular_file(stderr_path, "wb") as stderr_handle,
-    ):
-        launch_command = command
-        if guard_parent_death and sys.platform == "linux":
-            guard = Path(__file__).with_name("process_guard.py")
-            launch_command = [sys.executable, str(guard), "--", *command]
-        proc = subprocess.Popen(
-            launch_command,
-            cwd=cwd,
-            env=env,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            start_new_session=True,
-        )
-        while proc.poll() is None:
-            if cancel_path is not None:
-                try:
-                    cancelled = bool(read_regular_text(cancel_path, max_bytes=64 * 1024))
-                except FileNotFoundError:
-                    cancelled = False
-                except OSError:
-                    cancelled = True
-                if cancelled:
-                    trace.emit("agent.cancelled", data={"reason": "session_closed"})
-                    _terminate_process(proc)
-                    break
-            exceeded = monitor.poll()
-            if exceeded:
-                _terminate_process(proc)
-                break
-            if time.monotonic() - started > task.budgets.wall_time + FINALIZE_GRACE_SECONDS:
-                timed_out = True
-                trace.emit(
-                    "budget.exceeded",
-                    data={
-                        "budget": "wall_time",
-                        "limit": task.budgets.wall_time,
-                        "value": time.monotonic() - started,
-                    },
-                )
-                _terminate_process(proc)
-                break
-            time.sleep(0.1)
-
-        returncode = proc.wait()
-
-    monitor.finish()
-    return AgentResult(
-        returncode=returncode,
-        timed_out=timed_out,
-        budget_exceeded=monitor.exceeded,
-        stdout=read_regular_text(stdout_path),
-        stderr=read_regular_text(stderr_path),
-        metrics=monitor.metrics,
-    )
-
-
-def run_docker(
-    command: list[str],
-    *,
-    cwd: Path,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    if check and result.returncode != 0:
-        raise AgentError(f"{' '.join(command[:3])} failed: {result.stderr.strip()}")
-    return result
 
 
 # Root with every capability dropped cannot write a workspace it does not own
@@ -409,12 +283,8 @@ def hardened_docker_flags(
     cpus: str,
     tmpfs: Sequence[str] = (),
 ) -> list[str]:
-    """Shared hardening prefix for every container the Harness launches.
+    """Shared hardening prefix for every container the Harness launches."""
 
-    Read-only root filesystem, no Linux capabilities, no privilege escalation,
-    and bounded PIDs/memory/CPU. Resource values stay per call site because the
-    Agent, Verifier, and Gateway sidecar have different working sets.
-    """
     flags = [
         "--read-only",
         "--cap-drop",
@@ -433,295 +303,7 @@ def hardened_docker_flags(
     return flags
 
 
-class CLIAdapter:
-    """Trusted local-process adapter used for development."""
+def build_agent_adapter(spec: AgentSpec, *, trace: TraceRecorder):
+    from .pi_container import ContainerPiAdapter
 
-    def __init__(self, spec: AgentSpec, *, allow_host: bool, trace: TraceRecorder) -> None:
-        if not allow_host:
-            raise AgentError(
-                "CLI agents execute on the host; pass --allow-host-agent only for trusted agents"
-            )
-        self.spec = spec
-        self.trace = trace
-
-    @property
-    def capabilities(self):
-        from .session import ONE_SHOT_AGENT_CAPABILITIES
-
-        return ONE_SHOT_AGENT_CAPABILITIES
-
-    def run(self, context: AgentRunContext) -> AgentResult:
-        # Host Agents remain an explicit, unsandboxed development path and
-        # ignore agent_task_dir; they see the task tree directly.
-        from .network_policy import enforced_network
-
-        enforced_network(
-            self.spec,
-            environment_network=context.environment_network,
-            gateway_network=context.gateway_network,
-            gateway_enabled=context.gateway_enabled,
-        )
-        env = os.environ.copy()
-        env.update(self.spec.env)
-        env.update(
-            task_environment(
-                context.task,
-                task_dir=context.task_dir,
-                run_dir=context.run_dir,
-                environment_project=context.environment_project,
-                seed=context.seed,
-                network_profile=self.spec.network_profile,
-                knowledge_dirs=host_knowledge_dirs(self.spec),
-            )
-        )
-        if context.gateway_enabled:
-            env.update(gateway_environment(context.gateway_url, context.gateway_token))
-
-        cwd = Path(self.spec.cwd).resolve() if self.spec.cwd else context.task_dir
-        self.trace.emit(
-            "agent.started",
-            actor="agent",
-            data={
-                "agent_id": self.spec.id,
-                "type": self.spec.type,
-                "gateway_injected": context.gateway_url is not None,
-            },
-        )
-        result = _run_monitored(
-            self.spec.command,
-            cwd=cwd,
-            env=env,
-            run_dir=context.run_dir,
-            task=context.task,
-            trace=self.trace,
-            cancel_path=context.cancel_path,
-            guard_parent_death=True,
-        )
-        self._finish_trace(result)
-        return result
-
-    async def start_session(self, context: AgentRunContext):
-        from dataclasses import replace
-
-        from .session import OneShotAgentSession
-
-        context = replace(
-            context,
-            cancel_path=context.cancel_path or context.run_dir / "agent.control.jsonl",
-        )
-        return await OneShotAgentSession.start(self, context=context)
-
-    def _finish_trace(self, result: AgentResult) -> None:
-        self.trace.emit(
-            "agent.finished",
-            actor="agent",
-            data={
-                "returncode": result.returncode,
-                "timed_out": result.timed_out,
-                "budget_exceeded": result.budget_exceeded,
-                "metrics": result.metrics.as_dict(),
-            },
-        )
-
-
-class DockerAdapter:
-    """Containerized agent adapter with restrictive defaults and multi-network support."""
-
-    def __init__(self, spec: AgentSpec, *, trace: TraceRecorder) -> None:
-        if shutil.which("docker") is None:
-            raise AgentError("docker executable was not found")
-        self.spec = spec
-        self.trace = trace
-
-    @property
-    def capabilities(self):
-        from .session import ONE_SHOT_AGENT_CAPABILITIES
-
-        return ONE_SHOT_AGENT_CAPABILITIES
-
-    _docker = staticmethod(run_docker)
-
-    def _create_command(
-        self,
-        task: TaskSpec,
-        *,
-        task_dir: Path,
-        run_dir: Path,
-        container_name: str,
-        network: str,
-        environment_project: str | None,
-        seed: int,
-        gateway_url: str | None,
-        gateway_token: str | None,
-        host_gateway: bool,
-        agent_task_dir: Path | None = None,
-        shared_findings_dir: Path | None = None,
-    ) -> list[str]:
-        return build_container_command(
-            spec=self.spec,
-            task=task,
-            task_dir=task_dir,
-            run_dir=run_dir,
-            container_name=container_name,
-            network=network,
-            environment_project=environment_project,
-            seed=seed,
-            gateway_url=gateway_url,
-            gateway_token=gateway_token,
-            host_gateway=host_gateway,
-            agent_task_dir=agent_task_dir,
-            shared_findings_dir=shared_findings_dir,
-            image_command=[str(self.spec.image), *self.spec.command],
-        )
-
-    def run(self, context: AgentRunContext) -> AgentResult:
-        from .network_policy import enforced_network
-
-        task = context.task
-        task_dir = context.task_dir
-        run_dir = context.run_dir
-        gateway_url = context.gateway_url
-        gateway_token = context.gateway_token
-        gateway_network = context.gateway_network
-        environment_network = context.environment_network
-        gateway_enabled = context.gateway_enabled
-        enforced = enforced_network(
-            self.spec,
-            environment_network=environment_network,
-            gateway_network=gateway_network,
-            gateway_enabled=gateway_enabled,
-        )
-        if gateway_enabled and (
-            self.spec.network == "none" or self.spec.network_profile == "offline"
-        ):
-            raise AgentError("Docker Agent offline networking is incompatible with per-run Gateway")
-
-        container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
-        sidecar_gateway = gateway_enabled and gateway_network is not None
-        host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
-
-        if enforced is not None:
-            primary_network = enforced.primary
-        elif self.spec.network_profile == "offline":
-            primary_network = "none"
-        elif sidecar_gateway:
-            if self.spec.network == "host":
-                raise AgentError("Docker Agent network:host is incompatible with sidecar Gateway")
-            primary_network = str(gateway_network)
-        elif self.spec.network == "host":
-            primary_network = "host"
-        elif self.spec.network == "environment":
-            primary_network = environment_network or ("bridge" if host_gateway else "none")
-        else:
-            primary_network = "none"
-
-        create_command = self._create_command(
-            task,
-            task_dir=task_dir,
-            run_dir=run_dir,
-            container_name=container_name,
-            network=primary_network,
-            environment_project=context.environment_project,
-            seed=context.seed,
-            gateway_url=gateway_url,
-            gateway_token=gateway_token,
-            host_gateway=host_gateway,
-            agent_task_dir=context.agent_task_dir,
-            shared_findings_dir=context.shared_findings_dir,
-        )
-
-        self.trace.emit(
-            "agent.started",
-            actor="agent",
-            data={
-                "agent_id": self.spec.id,
-                "type": self.spec.type,
-                "image": self.spec.image,
-                "network": primary_network,
-                "target_network": environment_network,
-                "runtime": self.spec.runtime,
-                "gateway_injected": gateway_enabled,
-                "gateway_network": gateway_network,
-            },
-        )
-
-        try:
-            self._docker(create_command, cwd=task_dir)
-            enforced_target = enforced.environment if enforced is not None else None
-            target_differs = (
-                enforced_target is not None and enforced_target != primary_network
-                if enforced is not None
-                else bool(environment_network and environment_network != gateway_network)
-            )
-            if sidecar_gateway and environment_network and target_differs:
-                self._docker(
-                    [
-                        "docker",
-                        "network",
-                        "connect",
-                        enforced_target or environment_network,
-                        container_name,
-                    ],
-                    cwd=task_dir,
-                )
-
-            result = _run_monitored(
-                ["docker", "start", "-a", container_name],
-                cwd=task_dir,
-                env=os.environ.copy(),
-                run_dir=run_dir,
-                task=task,
-                trace=self.trace,
-                cancel_path=context.cancel_path,
-            )
-        finally:
-            subprocess.run(
-                ["docker", "rm", "-f", container_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-
-        self.trace.emit(
-            "agent.finished",
-            actor="agent",
-            data={
-                "returncode": result.returncode,
-                "timed_out": result.timed_out,
-                "budget_exceeded": result.budget_exceeded,
-                "metrics": result.metrics.as_dict(),
-            },
-        )
-        return result
-
-    async def start_session(self, context: AgentRunContext):
-        from dataclasses import replace
-
-        from .session import OneShotAgentSession
-
-        context = replace(
-            context,
-            cancel_path=context.cancel_path or context.run_dir / "agent.control.jsonl",
-        )
-        return await OneShotAgentSession.start(self, context=context)
-
-
-def build_agent_adapter(
-    spec: AgentSpec,
-    *,
-    allow_host_agent: bool,
-    trace: TraceRecorder,
-):
-    if spec.type == "cli":
-        return CLIAdapter(spec, allow_host=allow_host_agent, trace=trace)
-    if spec.type == "docker":
-        return DockerAdapter(spec, trace=trace)
-    if spec.type == "pi":
-        from .pi_container import ContainerPiAdapter
-
-        return ContainerPiAdapter(spec, allow_host=allow_host_agent, trace=trace)
-    if spec.type == "pi-host":
-        from .pi_host import HostPiAdapter
-
-        return HostPiAdapter(spec, allow_host=allow_host_agent, trace=trace)
-    raise AgentError(f"unsupported agent adapter: {spec.type}")
+    return ContainerPiAdapter(spec, trace=trace)

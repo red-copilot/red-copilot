@@ -43,7 +43,7 @@ flowchart TB
     end
 
     subgraph untrusted["Agent 侧（不可信执行）"]
-        AG["Pi RPC / CLI / Docker Agent<br/>/task:ro · /knowledge:ro · /run/harness:rw"]
+        AG["Pi RPC container<br/>/task:ro · /knowledge:ro · /run/harness:rw"]
     end
 
     subgraph ext["外部系统"]

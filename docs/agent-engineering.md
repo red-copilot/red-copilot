@@ -37,9 +37,9 @@ Agent 的全部"认知基础设施"就是容器里的 markdown：
 需要强制执行的东西留在 Harness：授权范围、预算、破坏性动作边界、验证权威。
 这条边界让领域知识可以随便换，而不必改运行时代码。
 
-## 3. 执行拓扑：Pi 优先 + 同题多会话竞争
+## 3. 执行拓扑：唯一 Pi RPC + 同题多会话竞争
 
-- **执行内核**：`type: pi` 是默认执行器（容器内 Pi RPC）。硬化保持原样：只读根文件系统、
+- **执行内核**：唯一执行器是容器内 Pi RPC；Agent YAML 不再声明 `type` / `mode`。硬化保持原样：只读根文件系统、
   `--cap-drop ALL`、no-new-privileges、无 docker socket、只读 `/task` 与 `/knowledge/*`、
   可写 `/run/harness`。
 - **同题竞争**：`AgentSpec.executors` 声明同一道题上的多个 solver 会话（不同 provider /

@@ -84,8 +84,8 @@ Agents never write `world.db`, `world.events.jsonl`, or `world.snapshot.json` di
 rejected and summarized in the Harness trace. This keeps the world log replayable even when an
 Agent emits malformed or adversarial state.
 
-Pi receives a concise protocol instruction in its task prompt. Generic CLI/Docker agents can opt
-in simply by detecting `HARNESS_WORLD_INBOX`.
+Pi receives a concise protocol instruction in its task prompt and writes typed Agent events
+through `HARNESS_EVENT_FILE`.
 
 ## Evolution status
 
@@ -223,9 +223,8 @@ world.inbox.jsonl
   -> trusted AgentSession observation
 ```
 
-Both external benchmark runs and ordinary Orchestrator runs use this session path when the Agent
-adapter exposes `start_session()`. Legacy one-shot adapters retain end-of-run ingestion as a
-compatibility fallback.
+Both external benchmark runs and ordinary Orchestrator runs use the container Pi RPC session
+path; there is no one-shot adapter fallback.
 
 SQLite is the default transactional backend. Multiple readers and multiple repository instances may
 share a run database; writes are serialized by SQLite and can use `expected_revision` for optimistic

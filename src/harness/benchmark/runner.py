@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from ..agent import AgentResult, AgentRunContext, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
-from ..session import ONE_SHOT_AGENT_CAPABILITIES, AgentObservation
+from ..session import AgentObservation
 from ..solver_loop import missing_summary_sections
 from .base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
@@ -538,15 +538,14 @@ class BenchmarkRunner:
         budgets: BudgetSpec,
         seed: int,
         submission_extractor: SubmissionExtractor,
-        allow_host_agent: bool = False,
         max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
         hint_threshold: int = 0,
         seed_notes_from: Path | None = None,
     ) -> dict:
-        if agent.type in {"docker", "pi"} and agent.network == "environment":
+        if agent.network == "environment":
             raise ValueError(
                 "externally provisioned benchmarks do not provide a Harness environment network; "
-                "configure the container Agent with network: host or a future benchmark network"
+                "configure the Pi container with network: host or a future benchmark network"
             )
         run_id = f"{case.benchmark}_{case.id}_{uuid.uuid4().hex[:8]}"
         run_dir = (self.runs_root / run_id).resolve()
@@ -983,16 +982,8 @@ class BenchmarkRunner:
                     "budgets": planned.budgets.model_dump(mode="json"),
                 },
             )
-            adapter_instance = build_agent_adapter(
-                planned.agent,
-                allow_host_agent=allow_host_agent,
-                trace=trace,
-            )
-            # Unknown adapters (test doubles, future types) degrade to the
-            # least-capable contract rather than failing the run.
-            capabilities = getattr(
-                adapter_instance, "capabilities", ONE_SHOT_AGENT_CAPABILITIES
-            )
+            adapter_instance = build_agent_adapter(planned.agent, trace=trace)
+            capabilities = adapter_instance.capabilities
             trace.emit(
                 "agent.capabilities",
                 actor="harness",
@@ -1016,86 +1007,82 @@ class BenchmarkRunner:
                 shared_findings_dir=plan.shared_dir,
             )
 
-            start_session = getattr(adapter_instance, "start_session", None)
-            if callable(start_session):
-                executor.session = await start_session(run_context)
-                try:
-                    await save_session_checkpoint(
-                        run_dir=planned.root,
-                        session=executor.session,
-                        world_revision=world.snapshot.revision,
-                        progress=executor.runtime.progress,
-                        processed_event_ids=executor.runtime.loop.processed_event_ids,
+            executor.session = await adapter_instance.start_session(run_context)
+            try:
+                await save_session_checkpoint(
+                    run_dir=planned.root,
+                    session=executor.session,
+                    world_revision=world.snapshot.revision,
+                    progress=executor.runtime.progress,
+                    processed_event_ids=executor.runtime.loop.processed_event_ids,
+                )
+                startup_decision = executor.runtime.loop.decide()
+                if startup_decision.action.value == "stop":
+                    trace.emit(
+                        "solver.decision",
+                        actor="harness",
+                        data={
+                            "action": "stop",
+                            "reason": startup_decision.reason,
+                            "executor_id": planned.executor_id,
+                        },
                     )
-                    startup_decision = executor.runtime.loop.decide()
-                    if startup_decision.action.value == "stop":
-                        trace.emit(
-                            "solver.decision",
-                            actor="harness",
-                            data={
-                                "action": "stop",
-                                "reason": startup_decision.reason,
-                                "executor_id": planned.executor_id,
-                            },
+                    await executor.session.observe(
+                        AgentObservation(
+                            type="solver.stop", data={"reason": startup_decision.reason}
                         )
-                        await executor.session.observe(
-                            AgentObservation(
-                                type="solver.stop", data={"reason": startup_decision.reason}
-                            )
-                        )
-                        await executor.session.close(
-                            f"solver-stop:{startup_decision.reason}"
-                        )
-                    else:
-                        while True:
-                            restarted = await self._consume_session(
-                                executor=executor,
-                                planned=planned,
-                                run_context=run_context,
-                                adapter_instance=adapter_instance,
-                                trace=trace,
-                                world=world,
-                                archive=archive,
-                                submit_candidate=submit_candidate,
-                            )
-                            if not restarted:
-                                break
-                    executor.result = await executor.session.result()
-                    if executor.retired_results:
-                        executor.result = _merge_results(
-                            [*executor.retired_results, executor.result]
-                        )
-                    await save_session_checkpoint(
-                        run_dir=planned.root,
-                        session=executor.session,
-                        world_revision=world.snapshot.revision,
-                        progress=executor.runtime.progress,
-                        budget_used=executor.result.metrics.as_dict(),
-                        processed_event_ids=executor.runtime.loop.processed_event_ids,
                     )
-                except BaseException as stream_exc:
-                    if not executor.completed:
-                        close = getattr(executor.session, "close", None)
-                        if callable(close):
-                            try:
-                                close_reason = (
-                                    "cancelled"
-                                    if isinstance(stream_exc, asyncio.CancelledError)
-                                    else "benchmark_run_error"
-                                )
-                                await close(close_reason)
-                            except Exception as close_exc:  # noqa: BLE001 - preserve original failure
-                                trace.emit(
-                                    "agent.close_error",
-                                    data={
-                                        "executor_id": planned.executor_id,
-                                        "error_type": type(close_exc).__name__,
-                                        "message": str(close_exc),
-                                    },
-                                )
-                    raise
-            else:
-                executor.result = adapter_instance.run(run_context)
+                    await executor.session.close(
+                        f"solver-stop:{startup_decision.reason}"
+                    )
+                else:
+                    while True:
+                        restarted = await self._consume_session(
+                            executor=executor,
+                            planned=planned,
+                            run_context=run_context,
+                            adapter_instance=adapter_instance,
+                            trace=trace,
+                            world=world,
+                            archive=archive,
+                            submit_candidate=submit_candidate,
+                        )
+                        if not restarted:
+                            break
+                executor.result = await executor.session.result()
+                if executor.retired_results:
+                    executor.result = _merge_results(
+                        [*executor.retired_results, executor.result]
+                    )
+                await save_session_checkpoint(
+                    run_dir=planned.root,
+                    session=executor.session,
+                    world_revision=world.snapshot.revision,
+                    progress=executor.runtime.progress,
+                    budget_used=executor.result.metrics.as_dict(),
+                    processed_event_ids=executor.runtime.loop.processed_event_ids,
+                )
+            except BaseException as stream_exc:
+                if not executor.completed:
+                    close = getattr(executor.session, "close", None)
+                    if callable(close):
+                        try:
+                            close_reason = (
+                                "cancelled"
+                                if isinstance(stream_exc, asyncio.CancelledError)
+                                else "benchmark_run_error"
+                            )
+                            await close(close_reason)
+                        except Exception as close_exc:  # noqa: BLE001 - preserve original failure
+                            trace.emit(
+                                "agent.close_error",
+                                data={
+                                    "executor_id": planned.executor_id,
+                                    "error_type": type(close_exc).__name__,
+                                    "message": str(close_exc),
+                                },
+                            )
+                raise
 
             executor.runtime.loop.finish_ingest()
 

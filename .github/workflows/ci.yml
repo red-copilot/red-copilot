@@ -12,13 +12,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
       - name: install Python verifier sandbox
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
-      - run: pi --version
       - run: python -m pip install -e ".[dev]"
       - name: enforce harness namespace
         run: |
@@ -54,45 +49,44 @@ jobs:
           PY
       - run: ruff check .
       - run: docker build -t harness-isolation-probe:ci agents/examples/isolation-probe
+      - run: docker build -t harness-pi-rpc:ci tests/fixtures/pi-rpc
+      - run: docker build -t harness-verifier:ci benchmarks/examples/hello-docker-verifier
       - run: pytest tests/test_container_boundary.py tests/test_network_profiles_docker.py -q
       - run: pytest -q
       - run: harness validate benchmarks/examples/hello/task.yaml
       - run: harness validate benchmarks/examples/zc-hackathon/task.yaml
-      - run: harness preflight benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml
       - run: harness validate benchmarks/examples/hello-docker-verifier/task.yaml
-      - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi.yaml'); assert a.type == 'pi'"
-      - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi-tsec.yaml'); assert a.type == 'pi' and a.network == 'host'"
+      - run: harness preflight benchmarks/examples/hello/task.yaml --agent tests/fixtures/pi-rpc/agent.yaml
+      - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi.yaml'); assert a.image and a.pi"
+      - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi-tsec.yaml'); assert a.network == 'host'"
       - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi-tsec-hackathon.yaml'); assert a.pi.system_prompt_file == 'prompts/tsec-solver.md'"
       - run: harness tsec --help
       - run: harness gateway --help
       - run: harness capabilities
-      - run: harness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml --allow-host-agent --seed 7
       - run: >-
           harness run benchmarks/examples/hello/task.yaml
-          --agent agents/examples/gateway-demo.yaml
-          --allow-host-agent
+          --agent tests/fixtures/pi-rpc/agent.yaml
+          --runs-root .harness/ci-runs
+          --seed 7
+      - run: >-
+          harness run benchmarks/examples/hello/task.yaml
+          --agent tests/fixtures/pi-rpc/agent-gateway.yaml
+          --runs-root .harness/ci-runs
           --gateway
           --gateway-policy examples/gateway-policy.yaml
           --seed 11
-      - run: docker build -t harness-gateway-demo:ci agents/examples/docker-gateway
-      - run: docker build -t harness-verifier:ci benchmarks/examples/hello-docker-verifier
-      - run: docker build -f docker/gateway/Dockerfile -t harness-gateway:ci .
-      - run: >-
-          harness run benchmarks/examples/hello/task.yaml
-          --agent agents/examples/docker-gateway.yaml
-          --gateway
-          --gateway-policy examples/gateway-policy.yaml
-          --seed 12
-      - run: >-
-          harness run benchmarks/examples/hello/task.yaml
-          --agent agents/examples/docker-gateway.yaml
-          --gateway
-          --gateway-mode sidecar
-          --gateway-image harness-gateway:ci
-          --gateway-policy examples/gateway-policy.yaml
-          --seed 14
       - run: >-
           harness run benchmarks/examples/hello-docker-verifier/task.yaml
-          --agent agents/examples/demo.yaml
-          --allow-host-agent
+          --agent tests/fixtures/pi-rpc/agent.yaml
+          --runs-root .harness/ci-runs
           --seed 13
+      - name: subagent container smoke
+        run: |
+          mkdir -p "$RUNNER_TEMP/subagent-work"
+          printf 'fixture\n' > "$RUNNER_TEMP/subagent-work/input.txt"
+          harness subagent \
+            --agent tests/fixtures/pi-rpc/agent.yaml \
+            --objective "inspect input.txt" \
+            --timeout 30 \
+            --workdir "$RUNNER_TEMP/subagent-work"
+          test "$(cat "$RUNNER_TEMP/subagent-work/.fake-pi-touched")" = "subagent-ok"

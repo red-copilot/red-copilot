@@ -1,7 +1,6 @@
 apiVersion: harness/v1
 id: pi-openai-sol
-type: pi
-image: harness-pi-kali:latest
+image: harness/pi-kali:local
 network: environment
 env: {}
 pi:
