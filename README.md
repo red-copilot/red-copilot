@@ -1,30 +1,26 @@
-![Red Copilot — AI-Native Offensive Security Engineering](https://raw.githubusercontent.com/red-copilot/.github/main/assets/red-copilot-banner.svg)
+![Red Copilot — Security Engineering for the Agentic Era](https://raw.githubusercontent.com/red-copilot/.github/main/assets/red-copilot-banner.svg)
 
-# Red Harness
+# Red Harness · Python Runtime
 
-Red Harness is a reproducible evaluation runtime for security agents. It keeps benchmark tasks, agents, target environments, model/tool access, budgets, verification, telemetry, and the control loop separate so results can be independently reproduced and compared.
+**A reproducible execution and evaluation runtime for security agents.**
 
-**面向安全智能体的原生执行与可复现评测运行时。** Red Harness 通过明确的工程边界连接任务、智能体、目标环境、模型与工具访问、预算、世界状态和独立验证，让执行过程可审计、结果可复现。
+**面向安全智能体的可复现执行与评测运行时。** 通过明确的任务、环境、智能体、模型/工具、预算、状态与验证边界，让执行过程可审计、结果可复现。
 
-> **Core principle / 核心原则:** The Agent owns cognition; the Harness owns controlled execution, state, recovery, and verification boundaries. 智能体负责认知与决策；Harness 负责受控执行、状态、恢复与验证边界。
+> **Engineering principle:** The Agent owns cognition; the Harness owns controlled execution, state, recovery, and verification boundaries.
+>
+> **工程原则：** 智能体负责认知与决策；Harness 负责受控执行、状态、恢复与验证边界。
+
+<p>
+  <a href="https://github.com/red-copilot/red-copilot">Python Runtime</a> ·
+  <a href="https://github.com/red-copilot/harness">Go SDK</a> ·
+  <a href="https://github.com/red-copilot/red-x">ARL 3.0</a> ·
+  <a href="docs/agent-architecture-v2.md">Architecture v2</a>
+</p>
 
 ```text
-Task / Benchmark
-       │
-       ▼
-Harness Runtime ───── Budget / Trace / World State
-       │
-       ▼
-Agent Session (Pi RPC)
-       │
-       ▼
-Isolated Tools ────── Target Environment
-       │
-       ▼
-Verifier / Evaluator
-       │
-       ▼
-Authoritative Result
+Task / Benchmark → Harness Runtime → Isolated Agent → Target Environment
+                         ↑                                  │
+                         └──── World State ← Verifier ←─────┘
 ```
 
 ## Current capabilities
