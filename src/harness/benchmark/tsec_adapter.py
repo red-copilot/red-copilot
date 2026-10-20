@@ -431,6 +431,35 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                     continue
                 raise
 
+    async def refresh_progress(self, case: BenchmarkCase) -> None:
+        """Re-read the platform's flag progress for one case.
+
+        A continuation session runs against the same challenge instance; the
+        cached discovery record still says 0/N and would tell the Agent to find
+        flags it already submitted. Refresh both the raw record and the case
+        metadata so the objective reflects reality.
+        """
+        try:
+            challenges = await self.client.list_challenges()
+        except Exception:  # noqa: BLE001 - progress refresh is best effort
+            return
+        for challenge in challenges:
+            if challenge.unique_code != case.id:
+                continue
+            self._raw_cases[case.id] = challenge
+            metadata = dict(case.metadata)
+            metadata.update(
+                {
+                    "flag_count": int(challenge.flag_count),
+                    "correct_flag_count": int(
+                        getattr(challenge, "correct_flag_count", 0)
+                    ),
+                    "is_completed": bool(getattr(challenge, "is_completed", False)),
+                }
+            )
+            case.metadata = metadata
+            return
+
     async def provision(self, case: BenchmarkCase) -> BenchmarkSession:
         challenge = self._raw_cases.get(case.id)
         if challenge is None:
@@ -980,6 +1009,10 @@ async def run_tsec_challenges(
                                 max(1.0, case_budgets.wall_time / 2),
                             ):
                                 break
+                            if sessions_done:
+                                # Same instance, but the platform now knows
+                                # about the flags this slot already submitted.
+                                await adapter.refresh_progress(case)
                             attempt_started = time.monotonic()
                             result = await runner.run_case(
                                 adapter=adapter,
