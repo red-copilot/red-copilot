@@ -1090,10 +1090,33 @@ class SolverLoop:
             item
             for item in sorted(snapshot.hypotheses.values(), key=lambda item: item.id)
             if item.status in {"refuted", "superseded"}
+            and getattr(item.provenance, "epistemic_status", "unclassified")
+            in {"evidence", "verified"}
         ]
         lines.extend(
             f"- [{item.status}] {item.statement}" for item in ruled_out[:CONTEXT_BRIEF_RULED_OUT]
         )
+        # Agent-authored negatives are opinions, not facts: hand them to the
+        # next session as re-openable leads so a thin-coverage miss does not
+        # become inherited truth.
+        unconfirmed = [
+            item
+            for item in sorted(snapshot.hypotheses.values(), key=lambda item: item.id)
+            if item.status in {"refuted", "superseded"}
+            and getattr(item.provenance, "epistemic_status", "unclassified")
+            not in {"evidence", "verified"}
+        ]
+        if unconfirmed:
+            lines.extend(
+                [
+                    "",
+                    "## Unconfirmed negatives (re-open if coverage was thin)",
+                ]
+            )
+            lines.extend(
+                f"- [{item.status}] {item.statement}"
+                for item in unconfirmed[:CONTEXT_BRIEF_RULED_OUT]
+            )
         failures = sorted(snapshot.failures.values(), key=lambda item: item.id)
         lines.extend(
             f"- [failure] {item.message}" for item in failures[-CONTEXT_BRIEF_FAILURES:]

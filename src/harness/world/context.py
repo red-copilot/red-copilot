@@ -300,11 +300,25 @@ class WorldContextBuilder:
         # Ruled-out paths are rendered straight from the snapshot instead of the
         # retrieval ranking: a dead end matters precisely because it is not
         # relevant to the current query, so relevance ranking would hide it.
+        #
+        # Only evidence-backed negatives belong under "Ruled out". A hypothesis
+        # the Agent itself declared dead is an opinion, and printing it beside
+        # verified facts turns one thin-coverage miss into inherited truth -
+        # the failure mode both postmortems describe ("my wordlist missed it"
+        # becoming "this path is dead"). Those go in a separate, explicitly
+        # re-openable section.
         ruled_out = [
             item
             for item in snapshot.hypotheses.values()
             if item.status in {"refuted", "superseded"} and item.is_valid_at()
         ]
+        unconfirmed_negatives = [
+            item
+            for item in ruled_out
+            if getattr(item.provenance, "epistemic_status", "unclassified")
+            not in {"evidence", "verified"}
+        ]
+        ruled_out = [item for item in ruled_out if item not in unconfirmed_negatives]
         if ruled_out:
             ruled_out.sort(key=lambda item: item.id)
             ruled_out.sort(
@@ -331,6 +345,30 @@ class WorldContextBuilder:
             omitted = len(ruled_out) - self.max_ruled_out
             if omitted > 0:
                 lines.append(f"- ({omitted} more ruled-out hypotheses omitted)")
+
+        if unconfirmed_negatives:
+            lines.extend(
+                [
+                    "",
+                    "## Unconfirmed negatives",
+                    (
+                        "- (your own earlier conclusions, not verified facts - a miss"
+                        " is not proof; re-open any of these when coverage was thin)"
+                    ),
+                ]
+            )
+            for hypothesis in unconfirmed_negatives[: self.max_ruled_out]:
+                lines.append(
+                    self._line(
+                        hypothesis.status,
+                        hypothesis.id,
+                        "hypothesis",
+                        {
+                            "statement": hypothesis.statement,
+                            **self._state_meta(hypothesis),
+                        },
+                    )
+                )
 
         lines.extend(["", "## Artifacts"])
         artifacts = sorted(selected["artifacts"], key=lambda item: item.id)

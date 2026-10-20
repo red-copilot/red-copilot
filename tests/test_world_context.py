@@ -31,6 +31,7 @@ def _hypothesis(
     *,
     status: str,
     observed_at: datetime | None = None,
+    trust: str = "evidence",
 ) -> Hypothesis:
     return Hypothesis(
         id=identifier,
@@ -38,7 +39,26 @@ def _hypothesis(
         confidence=0.5,
         status=status,
         observed_at=observed_at,
+        provenance=Provenance(actor="harness", epistemic_status=trust),
     )
+
+
+def test_agent_authored_negatives_are_not_rendered_as_ruled_out() -> None:
+    snapshot = _snapshot(
+        _hypothesis("h-verified", status="refuted", trust="verified"),
+        _hypothesis("h-claimed", status="refuted", trust="claim"),
+    )
+
+    rendered = WorldContextBuilder().render(snapshot)
+
+    ruled_out = rendered.split("## Ruled out", 1)[1].split("## Unconfirmed negatives", 1)[0]
+    assert "h-verified" in ruled_out
+    assert "h-claimed" not in ruled_out
+    # The agent's own conclusion is still available, but labelled as re-openable.
+    assert "## Unconfirmed negatives" in rendered
+    unconfirmed = rendered.split("## Unconfirmed negatives", 1)[1].split("## Artifacts", 1)[0]
+    assert "h-claimed" in unconfirmed
+    assert "not verified facts" in unconfirmed
 
 
 def test_ruled_out_hypotheses_are_rendered() -> None:
