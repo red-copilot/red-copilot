@@ -494,14 +494,6 @@ def _valid_revision(value: Any) -> int | None:
     return value
 
 
-def _positive_count(value: Any, default: int = 1) -> int | None:
-    if value is None:
-        return default
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
-
-
 def _project_action(record: LedgerRecord, status: str) -> dict[str, Any]:
     payload = record.payload
     action: dict[str, Any] = {
@@ -523,7 +515,6 @@ def project_records(records: Sequence[LedgerRecord]) -> LedgerProjection:
 
     ordered = sorted(records, key=lambda record: record.ledger_seq)
     metrics = UsageMetrics()
-    model_calls = 0
     last_action: dict[str, Any] | None = None
     actions: list[dict[str, Any]] = []
     active_actions: dict[str, dict[str, Any]] = {}
@@ -551,11 +542,7 @@ def project_records(records: Sequence[LedgerRecord]) -> LedgerProjection:
             if record.correlation_id:
                 active_actions.pop(record.correlation_id, None)
 
-        if kind == "model.request":
-            count = _positive_count(payload.get("count"))
-            if count is not None:
-                model_calls += count
-        if kind in {"model.usage", "tool.call", "tool.denied"}:
+        if kind in {"model.request", "model.usage", "tool.call", "tool.denied"}:
             charge_usage_event(metrics, kind, payload)
 
         if kind == "benchmark.submission.proposed":
@@ -598,7 +585,7 @@ def project_records(records: Sequence[LedgerRecord]) -> LedgerProjection:
         active_actions=active_actions,
         budget={
             "tokens": metrics.total_tokens,
-            "model_calls": model_calls,
+            "model_calls": metrics.model_calls,
             "tool_calls": metrics.tool_calls,
             "cost_usd": metrics.cost_usd,
         },

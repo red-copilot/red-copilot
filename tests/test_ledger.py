@@ -135,6 +135,45 @@ def test_import_historical_trace_projects_actions_and_budget(tmp_path: Path) -> 
     store.verify()
 
 
+def test_projection_uses_budget_boundary_for_model_usage(tmp_path: Path) -> None:
+    from harness.ledger import project_records
+
+    store = LedgerStore(tmp_path / "ledger.db")
+    store.append_trace_event(
+        _event(
+            "usage-valid",
+            "model.usage",
+            {
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+                "model_calls": 2,
+                "cost_usd": 0.1,
+            },
+        )
+    )
+    store.append_trace_event(
+        _event(
+            "usage-malformed",
+            "model.usage",
+            {
+                "input_tokens": -2,
+                "output_tokens": 3,
+                "total_tokens": 1,
+                "model_calls": -1,
+            },
+        )
+    )
+    store.append_trace_event(_event("tool-malformed", "tool.call", {"count": -1}))
+
+    projection = project_records(store.records())
+
+    assert projection.budget["model_calls"] == 2
+    assert projection.budget["tokens"] == 5
+    assert projection.budget["cost_usd"] == 0.1
+    assert projection.budget["tool_calls"] == 0
+
+
 def _write_complete_v2_run(run_dir: Path) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     trace = TraceRecorder(

@@ -18,8 +18,8 @@ best-effort replay comparison after terminal persistence. Ledger failures are is
 `ledger.error.json` and cannot alter the Run status or `result.json`. v2 trace, World, Context,
 Result, Progress and Checkpoint reads remain authoritative; M2 is not started. Evidence:
 `tests/test_ledger.py`, `tests/test_smoke.py`, and the frozen contract in
-[ADR 0001](../adr/0001-causal-ledger.md); targeted `pytest` run passed 30 tests and the full suite
-passed 512 tests with one Starlette/httpx deprecation warning. The Docker-backed recovery fault
+[ADR 0001](../adr/0001-causal-ledger.md); targeted `pytest` run passed 31 tests and the full suite
+passed 513 tests with one Starlette/httpx deprecation warning. The Docker-backed recovery fault
 matrix and a live TSec sweep remain unexecuted.
 
 ### RUN-03 [x] P1 — Event processing and bounded autonomy

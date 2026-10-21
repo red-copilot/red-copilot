@@ -35,9 +35,9 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # re-measured at 57 modules / 15,890 source lines.
 #
 # The M1 causal shadow ledger added `harness.ledger` to the control spine. The
-# tree was re-measured rather than estimated: 58 modules / 16,698 source lines.
+# tree was re-measured rather than estimated: 58 modules / 16,685 source lines.
 MAX_MODULES = 58
-MAX_SRC_LINES = 16_698
+MAX_SRC_LINES = 16_685
 
 
 def _module_names() -> set[str]:

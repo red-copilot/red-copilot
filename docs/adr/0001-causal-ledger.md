@@ -133,7 +133,7 @@ and projection-rebuild coverage remain later migration gates.
 ## Consequences
 
 - The control spine gains one deliberate module, `harness.ledger`.
-- The measured package ceiling is 58 modules and 16,698 source lines.
+- The measured package ceiling is 58 modules and 16,685 source lines.
 - Runs carry a second local artifact store while the comparison remains enabled.
 - v2 behavior and trust boundaries remain intact during the observation period.
 - The ledger is useful for auditability only after its replay semantics are measured; it is not yet
