@@ -1,5 +1,10 @@
 # Modular monolith boundaries
 
+> Target architecture: [first-principles architecture v3](superpowers/specs/2026-10-22-first-principles-architecture-design.md)
+> (Chinese) is the proposed causality-and-trust kernel. It is not implemented yet; the boundaries,
+> event formats and tests described below remain the current v2 baseline until the migration gates
+> in that document are satisfied.
+
 Diagrams of the current topology, control loop and trust boundary:
 [architecture-map.md](architecture-map.md).
 
