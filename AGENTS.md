@@ -127,12 +127,14 @@ list the commands run and their results, link the issue or roadmap entry, and no
 environment-dependent exclusions. Request review for trust-boundary or public-contract
 changes.
 
-**Automatic delivery.** Unless the user explicitly says not to, once a coherent change is
-implemented and the required verification has passed, commit it with a Conventional Commit
-message and push it to the current non-default feature branch (`git push -u origin <branch>`).
-Never auto-push `main` or force-push. Report the commit SHA and the true push result; if
-verification fails or the push is rejected by credentials or network, keep the local commit and
-report the exact blocker instead of claiming delivery.
+**Automatic delivery and merge.** Unless the user explicitly says not to, once a coherent change
+is implemented and the required verification has passed, commit it with a Conventional Commit
+message, push the current non-default feature branch (`git push -u origin <branch>`), merge that
+branch into the latest `main` (fast-forward when possible, otherwise a normal merge commit), and
+push `main`. Never force-push. Do not merge when verification fails, conflicts remain, a required
+review is still outstanding, or branch protection rejects the update; keep the local work and
+report the exact blocker instead of claiming delivery. Report the commit SHA plus the true remote
+feature-branch and `main` SHAs.
 
 ## Agent Operating Contract
 Start with [docs/roadmap/README.md](docs/roadmap/README.md), then read the subsystem roadmap relevant to the requested task, docs/architecture.md, and existing tests. Before touching isolation, egress, or the gateway, also read
@@ -142,8 +144,9 @@ task concerns them: [docs/world-state.md](docs/world-state.md), [docs/pi.md](doc
 [docs/tsec.md](docs/tsec.md) and
 [docs/agent-architecture-v2.md](docs/agent-architecture-v2.md). Repository docs mix languages —
 `docs/agent-architecture-v2.md` is Chinese, while README, AGENTS.md and the rest are English — so
-write in the language of the file you edit. This document is guidance, not permission to run
-autonomously outside a requested task or to merge without review.
+write in the language of the file you edit. This document is guidance, not permission to act
+autonomously outside a requested task; the automatic delivery and merge rule above authorizes
+merging completed requested work unless a required review or branch protection blocks it.
 
 ### Iteration algorithm
 1. Inspect main and existing behavior; select the highest-priority **unblocked** roadmap item. Do not assume an item is incomplete without checking code/tests.
