@@ -127,6 +127,13 @@ list the commands run and their results, link the issue or roadmap entry, and no
 environment-dependent exclusions. Request review for trust-boundary or public-contract
 changes.
 
+**Automatic delivery.** Unless the user explicitly says not to, once a coherent change is
+implemented and the required verification has passed, commit it with a Conventional Commit
+message and push it to the current non-default feature branch (`git push -u origin <branch>`).
+Never auto-push `main` or force-push. Report the commit SHA and the true push result; if
+verification fails or the push is rejected by credentials or network, keep the local commit and
+report the exact blocker instead of claiming delivery.
+
 ## Agent Operating Contract
 Start with [docs/roadmap/README.md](docs/roadmap/README.md), then read the subsystem roadmap relevant to the requested task, docs/architecture.md, and existing tests. Before touching isolation, egress, or the gateway, also read
 [docs/security/execution-boundary.md](docs/security/execution-boundary.md) and
