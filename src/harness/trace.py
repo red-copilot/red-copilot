@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from .ledger import (
+    LEDGER_SHADOW_ERROR_SCHEMA_VERSION,
+    LedgerStore,
+    ledger_db_path,
+    shadow_ledger_enabled,
+)
 
 MAX_TRACE_EVENT_BYTES = 256 * 1024
 MAX_TRACE_STRING_CHARS = 16 * 1024
@@ -23,6 +31,7 @@ _ASSIGNMENT_SECRET = re.compile(
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_logger = logging.getLogger(__name__)
 
 
 def _redact_string(value: str) -> str:
@@ -70,12 +79,60 @@ def sanitize_observability_data(data: dict[str, Any]) -> dict[str, Any]:
 
 
 class TraceRecorder:
-    def __init__(self, path: Path, run_id: str, task_id: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        run_id: str,
+        task_id: str,
+        *,
+        shadow_ledger: bool | None = None,
+        ledger_path: Path | None = None,
+    ) -> None:
         self.path = path
         self.run_id = _redact_string(run_id)
         self.task_id = _redact_string(task_id)
         self._lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.ledger_error: str | None = None
+        self._ledger: LedgerStore | None = None
+        if shadow_ledger if shadow_ledger is not None else shadow_ledger_enabled():
+            try:
+                self._ledger = LedgerStore(ledger_path or ledger_db_path(self.path))
+            except Exception as exc:  # noqa: BLE001 - shadowing must never fail a run
+                self._record_ledger_error(exc)
+
+    def _record_ledger_error(self, exc: BaseException) -> None:
+        if self.ledger_error is not None:
+            return
+        self.ledger_error = f"{type(exc).__name__}: {_redact_string(str(exc))[:1024]}"
+        _logger.warning("shadow ledger unavailable: %s", self.ledger_error)
+        warning = {
+            "schema_version": LEDGER_SHADOW_ERROR_SCHEMA_VERSION,
+            "error_type": type(exc).__name__,
+            "message": _redact_string(str(exc))[:1024],
+        }
+        try:
+            (self.path.parent / "ledger.error.json").write_text(
+                json.dumps(warning, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            _logger.warning("could not write shadow ledger warning artifact")
+
+    def _append_shadow(self, event: dict[str, Any]) -> None:
+        if self._ledger is None:
+            return
+        try:
+            self._ledger.append_trace_event(event)
+        except Exception as exc:  # noqa: BLE001 - shadowing must never fail a run
+            ledger = self._ledger
+            self._ledger = None
+            if ledger is not None:
+                try:
+                    ledger.close()
+                except Exception as close_exc:  # noqa: BLE001 - preserve the run
+                    _logger.warning("could not close failed shadow ledger: %s", close_exc)
+            self._record_ledger_error(exc)
 
     def emit(
         self,
@@ -116,4 +173,5 @@ class TraceRecorder:
             line = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self.path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
+            self._append_shadow(event)
         return emitted_id
