@@ -110,3 +110,167 @@ def test_shadow_ledger_flag_disables_writes(monkeypatch: pytest.MonkeyPatch, tmp
 
     assert (tmp_path / "trace.jsonl").is_file()
     assert not (tmp_path / "ledger.db").exists()
+
+
+FIXTURE_TRACE = Path(__file__).resolve().parent / "fixtures" / "run_metrics" / "trace_excerpt.jsonl"
+
+
+def test_import_historical_trace_projects_actions_and_budget(tmp_path: Path) -> None:
+    from harness.ledger import import_trace, project_records
+
+    ledger_path = tmp_path / "ledger.db"
+    records = import_trace(FIXTURE_TRACE, ledger_path)
+    projection = project_records(records)
+
+    assert len(records) == 4
+    assert projection.run_id == "tsec_a-05_test0001"
+    assert {action["tool_call_id"] for action in projection.actions} == {
+        "call-slow",
+        "call-fast",
+    }
+    assert projection.budget["tool_calls"] == 0
+    assert projection.budget["tokens"] == 37820
+    assert projection.terminal is None
+    store = LedgerStore(ledger_path)
+    store.verify()
+
+
+def _write_complete_v2_run(run_dir: Path) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    trace = TraceRecorder(
+        run_dir / "trace.jsonl",
+        "run-complete",
+        "task-ledger",
+        shadow_ledger=True,
+    )
+    trace.emit(
+        "tool.call",
+        actor="agent:test",
+        data={
+            "tool": "bash",
+            "tool_call_id": "action-1",
+            "skill_id": "recon",
+        },
+        action_id="action-1",
+    )
+    trace.emit(
+        "tool.result",
+        actor="agent:test",
+        data={
+            "tool": "bash",
+            "tool_call_id": "action-1",
+            "skill_id": "recon",
+            "is_error": False,
+            "execution_status": "succeeded",
+        },
+        action_id="action-1",
+    )
+    trace.emit("model.request", actor="gateway", data={"count": 2})
+    trace.emit(
+        "model.usage",
+        actor="gateway",
+        data={
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "cost_usd": 0.5,
+        },
+    )
+    for index, accepted in enumerate((True, False), start=1):
+        trace.emit(
+            "benchmark.submission.proposed",
+            actor="agent",
+            data={"value_sha256": f"value-{index}"},
+        )
+        trace.emit(
+            "benchmark.submission.result",
+            data={"accepted": accepted, "value_sha256": f"value-{index}"},
+        )
+    trace.emit(
+        "objective.verdict",
+        data={"producer": "task_verifier", "status": "verified"},
+    )
+    trace.emit(
+        "run.finished",
+        data={"status": "finished", "success": True, "score": 100.0},
+    )
+    (run_dir / "progress.json").write_text(
+        json.dumps(
+            {
+                "budget_used": {"tokens": 120, "cost_usd": 0.5},
+                "model_calls": 2,
+                "tool_calls": 1,
+                "last_action": {
+                    "tool": "bash",
+                    "tool_call_id": "action-1",
+                    "status": "succeeded",
+                    "skill_id": "recon",
+                },
+                "active_actions": {},
+                "objective_verdict": {"status": "verified"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_path = run_dir / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "finished",
+                "success": True,
+                "score": 100.0,
+                "metrics": {"submissions_attempted": 2},
+                "submissions": [{"accepted": True}, {"accepted": False}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return result_path
+
+
+def test_complete_run_projection_matches_v2_and_is_deterministic(tmp_path: Path) -> None:
+    from harness.ledger import compare_ledger_to_v2, project_records, write_ledger_comparison
+
+    result_path = _write_complete_v2_run(tmp_path)
+    ledger_path = tmp_path / "ledger.db"
+    store = LedgerStore(ledger_path)
+    projection = project_records(store.records())
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    progress = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+
+    comparison = compare_ledger_to_v2(store.records(), result, progress)
+    first = write_ledger_comparison(ledger_path, tmp_path)
+    second = write_ledger_comparison(ledger_path, tmp_path)
+
+    assert comparison.ok is True
+    assert first["ok"] is True
+    assert first["projection"] == second["projection"]
+    assert projection.terminal == {"status": "finished", "success": True, "score": 100.0}
+    assert projection.objective_status == "verified"
+    assert projection.budget == {
+        "tokens": 120,
+        "model_calls": 2,
+        "tool_calls": 1,
+        "cost_usd": 0.5,
+    }
+    assert projection.submissions == {"proposed": 2, "accepted": 1, "rejected": 1}
+
+
+def test_comparison_reports_terminal_mismatch_without_raising(tmp_path: Path) -> None:
+    from harness.ledger import compare_ledger_to_v2, write_ledger_comparison
+
+    result_path = _write_complete_v2_run(tmp_path)
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["status"] = "error"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    progress = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+    store = LedgerStore(tmp_path / "ledger.db")
+
+    comparison = compare_ledger_to_v2(store.records(), result, progress)
+    written = write_ledger_comparison(tmp_path / "ledger.db", tmp_path)
+
+    assert comparison.ok is False
+    assert written["ok"] is False
+    assert any(
+        mismatch["field"] == "terminal.status" for mismatch in comparison.mismatches
+    )

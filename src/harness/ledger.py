@@ -9,14 +9,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
+import tempfile
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from .secureio import read_regular_text
 
 LEDGER_DB_NAME = "ledger.db"
 LEDGER_STORE_SCHEMA_VERSION = "harness/ledger-store/v1"
@@ -78,6 +82,50 @@ class LedgerRecord:
             "prev_hash": self.prev_hash,
             "record_hash": self.record_hash,
             "content_hash": self.content_hash,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerProjection:
+    run_id: str
+    terminal: dict[str, Any] | None
+    objective_status: str | None
+    actions: tuple[dict[str, Any], ...]
+    last_action: dict[str, Any] | None
+    active_actions: dict[str, dict[str, Any]]
+    budget: dict[str, int | float]
+    submissions: dict[str, int]
+    world_revision: int
+    event_count: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "terminal": dict(self.terminal) if self.terminal is not None else None,
+            "objective_status": self.objective_status,
+            "actions": [dict(action) for action in self.actions],
+            "last_action": dict(self.last_action) if self.last_action is not None else None,
+            "active_actions": {
+                key: dict(value) for key, value in self.active_actions.items()
+            },
+            "budget": dict(self.budget),
+            "submissions": dict(self.submissions),
+            "world_revision": self.world_revision,
+            "event_count": self.event_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerComparison:
+    ok: bool
+    mismatches: tuple[dict[str, Any], ...]
+    projection: LedgerProjection
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "mismatches": [dict(item) for item in self.mismatches],
+            "projection": self.projection.as_dict(),
         }
 
 
@@ -419,3 +467,269 @@ def _row_to_record(row: sqlite3.Row) -> LedgerRecord:
         record_hash=str(row["record_hash"]),
         content_hash=str(row["content_hash"]),
     )
+
+def import_trace(trace_path: Path, ledger_path: Path) -> list[LedgerRecord]:
+    """Import one historical trace JSONL into a fresh or continuing ledger."""
+    store = LedgerStore(ledger_path)
+    imported: list[LedgerRecord] = []
+    try:
+        for line_number, raw in enumerate(
+            read_regular_text(trace_path, max_bytes=64 * 1024 * 1024).splitlines(), start=1
+        ):
+            if not raw.strip():
+                continue
+            event = json.loads(raw)
+            if not isinstance(event, Mapping):
+                raise TypeError(f"trace line {line_number} is not a JSON object")
+            imported.append(store.append_trace_event(event))
+        store.verify()
+    finally:
+        store.close()
+    return imported
+
+
+def _valid_revision(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _positive_count(value: Any, default: int = 1) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _project_action(record: LedgerRecord, status: str) -> dict[str, Any]:
+    payload = record.payload
+    action: dict[str, Any] = {
+        "tool_call_id": record.correlation_id,
+        "status": status,
+    }
+    tool = payload.get("tool")
+    if isinstance(tool, str) and tool:
+        action["tool"] = tool
+    skill_id = payload.get("skill_id")
+    if isinstance(skill_id, str) and skill_id:
+        action["skill_id"] = skill_id
+    return action
+
+
+def project_records(records: Sequence[LedgerRecord]) -> LedgerProjection:
+    """Rebuild the M1 comparison view using only append-only ledger records."""
+    from .budget import UsageMetrics, charge_usage_event
+
+    ordered = sorted(records, key=lambda record: record.ledger_seq)
+    metrics = UsageMetrics()
+    model_calls = 0
+    last_action: dict[str, Any] | None = None
+    actions: list[dict[str, Any]] = []
+    active_actions: dict[str, dict[str, Any]] = {}
+    terminal: dict[str, Any] | None = None
+    objective_status: str | None = None
+    world_revision = 0
+    submissions = {"proposed": 0, "accepted": 0, "rejected": 0}
+
+    for record in ordered:
+        payload = record.payload
+        kind = record.kind
+        if kind == "tool.call":
+            action = _project_action(record, "running")
+            last_action = action
+            actions.append(dict(action))
+            if record.correlation_id:
+                active_actions[record.correlation_id] = dict(action)
+        elif kind == "tool.result":
+            status = payload.get("execution_status")
+            if status not in {"running", "succeeded", "failed"}:
+                status = "failed" if bool(payload.get("is_error")) else "succeeded"
+            action = _project_action(record, status)
+            last_action = action
+            actions.append(dict(action))
+            if record.correlation_id:
+                active_actions.pop(record.correlation_id, None)
+
+        if kind == "model.request":
+            count = _positive_count(payload.get("count"))
+            if count is not None:
+                model_calls += count
+        if kind in {"model.usage", "tool.call", "tool.denied"}:
+            charge_usage_event(metrics, kind, payload)
+
+        if kind == "benchmark.submission.proposed":
+            submissions["proposed"] += 1
+        elif kind == "benchmark.submission.result":
+            accepted = payload.get("accepted")
+            if accepted is True:
+                submissions["accepted"] += 1
+            elif accepted is False:
+                submissions["rejected"] += 1
+        elif kind == "objective.verdict":
+            status = payload.get("status")
+            if isinstance(status, str):
+                objective_status = status
+        elif kind == "run.finished":
+            status = payload.get("status")
+            success = payload.get("success")
+            score = payload.get("score")
+            terminal = {
+                "status": status if isinstance(status, str) else None,
+                "success": success if isinstance(success, bool) else None,
+                "score": float(score)
+                if isinstance(score, (int, float))
+                and not isinstance(score, bool)
+                and math.isfinite(float(score))
+                else None,
+            }
+
+        for key in ("world_revision", "revision_after", "revision"):
+            revision = _valid_revision(payload.get(key))
+            if revision is not None:
+                world_revision = max(world_revision, revision)
+
+    return LedgerProjection(
+        run_id=ordered[0].run_id if ordered else "",
+        terminal=terminal,
+        objective_status=objective_status,
+        actions=tuple(actions),
+        last_action=last_action,
+        active_actions=active_actions,
+        budget={
+            "tokens": metrics.total_tokens,
+            "model_calls": model_calls,
+            "tool_calls": metrics.tool_calls,
+            "cost_usd": metrics.cost_usd,
+        },
+        submissions=submissions,
+        world_revision=world_revision,
+        event_count=len(ordered),
+    )
+
+
+def _same_number(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-9)
+    return left == right
+
+
+def _action_identity(action: Any) -> dict[str, Any] | None:
+    if not isinstance(action, Mapping):
+        return None
+    return {
+        "tool_call_id": action.get("tool_call_id"),
+        "status": action.get("status"),
+    }
+
+
+def compare_ledger_to_v2(
+    records: Sequence[LedgerRecord],
+    result: Mapping[str, Any],
+    progress: Mapping[str, Any],
+) -> LedgerComparison:
+    """Compare the replayed view with the authoritative v2 projections."""
+    projection = project_records(records)
+    mismatches: list[dict[str, Any]] = []
+
+    def mismatch(field: str, projected: Any, v2: Any) -> None:
+        mismatches.append({"field": field, "projected": projected, "v2": v2})
+
+    projected_terminal = projection.terminal or {}
+    for field in ("status", "success", "score"):
+        if not _same_number(projected_terminal.get(field), result.get(field)):
+            mismatch(
+                f"terminal.{field}",
+                projected_terminal.get(field),
+                result.get(field),
+            )
+
+    objective = progress.get("objective_verdict")
+    v2_objective_status = objective.get("status") if isinstance(objective, Mapping) else None
+    if projection.objective_status != v2_objective_status:
+        mismatch(
+            "objective.status",
+            projection.objective_status,
+            v2_objective_status,
+        )
+
+    v2_last_action = progress.get("last_action")
+    if _action_identity(projection.last_action) != _action_identity(v2_last_action):
+        mismatch(
+            "actions.last",
+            _action_identity(projection.last_action),
+            _action_identity(v2_last_action),
+        )
+
+    active = progress.get("active_actions")
+    expected_active = active if isinstance(active, Mapping) else {}
+    projected_active = {
+        key: value.get("status") for key, value in projection.active_actions.items()
+    }
+    v2_active = {
+        key: value.get("status") if isinstance(value, Mapping) else None
+        for key, value in expected_active.items()
+    }
+    if projected_active != v2_active:
+        mismatch("actions.active", projected_active, v2_active)
+
+    budget_used = progress.get("budget_used")
+    charged = budget_used if isinstance(budget_used, Mapping) else {}
+    expected_budget = {
+        "tokens": charged.get("tokens", 0),
+        "model_calls": progress.get("model_calls", 0),
+        "tool_calls": progress.get("tool_calls", 0),
+        "cost_usd": charged.get("cost_usd", 0),
+    }
+    for key, expected in expected_budget.items():
+        projected = projection.budget.get(key)
+        if not _same_number(projected, expected):
+            mismatch(f"budget.{key}", projected, expected)
+
+    metrics = result.get("metrics")
+    v2_submissions = metrics.get("submissions_attempted", 0) if isinstance(metrics, Mapping) else 0
+    if projection.submissions["proposed"] != v2_submissions:
+        mismatch(
+            "submissions.proposed",
+            projection.submissions["proposed"],
+            v2_submissions,
+        )
+
+    return LedgerComparison(ok=not mismatches, mismatches=tuple(mismatches), projection=projection)
+
+
+def write_ledger_comparison(ledger_path: Path, run_dir: Path) -> dict[str, Any]:
+    """Verify and compare one ledger, then publish a deterministic projection."""
+    store = LedgerStore(ledger_path)
+    try:
+        records = store.records()
+        store.verify()
+    finally:
+        store.close()
+    result_value = json.loads(read_regular_text(run_dir / "result.json"))
+    progress_value = json.loads(read_regular_text(run_dir / "progress.json"))
+    if not isinstance(result_value, Mapping) or not isinstance(progress_value, Mapping):
+        raise TypeError("result.json and progress.json must contain JSON objects")
+    comparison = compare_ledger_to_v2(records, result_value, progress_value)
+    payload = {
+        "schema_version": "harness/ledger-comparison/v1",
+        "ledger_store_schema": LEDGER_STORE_SCHEMA_VERSION,
+        "ledger_head": records[-1].record_hash if records else GENESIS_HASH,
+        **comparison.as_dict(),
+    }
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".ledger-comparison-", dir=run_dir)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, run_dir / "ledger.comparison.json")
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+    return payload
