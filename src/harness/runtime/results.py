@@ -179,3 +179,4 @@ def persist_run_result(*, run_dir: Path, trace: TraceRecorder, result: dict[str,
             "metrics": result["metrics"],
         },
     )
+    trace.finalize_shadow(run_dir)

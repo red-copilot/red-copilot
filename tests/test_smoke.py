@@ -85,6 +85,9 @@ def test_smoke_run(monkeypatch, tmp_path: Path) -> None:
     assert result["success"] is True
     run_dir = tmp_path / "runs" / result["run_id"]
     assert (run_dir / "world.db").is_file()
+    assert (run_dir / "ledger.db").is_file()
+    comparison = json.loads((run_dir / "ledger.comparison.json").read_text(encoding="utf-8"))
+    assert comparison["ok"] is True
     assert result["score"] == 100
     assert result["seed"] == 42
     assert result["metrics"]["total_tokens"] == 12

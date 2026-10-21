@@ -273,7 +273,9 @@ class SolverLoop:
             tool_call_id = event.data.get("tool_call_id")
             if isinstance(tool_call_id, str) and 0 < len(tool_call_id) <= 256:
                 trace_data: dict[str, object] = {
+                    "tool": event.data.get("tool"),
                     "tool_call_id": tool_call_id,
+                    "skill_id": (self.progress.last_action or {}).get("skill_id"),
                     "source_event_id": (
                         event.event_id
                         if isinstance(event.event_id, str) and len(event.event_id) <= 256

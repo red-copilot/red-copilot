@@ -15,6 +15,7 @@ from .ledger import (
     LedgerStore,
     ledger_db_path,
     shadow_ledger_enabled,
+    write_ledger_comparison,
 )
 
 MAX_TRACE_EVENT_BYTES = 256 * 1024
@@ -94,10 +95,11 @@ class TraceRecorder:
         self._lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.ledger_error: str | None = None
+        self._ledger_path = ledger_path or ledger_db_path(self.path)
         self._ledger: LedgerStore | None = None
         if shadow_ledger if shadow_ledger is not None else shadow_ledger_enabled():
             try:
-                self._ledger = LedgerStore(ledger_path or ledger_db_path(self.path))
+                self._ledger = LedgerStore(self._ledger_path)
             except Exception as exc:  # noqa: BLE001 - shadowing must never fail a run
                 self._record_ledger_error(exc)
 
@@ -133,6 +135,16 @@ class TraceRecorder:
                 except Exception as close_exc:  # noqa: BLE001 - preserve the run
                     _logger.warning("could not close failed shadow ledger: %s", close_exc)
             self._record_ledger_error(exc)
+
+    def finalize_shadow(self, run_dir: Path) -> dict[str, Any] | None:
+        """Verify and compare the shadow ledger without affecting the run."""
+        if self._ledger is None:
+            return None
+        try:
+            return write_ledger_comparison(self._ledger_path, run_dir)
+        except Exception as exc:  # noqa: BLE001 - comparison is diagnostic only
+            self._record_ledger_error(exc)
+            return None
 
     def emit(
         self,

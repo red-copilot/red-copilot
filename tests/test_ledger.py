@@ -274,3 +274,80 @@ def test_comparison_reports_terminal_mismatch_without_raising(tmp_path: Path) ->
     assert any(
         mismatch["field"] == "terminal.status" for mismatch in comparison.mismatches
     )
+
+
+def _prepare_persistence_case(
+    run_dir: Path,
+    *,
+    progress_tokens: int = 120,
+) -> tuple[TraceRecorder, dict]:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    trace = TraceRecorder(
+        run_dir / "trace.jsonl",
+        "run-persist",
+        "task-ledger",
+        shadow_ledger=True,
+    )
+    trace.emit("tool.call", actor="agent:test", data={"tool": "bash", "tool_call_id": "a1"})
+    trace.emit(
+        "tool.result",
+        actor="agent:test",
+        data={"tool": "bash", "tool_call_id": "a1", "execution_status": "succeeded"},
+    )
+    trace.emit("model.request", actor="gateway", data={"count": 2})
+    trace.emit(
+        "model.usage",
+        actor="gateway",
+        data={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+    )
+    trace.emit("benchmark.submission.proposed", actor="agent", data={"value_sha256": "v1"})
+    trace.emit("benchmark.submission.result", data={"accepted": True})
+    trace.emit("objective.verdict", data={"producer": "task_verifier", "status": "verified"})
+    (run_dir / "progress.json").write_text(
+        json.dumps(
+            {
+                "budget_used": {"tokens": progress_tokens},
+                "model_calls": 2,
+                "tool_calls": 1,
+                "last_action": {
+                    "tool": "bash",
+                    "tool_call_id": "a1",
+                    "status": "succeeded",
+                },
+                "active_actions": {},
+                "objective_verdict": {"status": "verified"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return trace, {
+        "status": "finished",
+        "success": True,
+        "score": 100.0,
+        "metrics": {"submissions_attempted": 1},
+    }
+
+
+def test_persist_run_result_finalizes_shadow_comparison(tmp_path: Path) -> None:
+    from harness.runtime.results import persist_run_result
+
+    trace, result = _prepare_persistence_case(tmp_path)
+
+    persist_run_result(run_dir=tmp_path, trace=trace, result=result)
+
+    comparison = json.loads((tmp_path / "ledger.comparison.json").read_text(encoding="utf-8"))
+    assert comparison["ok"] is True
+    assert json.loads((tmp_path / "result.json").read_text(encoding="utf-8")) == result
+
+
+def test_persist_run_result_keeps_result_on_projection_mismatch(tmp_path: Path) -> None:
+    from harness.runtime.results import persist_run_result
+
+    trace, result = _prepare_persistence_case(tmp_path, progress_tokens=999)
+
+    persist_run_result(run_dir=tmp_path, trace=trace, result=result)
+
+    comparison = json.loads((tmp_path / "ledger.comparison.json").read_text(encoding="utf-8"))
+    assert comparison["ok"] is False
+    assert any(item["field"] == "budget.tokens" for item in comparison["mismatches"])
+    assert json.loads((tmp_path / "result.json").read_text(encoding="utf-8")) == result
