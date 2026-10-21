@@ -15,7 +15,6 @@ from ..agent import AgentResult
 from ..budget import FINALIZE_GRACE_SECONDS
 from ..models import AgentSpec, BudgetSpec, ObjectiveSpec
 from .base import (
-    BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     AdapterSessionState,
     BenchmarkAdapter,
     BenchmarkCase,
@@ -362,7 +361,6 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
         self._raw_cases: dict[str, typing.Any] = {}
         self._sessions: dict[str, AdapterSessionState] = {}
         self._case_sessions: dict[str, BenchmarkSession] = {}
-        self._hint_fetched: set[str] = set()
 
     async def discover(self) -> list[BenchmarkCase]:
         challenges = await self.client.list_challenges()
@@ -440,11 +438,6 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             if self.use_hint:
                 hint_result = await self.client.get_hint(case.id)
                 hint = getattr(hint_result, "hint", None)
-                # Viewing a hint costs score, so the immediate request has to
-                # count as this challenge's one hint: a later threshold-triggered
-                # ``request_hint`` must return what was already fetched instead
-                # of paying for a second view of the same challenge.
-                self._hint_fetched.add(case.id)
         except Exception:
             await self.client.close_challenge(case.id)
             raise
@@ -494,37 +487,6 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             case=case, extras={"challenge": challenge}
         )
         return session
-
-    async def request_hint(self, case_id: str) -> str | None:
-        """Fetch the platform hint at most once per challenge.
-
-        Failures are recorded on the session metadata and never retried, so a
-        broken hint endpoint cannot turn into a retry storm; the score penalty
-        is only booked when a hint was actually retrieved.
-        """
-        session = self._case_sessions.get(case_id)
-        if case_id in self._hint_fetched:
-            if session is None:
-                return None
-            cached = session.metadata.get("hint")
-            return str(cached) if cached else None
-        self._hint_fetched.add(case_id)
-        try:
-            hint_result = await self.client.get_hint(case_id)
-        except Exception:  # noqa: BLE001 - hint failure degrades, never stalls
-            if session is not None:
-                session.metadata["hint_trigger"] = "threshold"
-                session.metadata["hint_error"] = True
-            return None
-        hint = getattr(hint_result, "hint", None)
-        hint_text = str(hint) if hint else None
-        if session is not None:
-            session.metadata["hint_trigger"] = "threshold"
-            session.metadata["hint_error"] = False
-            if hint_text:
-                session.metadata["hint_used"] = True
-                session.metadata["hint"] = hint_text
-        return hint_text
 
     async def submit(
         self,
@@ -765,10 +727,8 @@ async def run_tsec_challenges(
     run_all: bool = False,
     seed: int = 0,
     use_hint: bool = False,
-    hint_threshold: int = 0,
     start_retries: int = 2,
     retry_delay: float = 2.0,
-    max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
     parallel: int | None = None,
     concurrency: int = 1,
     total_wall_time: int | None = None,
@@ -801,8 +761,6 @@ async def run_tsec_challenges(
         raise TSecAdapterError(
             f"concurrency must be between 1 and {MAX_PARALLEL_CHALLENGES}"
         )
-    if hint_threshold < 0:
-        raise TSecAdapterError("hint_threshold must be non-negative")
     if max_wall_time_seconds is not None and max_wall_time_seconds < 1:
         raise TSecAdapterError("max_wall_time_seconds must be at least 1")
 
@@ -947,8 +905,6 @@ async def run_tsec_challenges(
                             budgets=case_budgets,
                             seed=pass_seed + index,
                             submission_extractor=_extract_submissions,
-                            max_unconfirmed_progress=max_unconfirmed_progress,
-                            hint_threshold=hint_threshold,
                             seed_notes_from=attempt_seed(case.id),
                         )
                     except Exception as exc:  # noqa: BLE001 - classified below

@@ -79,10 +79,8 @@ class ContainerPiRpcSession:
             "solver.verification",
             "aci.feedback",
             "benchmark.feedback",
-            "world.state.updated",
-            "solver.budget",
             "solver.finalize",
-            "solver.repetition_steer",
+            "solver.submission_due",
             "solver.context_restart",
             "solver.hint",
         }

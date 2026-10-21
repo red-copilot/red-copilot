@@ -54,8 +54,9 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 
 ## 4. 控制律与边界
 
-`solver_policy.decide_solver_action` 退化为**纯止损律**：无进展上限、无确认进展上限、
-预算耗尽、低预算且无进展。没有 replan、没有候选打分、没有计划文件。
+`solver_policy.decide_solver_action` 退化为**纯外部止损律**：只有声明的预算/墙钟耗尽才停止。
+无进展、未确认进展、重复命令族和预算阈值只作为诊断指标，不能触发停止或 steer。
+没有 replan、没有候选打分、没有计划文件。
 
 保留的 Harness 权威：
 
@@ -79,7 +80,7 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 | 新增 | CLI `harness tsec --seed-notes-from DIR`：把上一轮 `agent.summary.md` 作为只读接力材料写进新会话 notes |
 | 新增 | 长会话重启：自上次重启起工具调用 300 次或又用掉 `max_tool_calls` 的 60% 时触发，最多 2 次；接力简报写在会话根的 `carry-forward.md`，事件为 `solver.context_restart` |
 | 新增 | 结果契约：`agent_report.present` / `agent_report.sections_missing`；竞争运行的 `executor_sessions[].prompt`、`provider`、`summary_sections_missing` 与顶层 `executor_summary` |
-| 新增 | trace 事件 `solver.repetition_steer`、`solver.context_restart`、`solver.summary_incomplete` |
+| 新增 | trace 事件 `solver.context_restart`、`solver.submission_due`、`solver.summary_incomplete` |
 
 ## 6. 消融基线
 

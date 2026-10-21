@@ -20,7 +20,6 @@ from ..agent import AgentResult, AgentRunContext, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import AgentObservation
 from ..solver_loop import missing_summary_sections
-from .base import BENCHMARK_MAX_UNCONFIRMED_PROGRESS
 from ..trace import TraceRecorder, sanitize_observability_data
 from ..verification import ObservationRecord
 from ..budget import FINALIZE_GRACE_SECONDS, UsageMetrics, enforced_budget_limits
@@ -538,8 +537,6 @@ class BenchmarkRunner:
         budgets: BudgetSpec,
         seed: int,
         submission_extractor: SubmissionExtractor,
-        max_unconfirmed_progress: int = BENCHMARK_MAX_UNCONFIRMED_PROGRESS,
-        hint_threshold: int = 0,
         seed_notes_from: Path | None = None,
     ) -> dict:
         if agent.network == "environment":
@@ -670,10 +667,6 @@ class BenchmarkRunner:
             runtimes: list[_ExecutorRuntime] = []
             world = None
             registry = None
-            request_hint = getattr(adapter, "request_hint", None)
-            hint_request = (
-                (lambda: request_hint(case.id)) if callable(request_hint) else None
-            )
             for planned in plan.sessions:
                 attach = world is not None
                 session_runtime = bootstrap_solver(
@@ -686,13 +679,8 @@ class BenchmarkRunner:
                     target_actor=f"benchmark:{session.benchmark}",
                     budget_limits=enforced_budget_limits(planned.budgets),
                     agent_workspace=planned.workspace,
-                    max_unconfirmed_progress=max_unconfirmed_progress,
-                    hint_request=hint_request,
-                    hint_threshold=hint_threshold,
                     finalize_requests_submission=True,
                     submission_due_fraction=BENCHMARK_SUBMISSION_DUE_FRACTION,
-                    quiet_world_steers=True,
-                    verdict_steers_only=True,
                     world_repository_factory=(
                         (lambda _path, shared=world: shared) if attach else SQLiteWorldRepository
                     ),
@@ -898,7 +886,6 @@ class BenchmarkRunner:
                 # after the adapter's independent final evaluator agrees.
                 submission_completed = await evaluate_final()
 
-            revision_before_feedback = world.snapshot.revision
             feedback_id = f"benchmark-feedback:{submission_digest[:16]}"
             world.upsert(
                 "observation",
@@ -948,24 +935,13 @@ class BenchmarkRunner:
             # Only the submitting session gets the immediate feedback pointer; the
             # other sessions see the new world revision through their own context.
             if executor is not None and executor.session is not None:
+                executor.runtime.loop.note_delivered_steer("verification")
                 await executor.session.observe(
                     AgentObservation(
                         type="benchmark.feedback",
                         data=feedback_data,
                     )
                 )
-                if revision_after_feedback != revision_before_feedback:
-                    await executor.session.observe(
-                        AgentObservation(
-                            type="world.state.updated",
-                            data={
-                                "revision_before": revision_before_feedback,
-                                "revision_after": revision_after_feedback,
-                                "context_path": "world.context.txt",
-                                "cause": "benchmark.feedback",
-                            },
-                        )
-                    )
             return submission_completed
 
         async def run_executor(executor: _ExecutorRuntime) -> None:

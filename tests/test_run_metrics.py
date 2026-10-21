@@ -26,23 +26,22 @@ def test_steer_counts_group_delivered_feedback_by_bucket() -> None:
     counts = steer_counts(records)
 
     assert counts == {
-        "world": 3,
-        "verification": 2,
-        "repetition": 1,
-        "budget": 1,
+        "hint": 0,
         "finalize": 0,
+        "submission": 0,
+        "verification": 2,
     }
 
 
-def test_steer_counts_match_the_informational_split_of_a_real_failing_run() -> None:
-    """A failing TSec run was mostly zero-information world-update echoes."""
+def test_steer_counts_ignore_retired_feedback_kinds() -> None:
+    """Historical world/repetition/budget echoes are no longer counted as steers."""
     records = _read_jsonl(FIXTURES / "agent_feedback_excerpt.jsonl")
 
     counts = steer_counts(records)
     mapped = sum(counts.values())
 
-    assert mapped == 7  # aci.feedback is not a steer and is not counted
-    assert counts["world"] + counts["verification"] == 5
+    assert mapped == 2
+    assert counts["verification"] == 2
 
 
 def test_derive_run_metrics_replays_trace_and_feedback() -> None:
@@ -51,7 +50,7 @@ def test_derive_run_metrics_replays_trace_and_feedback() -> None:
 
     metrics = derive_run_metrics(trace=trace, feedback=feedback)
 
-    assert metrics["steer_counts"]["world"] == 3
+    assert metrics["steer_counts"]["verification"] == 2
     assert metrics["tool_calls"] == 2
     assert metrics["tool_failures"] == 1
     assert metrics["tool_time_ms"] == 95000
@@ -68,11 +67,10 @@ def test_derive_run_metrics_is_empty_safe() -> None:
     metrics = derive_run_metrics()
 
     assert metrics["steer_counts"] == {
-        "world": 0,
-        "verification": 0,
-        "repetition": 0,
-        "budget": 0,
+        "hint": 0,
         "finalize": 0,
+        "submission": 0,
+        "verification": 0,
     }
     assert metrics["tool_calls"] == 0
     assert metrics["tool_time_ms"] == 0

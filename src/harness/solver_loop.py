@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,13 +15,7 @@ from .action_verifier import ActionVerifier
 from .hints import HINTS_FILE, HintCursor, HintRecord
 from .progress import SLOW_TOOL_CALLS, ProgressLedger, empty_steer_counts
 from .session import AgentEvent, AgentObservation, AgentSession
-from .solver_policy import (
-    DEFAULT_MAX_NO_PROGRESS,
-    DEFAULT_MAX_UNCONFIRMED_PROGRESS,
-    SolverAction,
-    SolverDecision,
-    decide_solver_action,
-)
+from .solver_policy import SolverAction, SolverDecision, decide_solver_action
 from .trace import TraceRecorder
 from .verification import (
     AuthorizedActionVerdict,
@@ -120,8 +114,6 @@ class SolverLoop:
     VERIFY_EVENTS: ClassVar[frozenset[str]] = frozenset(
         {"tool.result", "progress.updated", "world.observe"}
     )
-    # Remaining-budget fractions at which the Agent is steered once to converge.
-    BUDGET_STEER_THRESHOLDS: ClassVar[tuple[float, ...]] = (0.5, 0.25, 0.1)
 
     def __init__(
         self,
@@ -138,14 +130,8 @@ class SolverLoop:
         verifier_registry: VerifierRegistry | None = None,
         context_builder: WorldContextBuilder | None = None,
         world_inbox: WorldInboxCursor | None = None,
-        max_no_progress: int = DEFAULT_MAX_NO_PROGRESS,
-        max_unconfirmed_progress: int = DEFAULT_MAX_UNCONFIRMED_PROGRESS,
-        hint_request: Callable[[], Awaitable[str | None]] | None = None,
-        hint_threshold: int = 0,
         finalize_requests_submission: bool = False,
         submission_due_fraction: float | None = None,
-        quiet_world_steers: bool = False,
-        verdict_steers_only: bool = False,
         processed_event_ids: dict[str, str] | None = None,
         hint_cursor: HintCursor | None = None,
         world_inbox_path: Path | None = None,
@@ -181,26 +167,14 @@ class SolverLoop:
         self.summary_path = summary_path or (run_dir / "agent.summary.md")
         self.notes_dir = notes_dir
         self.sync_agent_views = sync_agent_views
-        self.max_no_progress = max_no_progress
-        self.max_unconfirmed_progress = max_unconfirmed_progress
-        self._hint_request = hint_request
-        self.hint_threshold = hint_threshold
         # Externally evaluated runs score through submitted candidates, so the
         # finalize instruction has to ask for one and the loop has to notice a
         # run that reached the halfway mark without submitting anything.
         self.finalize_requests_submission = finalize_requests_submission
         self.submission_due_fraction = submission_due_fraction
-        # Long interactive transcripts degrade when the Harness steers on every
-        # world revision: the Agent hears its own writes echoed back and the
-        # pending verdicts of a benchmark with no local verifier add nothing.
-        self.quiet_world_steers = quiet_world_steers
-        self.verdict_steers_only = verdict_steers_only
-        self._hint_steered = False
-        self._budget_steers_fired: set[float] = set()
         self._finalize_steered = False
         self._finalize_prompted = False
         self._submission_due_steered = False
-        self._tool_slow_steered = False
         self._observations: list[ObservationRecord] = []
         self.stats = SolverLoopStats()
         self._processed_event_ids: dict[str, str] = dict(processed_event_ids or {})
@@ -318,7 +292,6 @@ class SolverLoop:
                 )
                 if event.type == "tool.result":
                     self._record_tool_metrics(event)
-                    await self._note_slow_tool(session, event)
 
         if event.type == "model.usage":
             self._record_context_metrics(event)
@@ -384,11 +357,10 @@ class SolverLoop:
         # Operator hints: advisory guidance from a human operator, recorded at
         # evidence tier so the Agent and the end-of-run summary see it. A hint
         # is never an objective verdict and never verifies anything by itself.
-        operator_hint_delivered = False
         for hint in self.hint_cursor.poll():
             if not self._absorb_operator_hint(hint):
                 continue
-            operator_hint_delivered = True
+            self._count_steer("hint")
             await session.observe(
                 AgentObservation(
                     type="solver.hint",
@@ -414,7 +386,6 @@ class SolverLoop:
                 },
             )
 
-        agent_authored_revision = bool(aci_mutations) or live_ingest.accepted > 0
         if after_revision != before_revision:
             self._write_context()
             self.trace.emit(
@@ -424,26 +395,6 @@ class SolverLoop:
                     "revision_after": after_revision,
                 },
             )
-            # In a benchmark run the Agent's own submissions are most of the
-            # revision traffic; echoing those back spends context on what the
-            # Agent just wrote. Harness-authored changes still steer.
-            quiet_self_authored = (
-                self.quiet_world_steers
-                and agent_authored_revision
-                and not operator_hint_delivered
-            )
-            if not quiet_self_authored:
-                self._count_steer("world")
-                await session.observe(
-                    AgentObservation(
-                        type="world.state.updated",
-                        data={
-                            "revision_before": before_revision,
-                            "revision_after": after_revision,
-                            "context_path": "world.context.txt",
-                        },
-                    )
-                )
 
         if event.type in self.VERIFY_EVENTS:
             verification = self.action_verifier.verify(
@@ -508,16 +459,10 @@ class SolverLoop:
                         actor="harness",
                         data=verification.model_dump(mode="json"),
                     )
-                    # Only a real verdict is worth an Agent turn. A benchmark
-                    # with no action-level verifier produced a pending verdict
-                    # for nearly every execution in the 2026-10-16 sweep (656 of
-                    # 656), all of which the Agent could do nothing with; the
-                    # same now holds for the honest "unavailable" verdict.
-                    steer_verdict = not self.verdict_steers_only or verification.status in {
-                        "verified",
-                        "contradicted",
-                    }
-                    if steer_verdict:
+                    # Only a real verdict is worth an Agent turn. Pending and
+                    # unavailable verdicts are recorded in the trace but carry
+                    # no instruction the Agent can act on.
+                    if verification.status in {"verified", "contradicted"}:
                         self._count_steer("verification")
                         await session.observe(
                             AgentObservation(
@@ -528,9 +473,6 @@ class SolverLoop:
 
         self.progress.write(self.progress_path)
         self._sync_agent_views()
-        await self._maybe_steer_repetition(session)
-        await self._maybe_steer_hint(session)
-        await self._maybe_steer_budget(session)
         await self._maybe_steer_submission_due(session)
         await self._maybe_steer_finalize(session)
         await self._maybe_reask_finalize(session, event_type=event.type)
@@ -568,6 +510,12 @@ class SolverLoop:
         if bucket in counts:
             counts[bucket] += 1
 
+    def note_delivered_steer(self, bucket: str) -> None:
+        """Account for a steer delivered by a Harness-owned composition point."""
+        if bucket not in self.stats.steer_counts:
+            raise ValueError(f"unknown steer bucket: {bucket}")
+        self._count_steer(bucket)
+
     def _record_tool_metrics(self, event: AgentEvent) -> None:
         """Per-call tool telemetry, bounded to a top-N slow list.
 
@@ -595,6 +543,17 @@ class SolverLoop:
         self.stats.slow_tool_calls.append(entry)
         self.stats.slow_tool_calls.sort(key=lambda item: item["duration_ms"], reverse=True)
         del self.stats.slow_tool_calls[SLOW_TOOL_CALLS:]
+        if duration >= SLOW_TOOL_CALL_MS:
+            self.trace.emit(
+                "tool.slow",
+                actor="harness",
+                data={
+                    "tool": data.get("tool"),
+                    "tool_call_id": data.get("tool_call_id"),
+                    "duration_ms": duration,
+                    "threshold_ms": SLOW_TOOL_CALL_MS,
+                },
+            )
 
     def _record_context_metrics(self, event: AgentEvent) -> None:
         """Track the prompt size of the most recent model call."""
@@ -606,51 +565,6 @@ class SolverLoop:
                 prompt += value
         if prompt:
             self.stats.context_tokens_final = prompt
-
-    async def _note_slow_tool(self, session: AgentSession, event: AgentEvent) -> None:
-        """Surface a command that held the window instead of failing silently.
-
-        The trace records every over-threshold call; the Agent is told once per
-        run, because the 2026-10-16 data shows the loop can spend its whole
-        budget inside one blocking command without anyone saying so.
-        """
-        duration = event.data.get("duration_ms")
-        if (
-            isinstance(duration, bool)
-            or not isinstance(duration, int)
-            or duration < SLOW_TOOL_CALL_MS
-        ):
-            return
-        self.trace.emit(
-            "tool.slow",
-            actor="harness",
-            data={
-                "tool": event.data.get("tool"),
-                "tool_call_id": event.data.get("tool_call_id"),
-                "duration_ms": duration,
-                "threshold_ms": SLOW_TOOL_CALL_MS,
-            },
-        )
-        if self._tool_slow_steered:
-            return
-        self._tool_slow_steered = True
-        seconds = duration // 1000
-        await session.observe(
-            AgentObservation(
-                type="solver.tool_slow",
-                data={
-                    "duration_ms": duration,
-                    "threshold_ms": SLOW_TOOL_CALL_MS,
-                    "message": (
-                        f"One command blocked for {seconds}s, past the "
-                        f"{SLOW_TOOL_CALL_MS // 1000}s threshold this run is paced by. "
-                        "Bound the next one: pass an explicit timeout, cap the word "
-                        "list and request rate, and read partial results instead of "
-                        "waiting for a full sweep."
-                    ),
-                },
-            )
-        )
 
     def metrics_snapshot(self) -> dict:
         """Run-level metric fields shared with ``result.json`` and the sweep summary."""
@@ -683,138 +597,6 @@ class SolverLoop:
     @property
     def processed_event_ids(self) -> dict[str, str]:
         return dict(self._processed_event_ids)
-
-    async def _maybe_steer_budget(self, session: AgentSession) -> None:
-        """Steer the Agent once per budget threshold so it converges in time."""
-        if self.progress.objective_completed:
-            return
-        fractions = self.progress.budget_fractions()
-        if not fractions:
-            return
-        remaining = min(fractions.values())
-        for threshold in self.BUDGET_STEER_THRESHOLDS:
-            if remaining > threshold or threshold in self._budget_steers_fired:
-                continue
-            self._budget_steers_fired.add(threshold)
-            tightest = min(fractions, key=lambda key: fractions[key])
-            data = {
-                "remaining_budget_fraction": remaining,
-                "threshold": threshold,
-                "tightest_budget": tightest,
-                "budget_fractions": fractions,
-            }
-            self.trace.emit("solver.budget", actor="harness", data=data)
-            self._count_steer("budget")
-            await session.observe(
-                AgentObservation(
-                    type="solver.budget",
-                    data={
-                        **data,
-                        "message": (
-                            "Budget is running out. Consolidate what is already "
-                            "verified and submit the candidates you actually hold; "
-                            "do not start broad new exploration."
-                        ),
-                    },
-                )
-            )
-
-    async def _maybe_steer_repetition(self, session: AgentSession) -> None:
-        """Intervene once when one command family is being ground down.
-
-        The family comes from the adapter's coarse tool identity, so "the same
-        loop with a different wordlist" counts as one family. Level 1 nudges the
-        Agent to change its hypothesis; level 2 asks it to converge and record
-        what the path ruled out. Neither level kills the session.
-        """
-        if self.progress.objective_completed:
-            return
-        action = self.progress.repetition_action()
-        if action is None:
-            return
-        family, streak, level = action
-        self.progress.note_repetition_steer(family, level=level)
-        self.trace.emit(
-            "solver.repetition_steer",
-            actor="harness",
-            data={
-                "family": family,
-                "consecutive": streak,
-                "level": level,
-                "escalated": level > 1,
-            },
-        )
-        if level > 1:
-            message = (
-                f"{streak} calls in a row share the command family {family} without "
-                "confirmed progress. Stop repeating it: consolidate what is already "
-                "verified, record what this path ruled out, then either widen or "
-                "write your summary."
-            )
-        else:
-            message = (
-                f"{streak} calls in a row share the command family {family} without "
-                "confirmed progress. Change the hypothesis or the input class before "
-                "calling it again; the same command with new arguments is the same path."
-            )
-        self._count_steer("repetition")
-        await session.observe(
-            AgentObservation(
-                type="solver.repetition_steer",
-                data={
-                    "family": family,
-                    "consecutive": streak,
-                    "level": level,
-                    "message": message,
-                },
-            )
-        )
-
-    async def _maybe_steer_hint(self, session: AgentSession) -> None:
-        """Fetch the platform hint once when the run is stuck past the threshold.
-
-        The callback is the benchmark adapter's one-shot fetch, so a failed
-        lookup is recorded and never retried in a loop.
-        """
-        if (
-            self._hint_steered
-            or self._hint_request is None
-            or self.hint_threshold <= 0
-            or self.progress.objective_completed
-        ):
-            return
-        if self.progress.no_progress_count < self.hint_threshold:
-            return
-        self._hint_steered = True
-        hint: str | None = None
-        try:
-            hint = await self._hint_request()
-        except Exception:  # noqa: BLE001 - a failed hint must not stall the loop
-            hint = None
-        self.trace.emit(
-            "solver.hint",
-            actor="harness",
-            data={
-                "source": "platform",
-                "used": bool(hint),
-                "threshold": self.hint_threshold,
-                "no_progress_count": self.progress.no_progress_count,
-            },
-        )
-        if not hint:
-            return
-        await session.observe(
-            AgentObservation(
-                type="solver.hint",
-                data={
-                    "source": "platform",
-                    "threshold": self.hint_threshold,
-                    "message": (
-                        "Platform hint (viewing it reduces this flag's score):\n" + hint
-                    ),
-                },
-            )
-        )
 
     async def _maybe_steer_finalize(self, session: AgentSession) -> None:
         """Stop the Agent exploring at a soft limit and ask for a summary.
@@ -900,6 +682,7 @@ class SolverLoop:
             "remaining_budget_fraction": remaining,
         }
         self.trace.emit("solver.submission_due", actor="harness", data=data)
+        self._count_steer("submission")
         await session.observe(
             AgentObservation(
                 type="solver.submission_due",
@@ -978,18 +761,12 @@ class SolverLoop:
             )
         )
 
-    def decide(
-        self,
-        *,
-        event_type: str | None = None,
-    ) -> SolverDecision:
+    def decide(self, *, event_type: str | None = None) -> SolverDecision:
+        # ``event_type`` is retained for callers that log the triggering event;
+        # it deliberately does not affect the stop law.
+        del event_type
         return decide_solver_action(
-            event_type=event_type,
-            no_progress_count=self.progress.no_progress_count,
-            unconfirmed_progress=self.progress.unconfirmed_progress,
-            remaining_budget_fraction=self.progress.remaining_budget_fraction,
-            max_no_progress=self.max_no_progress,
-            max_unconfirmed_progress=self.max_unconfirmed_progress,
+            remaining_budget_fraction=self.progress.remaining_budget_fraction
         )
 
     def _absorb_operator_hint(self, hint: HintRecord, *, late: bool = False) -> bool:

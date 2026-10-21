@@ -420,7 +420,6 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
             runs_root=tmp_path,
             challenge_code="WEB-001",
             seed=1,
-            max_unconfirmed_progress=200,
         )
     )
 
@@ -438,7 +437,7 @@ def test_run_tsec_challenges_uses_generic_benchmark_contract(
     assert result["benchmark"]["challenge"] == "WEB-001"
     assert result["benchmark"]["level"] == "L2"
     assert FakeBenchmarkRunner.last_kwargs is not None
-    assert FakeBenchmarkRunner.last_kwargs["max_unconfirmed_progress"] == 200
+    assert "max_unconfirmed_progress" not in FakeBenchmarkRunner.last_kwargs
 
 
 def test_run_tsec_challenges_allows_the_full_evaluation_window(
@@ -1520,66 +1519,6 @@ def test_tsec_client_retries_429_once_then_fails_closed() -> None:
     ]
 
 
-def test_tsec_adapter_requests_hint_once_per_case() -> None:
-    async def scenario() -> None:
-        client = HintCountingClient()
-        adapter = TSecBenchmarkAdapter(client, use_hint=False)
-        cases = await adapter.discover()
-        session = await adapter.provision(cases[0])
-
-        assert session.metadata["hint_trigger"] is None
-        first = await adapter.request_hint("WEB-001")
-        second = await adapter.request_hint("WEB-001")
-
-        assert first == "look at the service"
-        assert second == first
-        assert client.hint_calls == 1
-        assert session.metadata["hint_used"] is True
-        assert session.metadata["hint_trigger"] == "threshold"
-        assert session.metadata["hint"] == "look at the service"
-
-    asyncio.run(scenario())
-
-
-def test_tsec_adapter_hint_failure_is_recorded_and_not_retried() -> None:
-    async def scenario() -> None:
-        client = FailingHintClient()
-        adapter = TSecBenchmarkAdapter(client, use_hint=False)
-        cases = await adapter.discover()
-        session = await adapter.provision(cases[0])
-
-        assert await adapter.request_hint("WEB-001") is None
-        assert await adapter.request_hint("WEB-001") is None
-        assert client.hint_calls == 1
-        assert session.metadata["hint_used"] is False
-        assert session.metadata["hint_error"] is True
-        assert session.metadata["hint_trigger"] == "threshold"
-
-    asyncio.run(scenario())
-
-
-def test_tsec_adapter_immediate_hint_is_not_requested_again_by_the_threshold() -> None:
-    """--hint plus --hint-threshold must pay for one hint view, not two."""
-
-    async def scenario() -> None:
-        client = HintCountingClient()
-        adapter = TSecBenchmarkAdapter(client, use_hint=True)
-        cases = await adapter.discover()
-        session = await adapter.provision(cases[0])
-
-        assert client.hint_calls == 1
-        assert session.metadata["hint_trigger"] == "immediate"
-
-        assert await adapter.request_hint("WEB-001") == "look at the service"
-        assert client.hint_calls == 1
-        assert session.metadata["hint_trigger"] == "immediate"
-        assert session.metadata["hint"] == "look at the service"
-        # The cached reply is not a fresh fetch, so no failure flag is written.
-        assert "hint_error" not in session.metadata
-
-    asyncio.run(scenario())
-
-
 class MetricsRunner(FakeBenchmarkRunner):
     """A runner whose result carries the run metric block the sweep aggregates."""
 
@@ -1593,11 +1532,10 @@ class MetricsRunner(FakeBenchmarkRunner):
             "first_submission_ms": 594000,
             "submitted_at_fraction": 0.99,
             "steer_counts": {
-                "world": 3,
-                "verification": 0,
-                "repetition": 1,
-                "budget": 1,
+                "hint": 0,
                 "finalize": 0,
+                "submission": 1,
+                "verification": 0,
             },
             "tool_time_ms": 123456,
             "context_tokens_final": 20583,
@@ -1626,7 +1564,7 @@ def test_sweep_summary_carries_the_run_metrics(monkeypatch, tmp_path: Path) -> N
     case = payload["cases"][0]
     assert case["first_submission_ms"] == 594000
     assert case["submitted_at_fraction"] == 0.99
-    assert case["steer_counts"]["world"] == 3
+    assert case["steer_counts"]["submission"] == 1
     assert case["tool_time_ms"] == 123456
     assert case["context_tokens_final"] == 20583
 

@@ -13,13 +13,6 @@ from .budget import USAGE_DIMENSION_SOURCES, exceeded_usage_dimension
 from .session import AgentEvent
 from .verification import AuthorizedObjectiveVerdict, VerifierRegistry
 
-# Consecutive calls in one command family before the Harness intervenes, and
-# the streak at which it stops nudging and asks for convergence instead.
-REPETITION_STEER_STREAK = 3
-REPETITION_ESCALATE_STREAK = 6
-# Repetition bookkeeping is bounded so a long run cannot grow it without limit.
-MAX_TRACKED_TOOL_FAMILIES = 200
-
 # A long single session degrades: the transcript grows, noise crowds out the
 # signal, and the Agent starts re-deriving what it already knew. These are the
 # defaults at which the Harness resets the session and re-injects a brief. The
@@ -29,24 +22,19 @@ CONTEXT_RESTART_TOOL_CALLS = 300
 CONTEXT_RESTART_BUDGET_FRACTION = 0.6
 MAX_CONTEXT_RESTARTS = 2
 
-# Which delivered Agent observation feeds which metric bucket. The names are
-# the ones the 2026-10-16 sweep review used by hand: "world" and "verification"
-# were 93% of the traffic and carried no action-able information, which is why
-# the improvement plan quiets them instead of adding more of them.
+# Which delivered Agent observation feeds which metric bucket. These are the
+# only four reasons the Harness interrupts the Agent: an explicit operator hint,
+# terminal closure, a closure reminder about submission, or a real verdict.
+# World revisions, repetition, budget thresholds and slow-tool telemetry stay in
+# the trace; they are facts for audit, not instructions for the Agent.
 STEER_BUCKETS: dict[str, str] = {
-    "world.state.updated": "world",
-    "solver.verification": "verification",
-    "solver.repetition_steer": "repetition",
-    "solver.budget": "budget",
+    "solver.hint": "hint",
     "solver.finalize": "finalize",
+    "solver.submission_due": "submission",
+    "solver.verification": "verification",
+    "benchmark.feedback": "verification",
 }
-STEER_BUCKET_NAMES: tuple[str, ...] = (
-    "world",
-    "verification",
-    "repetition",
-    "budget",
-    "finalize",
-)
+STEER_BUCKET_NAMES: tuple[str, ...] = ("hint", "finalize", "submission", "verification")
 # Slow-call telemetry is a bounded top-N list, not a per-call log: the run
 # result must stay small enough to aggregate a whole sweep.
 SLOW_TOOL_CALLS = 5
@@ -109,23 +97,12 @@ class ProgressLedger(BaseModel):
     last_action: dict[str, Any] | None = None
     active_actions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     failure_count: int = 0
+    # Diagnostic counters only. They describe the run for metrics and summaries;
+    # neither is an input to the external stop law or a reason to steer.
     no_progress_count: int = 0
-    # Consecutive tool executions without *confirmed* progress. A successful
-    # execution is neutral (neither confirmed progress nor a stall), so it feeds
-    # this bounded counter instead of the hard no-progress stall counter. This
-    # keeps exploration alive when no action-level verifier is available while
-    # still terminating an endless unproductive loop.
     unconfirmed_progress: int = 0
     failed_skill_counts: dict[str, int] = Field(default_factory=dict)
     reconciled_actions: dict[str, str] = Field(default_factory=dict)
-    # Repetition control: how many tool calls in a row share one command family,
-    # which families already drew an intervention, and the per-family totals.
-    # A family that keeps repeating without confirmed progress is the signature
-    # of a loop being ground down rather than a line of attack being widened.
-    tool_family_streak: int = 0
-    last_tool_family: str | None = None
-    tool_family_totals: dict[str, int] = Field(default_factory=dict)
-    steered_tool_families: dict[str, int] = Field(default_factory=dict)
     # Session restarts performed after the context grew long: the counter and
     # the tool-call mark let the next threshold be measured from the restart
     # instead of the run start.
@@ -176,10 +153,6 @@ class ProgressLedger(BaseModel):
                 "status": "running",
                 "skill_id": (self.action_intent or {}).get("skill_id"),
             }
-            family = event.data.get("args_family")
-            if isinstance(family, str) and family:
-                action["args_family"] = family
-            self._record_tool_family(family)
             self.last_action = action
             call_id = action["tool_call_id"]
             if isinstance(call_id, str) and call_id:
@@ -198,9 +171,6 @@ class ProgressLedger(BaseModel):
                 "skill_id": active_action.get("skill_id")
                 or (self.action_intent or {}).get("skill_id"),
             }
-            family = active_action.get("args_family")
-            if isinstance(family, str) and family:
-                action["args_family"] = family
             self.last_action = action
             actual = event.data.get("observation")
             if isinstance(actual, str) and actual:
@@ -240,51 +210,6 @@ class ProgressLedger(BaseModel):
                 if isinstance(value, (int, float)) and value >= 0:
                     self.budget_used[field] = self.budget_used.get(field, 0.0) + float(value)
 
-    def _record_tool_family(self, family: str | None) -> None:
-        """Track consecutive tool calls that share one command family."""
-        if not isinstance(family, str) or not family:
-            self.tool_family_streak = 0
-            self.last_tool_family = None
-            return
-        if family == self.last_tool_family:
-            self.tool_family_streak += 1
-        else:
-            self.last_tool_family = family
-            self.tool_family_streak = 1
-        self.tool_family_totals[family] = self.tool_family_totals.get(family, 0) + 1
-        while len(self.tool_family_totals) > MAX_TRACKED_TOOL_FAMILIES:
-            self.tool_family_totals.pop(next(iter(self.tool_family_totals)))
-
-    def repetition_action(self) -> tuple[str, int, int] | None:
-        """Return the pending intervention for the current family, if any.
-
-        The tuple is ``(family, streak, level)`` where level 1 is a targeted
-        nudge and level 2 asks the Agent to converge and write its summary.
-        Each level fires at most once per family per run.
-        """
-        family = self.last_tool_family
-        if not family:
-            return None
-        emitted = self.steered_tool_families.get(family, 0)
-        if self.tool_family_streak >= REPETITION_ESCALATE_STREAK and emitted < 2:
-            return family, self.tool_family_streak, 2
-        if self.tool_family_streak >= REPETITION_STEER_STREAK and emitted < 1:
-            return family, self.tool_family_streak, 1
-        return None
-
-    def note_repetition_steer(self, family: str, *, level: int) -> None:
-        self.steered_tool_families[family] = max(
-            self.steered_tool_families.get(family, 0), level
-        )
-        while len(self.steered_tool_families) > MAX_TRACKED_TOOL_FAMILIES:
-            self.steered_tool_families.pop(next(iter(self.steered_tool_families)))
-
-    def reset_repetition(self) -> None:
-        """Clear the streak after confirmed progress; steered families stay."""
-        self.tool_family_streak = 0
-        self.last_tool_family = None
-        self.tool_family_totals.clear()
-
     def context_restart_due(self) -> str | None:
         """Return why the session context should be reset, or ``None``.
 
@@ -306,7 +231,6 @@ class ProgressLedger(BaseModel):
     def record_context_restart(self) -> None:
         self.context_restarts += 1
         self.tool_calls_at_last_restart = self.tool_calls
-        self.reset_repetition()
 
     def record_intent(self, intent: Any) -> None:
         data = intent.model_dump(mode="json") if hasattr(intent, "model_dump") else dict(intent)
@@ -376,7 +300,6 @@ class ProgressLedger(BaseModel):
             self.evidence_confirmed += 1
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
-            self.reset_repetition()
         elif status == "contradicted":
             self.contradicted_actions += 1
             if (self.last_action or {}).get("status") != "failed":
@@ -395,7 +318,6 @@ class ProgressLedger(BaseModel):
             self.accepted_submissions += 1
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
-            self.reset_repetition()
         else:
             self.rejected_submissions += 1
             self.failure_count += 1
@@ -418,7 +340,6 @@ class ProgressLedger(BaseModel):
             raise ValueError(f"unknown trusted progress kind: {kind}")
         self.no_progress_count = 0
         self.unconfirmed_progress = 0
-        self.reset_repetition()
 
     def record_objective_verdict(
         self,
@@ -433,7 +354,6 @@ class ProgressLedger(BaseModel):
         if self.objective_completed:
             self.no_progress_count = 0
             self.unconfirmed_progress = 0
-            self.reset_repetition()
 
     @property
     def remaining_budget_fraction(self) -> float:

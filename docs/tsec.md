@@ -75,7 +75,6 @@ harness tsec \
   --all \
   --knowledge-root skills/offensive \
   --parallel 3 \
-  --max-unconfirmed-progress 160 \
   --wall-time 3600 \
   --start-retries 2 \
   --retry-delay 2

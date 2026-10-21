@@ -30,6 +30,20 @@ TSec sweep review round (2026-10-16). Landed BEN-05 and RUN-05 from [tsec-run-re
 
 Pi RPC-only execution cut (2026-10-20). Removed the host CLI, generic Docker Agent, `pi-host`, Pi JSON mode, hosted runner assets and sidecar Gateway. `AgentSpec`, `PiSpec` and `ExecutorSpec` now reject retired fields; the only Agent path is a Docker Pi RPC container. Added the container `harness subagent` path and a lightweight fake Pi RPC image for CI. Ceilings ratcheted to 57 modules / 16,400 source lines after the tree measured 57 / 16,391. Validation: `ruff check .` clean; `pytest -q` 513 passed with one Starlette/httpx deprecation warning; fake-image `harness run` and `harness subagent` smoke tests passed locally; container-boundary isolation test passed against `harness-isolation-probe:ci`.
 
+RUN-09 agent-native thin-control slice (2026-10-22). Removed the remaining Harness-side
+heuristics from the feedback loop: `solver_policy` now stops only on an exhausted external budget;
+automatic platform-hint thresholds and `--max-unconfirmed-progress` are gone; repetition-family
+bookkeeping is deleted; world revisions, pending/unavailable verdicts, slow tools and budget
+thresholds are trace telemetry rather than Agent steers. `progress.json` keeps no-progress and
+failure counters only as diagnostics. Steer metrics now have exactly four buckets: `hint`,
+`finalize`, `submission`, `verification`. Ceilings ratcheted from 57 / 16,400 to 57 / 15,890 source
+lines. Validation: `ruff check .` clean; full `pytest -q` 502 passed with one Starlette/httpx
+deprecation warning; architecture, docs-consistency, CLI-contract and control-metric suites pass;
+Docker image/container/network boundary tests pass 7/7; `harness validate` passes for the hello
+task. `harness preflight` correctly reports not-ready because `OPENAI_API_KEY` is absent; no live
+model or TSec sweep was run. The removed CLI flags and narrowed stop law are public-contract
+changes and require maintainer review before merge.
+
 ## Validation sequence
 
 `ruff check .`; `pytest -q`; `pytest tests/test_architecture.py -q` after any module move; `harness validate`/`preflight` on touched fixtures; the hello smoke run. Docker and TSec paths run only in prepared environments and must be reported as unexecuted otherwise.

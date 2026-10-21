@@ -1,10 +1,9 @@
 """Falsifiable control properties of the single closed-loop control spine.
 
 These tests encode the cybernetic invariants the simplified architecture relies
-on: only the authoritative sensor can close the loop, the loop is bounded and
-converges to a stop instead of oscillating, the reference is immutable, only
-observable signals count as feedback, and in-flight (dead-time) actions are not
-mistaken for completion.
+on: only the authoritative sensor can close the loop, the Harness stops only on
+an external bound, the reference is immutable, unreferenced signals are claims,
+and in-flight actions are not mistaken for completion.
 """
 from __future__ import annotations
 
@@ -81,38 +80,25 @@ def test_forged_verifier_authority_cannot_complete_the_reference(tmp_path: Path)
     assert progress.objective_completed is False
 
 
-# 2. Stability: the loop is bounded and converges to STOP instead of oscillating.
-def test_a_steady_loop_only_ever_continues_or_verifies() -> None:
+# 2. Stability: without an external bound the loop never invents a stop.
+def test_a_steady_loop_only_continues() -> None:
     actions = {
-        decide_solver_action(event_type=event_type).action
-        for event_type in ("tool.result", "tool.call", "progress.updated", "world.observe")
+        decide_solver_action(remaining_budget_fraction=fraction).action
+        for fraction in (1.0, 0.5, 0.05, 0.0001)
     }
 
-    assert actions == {SolverAction.CONTINUE, SolverAction.VERIFY}
+    assert actions == {SolverAction.CONTINUE}
 
 
-def test_no_progress_converges_monotonically_to_stop() -> None:
-    actions = [
-        decide_solver_action(event_type="tool.result", no_progress_count=count).action
-        for count in range(8)
+def test_only_zero_remaining_budget_stops_the_loop() -> None:
+    decisions = [
+        decide_solver_action(remaining_budget_fraction=fraction)
+        for fraction in (1.0, 0.5, 0.05, 0.0001, 0.0)
     ]
 
-    stop_index = actions.index(SolverAction.STOP)
-    assert stop_index == 6  # DEFAULT_MAX_NO_PROGRESS
-    assert all(action is SolverAction.STOP for action in actions[stop_index:])
-    # No oscillation: before the bound the loop keeps verifying rather than
-    # drifting into an unbounded middle state.
-    assert all(action is SolverAction.VERIFY for action in actions[:stop_index])
-
-
-def test_low_budget_without_progress_stops_before_budget_is_spent() -> None:
-    decision = decide_solver_action(
-        event_type="tool.call",
-        no_progress_count=2,
-        remaining_budget_fraction=0.04,
-    )
-    assert decision.action is SolverAction.STOP
-    assert decision.reason == "low_budget_without_progress"
+    assert all(decision.action is SolverAction.CONTINUE for decision in decisions[:-1])
+    assert decisions[-1].action is SolverAction.STOP
+    assert decisions[-1].reason == "budget_exhausted"
 
 
 # 3. Reference integrity: agent output cannot rewrite the objective/setpoint.
@@ -157,65 +143,25 @@ def test_unreferenced_signals_stay_claims_and_tool_exits_are_not_progress() -> N
     assert progress.objective_completed is False
 
 
-# 2b. A successful execution is neutral: it must not trigger the hard stall stop.
-def test_successful_executions_do_not_stall_stop_but_failures_do() -> None:
-    progress = ProgressLedger()
-    for index in range(6):
-        progress.record_event(
-            _event(
-                "tool.result",
-                {"tool": "bash", "tool_call_id": f"ok-{index}", "is_error": False},
-                f"ok-{index}",
-            )
-        )
+def test_internal_stall_counters_do_not_decide_whether_to_stop() -> None:
+    """Counters stay available for metrics, but they are not a control input."""
+    progress = ProgressLedger(no_progress_count=10_000, unconfirmed_progress=10_000)
+
     decision = decide_solver_action(
-        event_type="tool.result",
-        no_progress_count=progress.no_progress_count,
-        unconfirmed_progress=progress.unconfirmed_progress,
+        remaining_budget_fraction=progress.remaining_budget_fraction
     )
-    assert progress.no_progress_count == 0
-    assert progress.unconfirmed_progress == 6
-    assert decision.action is not SolverAction.STOP
 
-    stalled = ProgressLedger()
-    for index in range(6):
-        stalled.record_event(
-            _event(
-                "tool.result",
-                {"tool": "bash", "tool_call_id": f"bad-{index}", "is_error": True},
-                f"bad-{index}",
-            )
-        )
-    stalled_decision = decide_solver_action(
-        event_type="tool.result",
-        no_progress_count=stalled.no_progress_count,
-        unconfirmed_progress=stalled.unconfirmed_progress,
-    )
-    assert stalled.no_progress_count == 6
-    assert stalled_decision.action is SolverAction.STOP
-    assert stalled_decision.reason == "no_progress_limit"
+    assert decision.action is SolverAction.CONTINUE
 
 
-def test_unconfirmed_progress_bound_terminates_an_unproductive_loop() -> None:
-    decision = decide_solver_action(
-        event_type="tool.result",
-        no_progress_count=0,
-        unconfirmed_progress=40,
-    )
-    assert decision.action is SolverAction.STOP
-    assert decision.reason == "unconfirmed_progress_limit"
-
-
-# 5. Counterfactual decision: a change in estimated state changes the action.
+# 5. Counterfactual decision: only a change in the external budget changes it.
 def test_remaining_budget_alters_the_next_decision() -> None:
-    funded = decide_solver_action(event_type="tool.call")
-    starved = decide_solver_action(
-        event_type="tool.call", no_progress_count=1, remaining_budget_fraction=0.04
-    )
+    funded = decide_solver_action(remaining_budget_fraction=0.5)
+    starved = decide_solver_action(remaining_budget_fraction=0.0)
 
     assert funded.action is SolverAction.CONTINUE
     assert starved.action is SolverAction.STOP
-    assert starved.reason == "low_budget_without_progress"
+    assert starved.reason == "budget_exhausted"
 
 
 # 6. Dead time: a dispatched action is not completion until it is verified.

@@ -84,7 +84,10 @@ B 段随 A 段之后；C 段在 maintainer 复核通过前不动。
   `src/harness/progress.py` 的 `context_restart_due()` 里逐次与 `tool_calls_at_last_restart` 比较。
   证据：`tests/test_executors.py`（重启、上限、用量合并）、`tests/test_pi_adapter.py`（容器清理）。
 
-### A3 重复动作打断（ZCP-06）
+### A3 重复动作打断（ZCP-06；已被 RUN-09 取代）
+
+> RUN-09 删除 `args_family` 记录、重复计数与 `solver.repetition_steer`。是否换招属于 Agent
+> 的认知判断；Harness 只保留预算/墙钟止损。以下保留为历史设计记录。
 
 - 目标：把"同一招磨到预算烧完"从观察变成干预。
 - 设计：在 `src/harness/progress.py` 维护"按 family 的连续无进展计数"与"已提醒过的 family 集合"；

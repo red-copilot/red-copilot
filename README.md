@@ -392,9 +392,10 @@ accounting and reconciliation without claiming exactly-once execution.
 
 Each benchmark run also maintains `progress.json` (`harness/progress/v4`) separately from World
 State. It stores Agent-authored facts as claims, distinguishes successful execution from verified
-evidence and goal progress, and tracks no-progress/failure counters, budget usage, submissions, and
-objective completion. A successful tool exit or accepted submission alone does not establish
-objective completion; the final task verifier or benchmark evaluation controls the result.
+evidence and goal progress, and tracks no-progress/failure counters as diagnostics, budget usage,
+submissions, and objective completion. Those counters never decide whether to stop or steer. A
+successful tool exit or accepted submission alone does not establish objective completion; the
+final task verifier or benchmark evaluation controls the result.
 
 
 ### Agent Cognition and Competing Sessions · 智能体认知与竞争会话
@@ -425,9 +426,9 @@ echo "flag format is zc{...}" | harness hint .harness/runs/run_...
 Hints are appended to the run's `hints.jsonl`, outside the container-writable workspace. The
 SolverLoop polls the file on every event, records each hint in World state as an evidence-tier
 `human.hint` observation, and steers the running Pi RPC Agent with a `solver.hint` observation.
-The benchmark adapter steers the same observation type
-for a platform hint fetched at a configured no-progress threshold, so both sources share
-`solver.hint` and are told apart by `data.source` (`operator` or `platform`). Hints are advisory:
+The benchmark adapter may also deliver an explicitly requested platform hint under the same
+observation type, so both sources share `solver.hint` and are told apart by `data.source`
+(`operator` or `platform`). Hints are advisory:
 they can redirect exploration, but they never verify the objective — only a verifier or benchmark
 evaluation can do that.
 

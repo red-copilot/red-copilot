@@ -16,7 +16,7 @@ are consolidated in [agent-architecture.md](agent-architecture.md) (Chinese).
 - `agent.py`, `session.py`, `pi_*.py`: agent/session integration and infrastructure.
 - `tool_adapter.py`: domain-neutral async tool plugin contract; concrete tools are explicitly selected by application composition and remain subject to Gateway authorization.
 - `solver_loop.py`, `solver_policy.py`, `action_verifier.py`: solver policies.
-  `solver_policy.py` is a pure stop law (budget, no-progress); cognition belongs
+  `solver_policy.py` is a pure external stop law (budget/wall clock); cognition belongs
   to the Agent, which keeps its own notes and reads markdown knowledge roots.
 - `orchestrator.py`: local-run lifecycle and environment integration.
 

@@ -25,16 +25,16 @@
 ### BEN-06（P1，阶段 A）——把度量补齐
 
 - **改法**：`result.json.metrics` 与 `sweep-summary-<UTC>.json` 统一补 `submissions_attempted`、
-  `first_submission_ms`、`submitted_at_fraction`、`steer_counts{world,verification,repetition,budget,finalize}`、
+  `first_submission_ms`、`submitted_at_fraction`、`steer_counts{hint,finalize,submission,verification}`、
   `tool_time_ms`、`slow_tool_calls`（有界 top-N）、`context_tokens_final`；`harness report` 展示这些字段。
 - **验收**：以检入的 trace 片段夹具离线复算，字段与历史 run 一致；无新模块。
 
 ### RUN-06（P0，阶段 B）——运行内节拍
 
 - **改法**：把剩余预算与墙钟写进 Agent 可见的 `world.context.txt` 头部（只读、确定性），
-  并保证 `progress.json` 的预算视图可查；benchmark 路径继续默认开启 RUN-05 的四个旗标
-  （`finalize_requests_submission`、`submission_due_fraction`、`quiet_world_steers`、`verdict_steers_only`），
-  本地任务路径保持关闭。
+  并保证 `progress.json` 的预算视图可查；benchmark 路径继续默认开启 RUN-05 的提交收尾
+  （`finalize_requests_submission`、`submission_due_fraction`），本地任务路径保持关闭。
+  世界 revision 与 pending verdict 只进 trace，不产生 steer。
 - **验收**：离线单测覆盖预算段渲染与旗标默认值；历史 trace 回放不改变既有成功提交路径。
 
 ### RUN-07（P1，阶段 B）——死边降噪

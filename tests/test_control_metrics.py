@@ -30,9 +30,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 #
 # Pi-RPC-only cut: removed host CLI/Docker/pi-host adapters, JSON mode,
 # process_guard and the sidecar Gateway; added the container subagent module.
-# Measured 57 modules / 16,391 source lines.
+# Measured 57 modules / 16,391 source lines. RUN-09 removed heuristic steering,
+# automatic hint thresholds, world-echo steers and dead repetition state;
+# re-measured at 57 modules / 15,890 source lines.
 MAX_MODULES = 57
-MAX_SRC_LINES = 16_400
+MAX_SRC_LINES = 15_890
 
 
 def _module_names() -> set[str]:

@@ -97,11 +97,11 @@ through `HARNESS_EVENT_FILE`.
 6. **Done:** shared leased blackboard for explicit multi-agent coordination.
 7. **Research:** derived graph/timeline views, learned retrieval, and transition-model planning.
 
-The runtime loop now treats World State as durable knowledge, `progress.json` as ephemeral solver
-state, and `plan.json` as a derived short-horizon decision artifact. Progress v2 stores Agent-authored
-`confirmed_fact` fields as claims; successful tool exits only update execution metrics. Replanning is triggered by
-verification failures, repeated no-progress, and benchmark feedback; Skill metadata remains
-non-executable and is used only to rank candidate next actions.
+The runtime loop treats World State as durable knowledge and `progress.json` as ephemeral control
+state. Progress records Agent-authored facts as claims; successful tool exits only update execution
+metrics. The Harness stops only on an exhausted external budget or wall clock. Verification,
+benchmark feedback and operator hints update the Agent's next input; they do not give the Harness
+authority to plan or infer a replan.
 
 ## Context and resume
 

@@ -396,7 +396,7 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert not checkpoint["pending_actions"]
     assert fake_agent.session.closed_reason == "objective-complete"
     feedback_types = [item.type for item in fake_agent.session.feedback]
-    assert "world.state.updated" in feedback_types
+    assert "world.state.updated" not in feedback_types
     assert "solver.verification" not in feedback_types
     assert "benchmark.feedback" in feedback_types
     benchmark_feedback = next(
@@ -420,11 +420,10 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     # Agent, how long did tools block it, and how big was the final prompt"
     # without re-parsing the trace.
     assert result["metrics"]["steer_counts"] == {
-        "world": 0,
-        "verification": 0,
-        "repetition": 0,
-        "budget": 0,
+        "hint": 0,
         "finalize": 0,
+        "submission": 0,
+        "verification": 1,
     }
     assert result["metrics"]["tool_calls"] == 0
     assert result["metrics"]["tool_time_ms"] == 0
@@ -658,11 +657,10 @@ def test_report_prints_the_loop_health_block(tmp_path: Path) -> None:
                     "first_submission_ms": None,
                     "submitted_at_fraction": None,
                     "steer_counts": {
-                        "world": 99,
-                        "verification": 39,
-                        "repetition": 3,
-                        "budget": 3,
+                        "hint": 0,
                         "finalize": 1,
+                        "submission": 2,
+                        "verification": 39,
                     },
                     "tool_time_ms": 813000,
                     "tool_calls": 96,
@@ -682,8 +680,9 @@ def test_report_prints_the_loop_health_block(tmp_path: Path) -> None:
     assert "run metrics:" in output
     assert "candidates attempted: 0" in output
     assert "submitted: never" in output
-    assert "world=99" in output
+    assert "hint=0" in output
     assert "verification=39" in output
+    assert "submission=2" in output
     assert "813000 ms over 96 calls (12 failed)" in output
     assert "44311 tokens" in output
     assert "bash 900000 ms" in output
@@ -707,12 +706,11 @@ def test_report_tolerates_a_result_without_metrics(tmp_path: Path) -> None:
     assert "run metrics:" not in result.stdout
 
 
-def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path: Path) -> None:
+def test_benchmark_runs_keep_submission_closure_on(monkeypatch, tmp_path: Path) -> None:
     """Pin the defaults the failure shape of 2026-10-16 depends on.
 
-    Fifteen losing runs submitted nothing and spent turns on feedback they could
-    not act on; the benchmark path has to keep asking for a submission at the
-    soft limit and stop echoing zero-information steers.
+    Fifteen losing runs submitted nothing; the benchmark path has to keep asking
+    for a submission at the soft limit and while closing.
     """
     import harness.benchmark.runner as runner_module
 
@@ -745,8 +743,6 @@ def test_benchmark_runs_keep_the_four_closure_switches_on(monkeypatch, tmp_path:
     for kwargs in captured:
         assert kwargs["finalize_requests_submission"] is True
         assert kwargs["submission_due_fraction"] == runner_module.BENCHMARK_SUBMISSION_DUE_FRACTION
-        assert kwargs["quiet_world_steers"] is True
-        assert kwargs["verdict_steers_only"] is True
 
 
 class RejectingBenchmarkAdapter(FakeBenchmarkAdapter):

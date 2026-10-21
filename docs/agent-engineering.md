@@ -75,7 +75,8 @@ SDK 与 MCP 两条面都还没在本机对真实平台跑通，任何"已对齐"
 - 平台每队同时运行实例**最多 3 个**，用完必须 `close_challenge` 释放，
   否则后续 `start_challenge` 直接失败。
 - 全接口共享**每秒 3 次**限流，超限返回 HTTP `429`。
-- 查看提示后该题得分扣 10%，且只能查看已启动实例的题；提示只在需要时按阈值取用。
+- 查看提示后该题得分扣 10%，且只能查看已启动实例的题；自动阈值提示已由 RUN-09 删除，
+  只保留操作者显式提示与启动时显式请求的平台提示。
 - flag 按题计分，多 flag 题按 flag 计数，重复提交同一 flag 不再得分。
 - 机器容量前提：`--parallel` × 每题会话数 = 同时在跑的容器数，
   以 4 GB / 4 CPU 每会话估算本机容量，别把并发堆到同一道题上。
@@ -90,7 +91,7 @@ P0 是赛前必须成立的能力；没做完的项必须显式标出，不许�
 | ZCP-01 | 接入面核对（SDK `openapi/v1` vs 官方 `/api` + `Agent-Token`） | `src/harness/benchmark/tsec_client.py`、`src/harness/preflight.py` | 离线就绪；实时核对 blocked（需平台窗口） | 离线契约与 preflight 环境诊断已就绪（`tests/test_tsec_adapter.py`、[tsec.md](tsec.md) 核对清单）；对真实平台跑通 list/start/submit/hint/close 待执行 |
 | ZCP-02 | 3 req/s 令牌桶 + 实例 ≤3 + 用完 `close_challenge` 释放 | `src/harness/benchmark/tsec_client.py`、`src/harness/benchmark/tsec_adapter.py` | 已落地 | 假时钟证明 3 req/s 不越界；实例注册表上限 3、重复启动拒绝、失败/关闭幂等释放；429 单次退避后 fail-closed（`tests/test_tsec_adapter.py`） |
 | ZCP-03 | 多题并行调度（≤3 题，独立 run dir 与预算） | `src/harness/benchmark/tsec_adapter.py` | 已落地 | `run_tsec_challenges` 的信号量与按题 run dir（`tests/test_tsec_adapter.py`） |
-| ZCP-04 | 按步数阈值分级提示，替代全局 `--hint` | `src/harness/benchmark/tsec_adapter.py`、`src/harness/solver_loop.py`、`src/harness/cli.py` | 已落地 | `--hint-threshold`（默认 0＝关闭）；`request_hint` 同题只取一次、失败不重试；连续无进展达阈值经 steer 注入一次（`tests/test_solver_loop.py`、`tests/test_tsec_adapter.py`）；`result.json` 记录 `hint_used`/`hint_trigger`。与操作者提示共用 `solver.hint` 事件/观测，靠 `data.source`（`platform`/`operator`）区分，两条来源都在 `_STEER_TYPES` 内 |
+| ZCP-04 | 自动阈值提示 | — | 已被 RUN-09 取代 | 无进展阈值不再触发平台提示；只保留 `--hint` 的显式启动请求和操作者 `harness hint`。`solver.hint` 仍按 `data.source` 区分 `platform`/`operator`，且属于白名单内的真实 steer |
 | HINT（归并自 origin/main 4349a22） | 操作者提示通道：`harness hint <run_dir>` 写入 `hints.jsonl`，SolverLoop 吸收为 `human.hint` 世界观测并 steer Agent | `src/harness/hints.py`、`src/harness/cli.py`、`src/harness/solver_loop.py` | 已落地 | 追加序号、增量游标与坏行跳过、重启不重投、`finish_ingest` 收晚到提示、`run_summary` facts 含 `human.hint`、CLI 正负例（`tests/test_hint_channel.py`）；提示只引导不裁决，可信输入与挂载边界见 [security/execution-boundary.md](security/execution-boundary.md) |
 | ZCP-11 | 墙钟上限解除：有效预算取声明的 `--wall-time`，另加运维安全阀 | `src/harness/benchmark/tsec_adapter.py`、`src/harness/cli.py` | 已落地 | 声明 7200s 时有效预算就是 7200s；`--max-wall-time-seconds` 只在显式传入时生效（`tests/test_tsec_adapter.py`） |
 
@@ -99,7 +100,7 @@ P1 是赛前有余力才做、赛后必做的项：
 | ID | 交付 | 落点 | 状态 | 验收 |
 | --- | --- | --- | --- | --- |
 | ZCP-05 | 上下文重启与接力简报（阶段一已落地）；容器内钩子为阶段二，默认关闭、maintainer 已复核 | `src/harness/solver_loop.py`、`src/harness/benchmark/runner.py`、`src/harness/progress.py`、`src/harness/pi_assets/harness-context.ts` | 阶段一、二均已落地 | 阶段一：工具调用 300 次或再用掉 60% 工具调用预算时重启，最多 2 次；简报含已确立事实/已排除路径/开放意图/指针；旧会话归档为 `restart-N`（`tests/test_solver_loop.py`、`tests/test_executors.py`）。阶段二：`pi.harness_extension` 显式开启才安装 Harness 扩展并停传 `--no-extensions`；扩展仅 `tool_result` 落盘（32k/600 预览）与 `session_before_compact` 保留清单两个钩子，失败回退默认压缩（`tests/test_pi_adapter.py`；边界见 [security/execution-boundary.md](security/execution-boundary.md)）；Pi 模型实测 blocked（本机无模型凭据） |
-| ZCP-06 | 重复动作打断（消费已有的 `args_family`，连续同族注入干预） | `src/harness/progress.py`、`src/harness/solver_loop.py` | 已落地 | 同族连续 3 次触发一次干预、6 次升级为收敛级；确认进展清零计数；不同命令族不误伤（`tests/test_solver_loop.py`） |
+| ZCP-06 | 重复动作打断 | — | 已被 RUN-09 取代 | 重复命令族状态与自动干预已删除；重复是否值得改变策略由 Agent 判断，诊断数据只进 trace |
 | ZCP-07 | 知识库填充（技能手册 + 自研索引 + 上游语料按需挂载） | `skills/offensive/`、`knowledge/README.md` | 已落地 | 7 个技能含全部必需小节且 ≥50 行；索引链接可解析；上游语料只经 `scripts/fetch-knowledge.sh` 按 pinned revision 拉取（`tests/test_knowledge_catalogue.py`） |
 | ZCP-08 | 失败/已排除路径看板 | `src/harness/world/context.py` | 已落地 | refuted/superseded 出现在 Ruled out（上限 10 条，截断给计数）；无记录时投影不含该段（`tests/test_world_context.py`） |
 | ZCP-09 | 会话级用量归因与 prompt/model 战绩 | `src/harness/benchmark/runner.py`、`src/harness/cli.py` | 已落地 | `executor_summary` 按 (prompt, provider, model) 聚合；单会话结果不新增键（`tests/test_executors.py`） |

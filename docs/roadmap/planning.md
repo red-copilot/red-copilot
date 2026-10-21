@@ -7,9 +7,9 @@ Harness no longer plans, ranks skills or compiles rounds. Cognition belongs to t
 keeps its own markdown notes and reads read-only knowledge roots on demand.
 
 ### PLN-01 [!] — Replan on actual information change
-Descoped: there is no planner to replan. The loop keeps a pure stop law
-(`solver_policy.decide_solver_action`: no-progress, unconfirmed-progress, budget, low-budget) and
-the Agent redirects itself. Budget thresholds still steer convergence once each.
+Descoped: there is no planner to replan. The loop keeps a pure external stop law
+(`solver_policy.decide_solver_action`: budget/wall clock only) and the Agent redirects itself.
+No-progress, repetition and budget-threshold counters are diagnostics, not control inputs.
 
 ### PLN-02 [!] — Planner ablations and safe fallback
 Descoped with `--solver-profile`. The v1 frontier planner survives as an offline baseline
