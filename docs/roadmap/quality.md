@@ -44,6 +44,16 @@ task. `harness preflight` correctly reports not-ready because `OPENAI_API_KEY` i
 model or TSec sweep was run. The removed CLI flags and narrowed stop law are public-contract
 changes and require maintainer review before merge.
 
+M0/M1 causal ledger shadow (2026-10-22). Added the deliberate control-spine module
+`harness.ledger`, an append-only SQLite WAL store with a SHA-256 hash chain, trace-to-record and
+replay adapters, and a terminal `ledger.comparison.json` diagnostic. The package ceiling was
+re-measured from the tree and set to 58 modules / 16,698 source lines. The public contract, trust
+tiers, hash-chain limitation, failure isolation and `HARNESS_LEDGER_SHADOW=0` rollback are frozen in
+[ADR 0001](../adr/0001-causal-ledger.md). Validation: `.venv/bin/python -m ruff check .` clean;
+targeted architecture/docs/control/ledger/smoke suite 30 passed; full `.venv/bin/python -m pytest -q`
+512 passed with one Starlette/httpx deprecation warning. v2 remains the production read path, M2 is
+not started, and no live Docker recovery matrix or TSec sweep was run.
+
 ## Validation sequence
 
 `ruff check .`; `pytest -q`; `pytest tests/test_architecture.py -q` after any module move; `harness validate`/`preflight` on touched fixtures; the hello smoke run. Docker and TSec paths run only in prepared environments and must be reported as unexecuted otherwise.

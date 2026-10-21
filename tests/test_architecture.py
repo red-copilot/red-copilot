@@ -46,6 +46,7 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.budget",
         "harness.extract",
         "harness.hints",
+        "harness.ledger",
         "harness.models",
         "harness.network_policy",
         "harness.pi_adapter",
@@ -447,6 +448,24 @@ def test_control_spine_import_closure_is_frozen() -> None:
     assert not leaked, f"removed subsystems reappeared on the control spine: {leaked}"
     extra = closure - CONTROL_SPINE
     assert not extra, f"control spine grew beyond the frozen set: {sorted(extra)}"
+
+
+def test_causal_ledger_adr_freezes_the_shadow_contract() -> None:
+    adr = Path(__file__).resolve().parents[1] / "docs" / "adr" / "0001-causal-ledger.md"
+    text = adr.read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    required = (
+        "harness/ledger-store/v1",
+        "harness/ledger-event/v1",
+        "HARNESS_LEDGER_SHADOW",
+        "v2 remains authoritative",
+        "M2 is not started",
+        "hash chain",
+        "cryptographic",
+        "rollback",
+    )
+    missing = [marker for marker in required if marker not in normalized]
+    assert not missing, f"causal-ledger ADR is missing required contract markers: {missing}"
 
 
 def test_removed_subsystems_are_absent_from_the_package() -> None:

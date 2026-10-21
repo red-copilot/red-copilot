@@ -1,9 +1,9 @@
 # Modular monolith boundaries
 
 > Target architecture: [first-principles architecture v3](superpowers/specs/2026-10-22-first-principles-architecture-design.md)
-> (Chinese) is the proposed causality-and-trust kernel. It is not implemented yet; the boundaries,
-> event formats and tests described below remain the current v2 baseline until the migration gates
-> in that document are satisfied.
+> (Chinese) is the proposed causality-and-trust kernel. Its M0 contract and M1 causal ledger shadow
+> are implemented; v2 remains the production read path and M2 is not started. The frozen decision is
+> recorded in [ADR 0001](adr/0001-causal-ledger.md).
 
 Diagrams of the current topology, control loop and trust boundary:
 [architecture-map.md](architecture-map.md).
@@ -23,6 +23,8 @@ are consolidated in [agent-architecture.md](agent-architecture.md) (Chinese).
 - `solver_loop.py`, `solver_policy.py`, `action_verifier.py`: solver policies.
   `solver_policy.py` is a pure external stop law (budget/wall clock); cognition belongs
   to the Agent, which keeps its own notes and reads markdown knowledge roots.
+- `ledger.py`: append-only SQLite causal ledger, hash chain, trace adapter and replay comparison.
+  It is a shadow of the v2 trace in M1, not a production source of truth.
 - `orchestrator.py`: local-run lifecycle and environment integration.
 
 The first extraction is `runtime.bootstrap_solver`. Both local runs and
@@ -49,6 +51,23 @@ boundaries. Preserve public import paths until migration is complete.
 The control plane, worker queue, coordination blackboard and other open-loop
 subsystems were removed during the control-spine simplification; the package is
 now the closed loop plus its composition points.
+
+## Causal ledger shadow (M0/M1)
+
+Every Run can carry a `ledger.db` beside its existing v2 artifacts. `TraceRecorder` writes the v2
+trace line first, then mirrors the same event into the ledger under store schema
+`harness/ledger-store/v1` and event schema `harness/ledger-event/v1`. The ledger is append-only,
+uses WAL with `synchronous=FULL`, and verifies contiguous sequence numbers and a SHA-256 hash chain.
+The chain detects accidental corruption and projection drift; it is not a cryptographic defense
+against host administrators.
+
+The shadow is enabled by default and can be disabled per process with `HARNESS_LEDGER_SHADOW=0`.
+A ledger error never changes the Run status or `result.json`: the first failure writes
+`ledger.error.json` and disables further shadow appends for that recorder. After terminal result
+persistence, best-effort replay compares terminal, objective, action, budget and submission state
+with v2 and writes `ledger.comparison.json`. World, Context, Result, Progress and Checkpoint still
+read only their v2 sources. See [ADR 0001](adr/0001-causal-ledger.md) for the frozen contract and
+rollback rule.
 
 ## Enforced dependency direction
 

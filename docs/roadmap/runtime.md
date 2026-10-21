@@ -12,6 +12,16 @@ Deliver: durable agent cursor, World revision, budget, feedback cursor and in-fl
 Accept: fault-injection tests at every boundary; unknown effects never auto-retried; mismatched or corrupt checkpoints detected; no double billing or duplicate events.
 State: per-event checkpoints (`harness/checkpoint/v2` with atomic fsync of file and directory), `--resume-run` for Pi RPC, durable progress ledger, optimistic revision checks and operator reconciliation under a per-run cross-process lock are implemented. Outstanding: the Docker-backed recovery fault matrix.
 
+M1 causal shadow ledger (2026-10-22). Added `harness.ledger` as an append-only SQLite WAL store
+beside each Run, with monotonic sequence numbers, a SHA-256 hash chain, trust-tier provenance and a
+best-effort replay comparison after terminal persistence. Ledger failures are isolated to
+`ledger.error.json` and cannot alter the Run status or `result.json`. v2 trace, World, Context,
+Result, Progress and Checkpoint reads remain authoritative; M2 is not started. Evidence:
+`tests/test_ledger.py`, `tests/test_smoke.py`, and the frozen contract in
+[ADR 0001](../adr/0001-causal-ledger.md); targeted `pytest` run passed 30 tests and the full suite
+passed 512 tests with one Starlette/httpx deprecation warning. The Docker-backed recovery fault
+matrix and a live TSec sweep remain unexecuted.
+
 ### RUN-03 [x] P1 — Event processing and bounded autonomy
 Deliver: persisted event identity for dedupe, stable ordering and world-event revisions, plus a pure external stop decision that never infers replanning or exhaustion from Agent behavior.
 Accept: duplicate/reordered event tests, goal verification dominates generic completion, deterministic counterexamples show diagnostic counters cannot stop the loop, reproducible trace transitions.
