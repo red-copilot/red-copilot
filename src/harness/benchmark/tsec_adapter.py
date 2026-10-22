@@ -368,6 +368,7 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
     ) -> None:
         self.client = client
         self.use_hint = use_hint
+        self._submitted_values: dict[str, set[str]] = {}
         self.start_retries = start_retries
         self.retry_delay = retry_delay
         self._raw_cases: dict[str, typing.Any] = {}
@@ -591,6 +592,18 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                 accepted=False,
                 metadata={"reason": "unsupported_submission_type"},
             )
+        # Loot gate: a value this adapter already submitted (accepted or not)
+        # is not retried. The set spans continuation sessions because the
+        # adapter outlives a single run_case; re-sending a rejected flag to
+        # the platform burns API calls and confirms nothing.
+        seen = self._submitted_values.setdefault(session.case_id, set())
+        if submission.value in seen:
+            return SubmissionResult(
+                accepted=False,
+                completed=False,
+                metadata={"duplicate": True, "loot_gate": "already_submitted"},
+            )
+        seen.add(submission.value)
 
         try:
             submitted = await self.client.submit_flag(session.case_id, submission.value)

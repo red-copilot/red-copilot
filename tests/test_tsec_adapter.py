@@ -1838,3 +1838,41 @@ def test_least_attempted_cases_are_dispatched_first(monkeypatch, tmp_path: Path)
     # Zero-attempt cases were dispatched before the twice-attempted one.
     assert _ConcurrencyProbeRunner.calls[-1] == "WEB-001"
     assert set(_ConcurrencyProbeRunner.calls[:2]) == {"WEB-002", "WEB-003"}
+
+
+def test_loot_gate_blocks_repeat_submissions_across_sessions() -> None:
+    calls: list[str] = []
+
+    class RecordingClient(_MultiCaseClient):
+        async def submit_flag(self, code, flag):
+            calls.append((code, flag))
+            return SimpleNamespace(
+                correct=True, awarded=100, cumulative_score=100,
+                correct_flag_count=1, total_flag_count=2, matched_flag_index=0,
+            )
+
+    client = RecordingClient()
+    adapter = TSecBenchmarkAdapter(client)
+    session = BenchmarkSession(
+        id="sess-1",
+        benchmark="tsec",
+        case_id="WEB-001",
+        objective={"description": "d"},
+        targets=[],
+        metadata={},
+    )
+
+    adapter._sessions[session.id] = AdapterSessionState(
+        case=BenchmarkCase(
+            id="WEB-001", benchmark="tsec", domain="web", difficulty="easy",
+            metadata={"is_completed": False},
+        ),
+        closed=False,
+    )
+    first = asyncio.run(adapter.submit(session, Submission(type="flag", value="flag{one}")))
+    assert first.accepted is True
+    # Second session (continuation) proposes the same value: the gate blocks it.
+    second = asyncio.run(adapter.submit(session, Submission(type="flag", value="flag{one}")))
+    assert second.accepted is False
+    assert second.metadata.get("loot_gate") == "already_submitted"
+    assert len(calls) == 1
