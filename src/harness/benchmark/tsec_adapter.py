@@ -64,6 +64,17 @@ def _is_instance_conflict(exc: BaseException) -> bool:
 # cases, cool the whole dispatch down before trying the next one.
 CONFLICT_STREAK_LIMIT = 2
 CONFLICT_COOLDOWN_SECONDS = 120.0
+# A case that dies within this window never produced a real attempt (agent
+# process failed to start, provider error at the first call, immediate exit).
+# Waiting for the next pass can take hours; retry once in place.
+RAPID_FAILURE_SECONDS = 120
+RAPID_RETRY_LIMIT = 1
+# A multi-flag challenge is not done because the Agent's turn ended. When a
+# session stops well before its budget (the model decided it had nothing left)
+# or when it gained flags, continue in the same slot with a fresh session - the
+# notes carry the foothold - instead of closing the target and waiting a pass.
+MAX_SESSIONS_PER_CASE = 3
+EARLY_EXIT_FRACTION = 0.6
 # Per-difficulty wall time. Multi-stage relays need a foothold, lateral
 # movement and a final objective; a flat budget gives every stage the same
 # time and leaves the hard ones cut off mid-chain. Easy cases pay for that,
@@ -356,11 +367,13 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
     ) -> None:
         self.client = client
         self.use_hint = use_hint
+        self._submitted_values: dict[str, set[str]] = {}
         self.start_retries = start_retries
         self.retry_delay = retry_delay
         self._raw_cases: dict[str, typing.Any] = {}
         self._sessions: dict[str, AdapterSessionState] = {}
         self._case_sessions: dict[str, BenchmarkSession] = {}
+        self._hint_fetched: set[str] = set()
 
     async def discover(self) -> list[BenchmarkCase]:
         challenges = await self.client.list_challenges()
@@ -418,6 +431,35 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                     continue
                 raise
 
+    async def refresh_progress(self, case: BenchmarkCase) -> None:
+        """Re-read the platform's flag progress for one case.
+
+        A continuation session runs against the same challenge instance; the
+        cached discovery record still says 0/N and would tell the Agent to find
+        flags it already submitted. Refresh both the raw record and the case
+        metadata so the objective reflects reality.
+        """
+        try:
+            challenges = await self.client.list_challenges()
+        except Exception:  # noqa: BLE001 - progress refresh is best effort
+            return
+        for challenge in challenges:
+            if challenge.unique_code != case.id:
+                continue
+            self._raw_cases[case.id] = challenge
+            metadata = dict(case.metadata)
+            metadata.update(
+                {
+                    "flag_count": int(challenge.flag_count),
+                    "correct_flag_count": int(
+                        getattr(challenge, "correct_flag_count", 0)
+                    ),
+                    "is_completed": bool(getattr(challenge, "is_completed", False)),
+                }
+            )
+            case.metadata = metadata
+            return
+
     async def provision(self, case: BenchmarkCase) -> BenchmarkSession:
         challenge = self._raw_cases.get(case.id)
         if challenge is None:
@@ -438,6 +480,11 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             if self.use_hint:
                 hint_result = await self.client.get_hint(case.id)
                 hint = getattr(hint_result, "hint", None)
+                # Viewing a hint costs score, so the immediate request has to
+                # count as this challenge's one hint: a later threshold-triggered
+                # ``request_hint`` must return what was already fetched instead
+                # of paying for a second view of the same challenge.
+                self._hint_fetched.add(case.id)
         except Exception:
             await self.client.close_challenge(case.id)
             raise
@@ -453,6 +500,21 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                 f"Find {remaining} remaining flag(s)."
             ),
         ]
+        if remaining > 1:
+            objective_parts.append(
+                f"This challenge carries {total} flags and you need {remaining}. "
+                "Submitting one flag does NOT finish the case: after each accepted "
+                "submission keep working on the rest. Only stop when every flag is "
+                "in, the harness tells you to finalize, or the target is unavailable."
+            )
+        objective_parts.append(
+            "If previous notes exist (notes/prior-summary.md or notes/prior-notes/), "
+            "read them before probing: they hold the foothold, credentials, tunnels "
+            "and ruled-out paths from the last session. Resume from the first blocked "
+            "stage instead of re-running reconnaissance. Keep any shell, tunnel or "
+            "session you still need alive (nohup/tmux) and write its exact command "
+            "into your notes."
+        )
         if hint:
             objective_parts.append(
                 f"Platform hint (explicitly requested; may reduce score):\n{hint}"
@@ -488,6 +550,37 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
         )
         return session
 
+    async def request_hint(self, case_id: str) -> str | None:
+        """Fetch the platform hint at most once per challenge.
+
+        Failures are recorded on the session metadata and never retried, so a
+        broken hint endpoint cannot turn into a retry storm; the score penalty
+        is only booked when a hint was actually retrieved.
+        """
+        session = self._case_sessions.get(case_id)
+        if case_id in self._hint_fetched:
+            if session is None:
+                return None
+            cached = session.metadata.get("hint")
+            return str(cached) if cached else None
+        self._hint_fetched.add(case_id)
+        try:
+            hint_result = await self.client.get_hint(case_id)
+        except Exception:  # noqa: BLE001 - hint failure degrades, never stalls
+            if session is not None:
+                session.metadata["hint_trigger"] = "threshold"
+                session.metadata["hint_error"] = True
+            return None
+        hint = getattr(hint_result, "hint", None)
+        hint_text = str(hint) if hint else None
+        if session is not None:
+            session.metadata["hint_trigger"] = "threshold"
+            session.metadata["hint_error"] = False
+            if hint_text:
+                session.metadata["hint_used"] = True
+                session.metadata["hint"] = hint_text
+        return hint_text
+
     async def submit(
         self,
         session: BenchmarkSession,
@@ -498,6 +591,18 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                 accepted=False,
                 metadata={"reason": "unsupported_submission_type"},
             )
+        # Loot gate: a value this adapter already submitted (accepted or not)
+        # is not retried. The set spans continuation sessions because the
+        # adapter outlives a single run_case; re-sending a rejected flag to
+        # the platform burns API calls and confirms nothing.
+        seen = self._submitted_values.setdefault(session.case_id, set())
+        if submission.value in seen:
+            return SubmissionResult(
+                accepted=False,
+                completed=False,
+                metadata={"duplicate": True, "loot_gate": "already_submitted"},
+            )
+        seen.add(submission.value)
 
         try:
             submitted = await self.client.submit_flag(session.case_id, submission.value)
@@ -727,6 +832,7 @@ async def run_tsec_challenges(
     run_all: bool = False,
     seed: int = 0,
     use_hint: bool = False,
+    hint_threshold: int = 0,
     start_retries: int = 2,
     retry_delay: float = 2.0,
     parallel: int | None = None,
@@ -761,6 +867,8 @@ async def run_tsec_challenges(
         raise TSecAdapterError(
             f"concurrency must be between 1 and {MAX_PARALLEL_CHALLENGES}"
         )
+    if hint_threshold < 0:
+        raise TSecAdapterError("hint_threshold must be non-negative")
     if max_wall_time_seconds is not None and max_wall_time_seconds < 1:
         raise TSecAdapterError("max_wall_time_seconds must be at least 1")
 
@@ -898,15 +1006,64 @@ async def run_tsec_challenges(
                                 update={"wall_time": int(remaining)}
                             )
                     try:
-                        result = await runner.run_case(
-                            adapter=adapter,
-                            case=case,
-                            agent=agent,
-                            budgets=case_budgets,
-                            seed=pass_seed + index,
-                            submission_extractor=_extract_submissions,
-                            seed_notes_from=attempt_seed(case.id),
+                        sessions_done = 0
+                        best_correct = 0
+                        result: dict = {}
+                        slot_deadline = (
+                            time.monotonic() + case_budgets.wall_time
                         )
+                        while True:
+                            remaining = slot_deadline - time.monotonic()
+                            if remaining < min(
+                                RAPID_FAILURE_SECONDS,
+                                max(1.0, case_budgets.wall_time / 2),
+                            ):
+                                break
+                            if sessions_done:
+                                # Same instance, but the platform now knows
+                                # about the flags this slot already submitted.
+                                await adapter.refresh_progress(case)
+                            attempt_started = time.monotonic()
+                            result = await runner.run_case(
+                                adapter=adapter,
+                                case=case,
+                                agent=agent,
+                                budgets=(
+                                    case_budgets
+                                    if sessions_done == 0
+                                    else case_budgets.model_copy(
+                                        update={"wall_time": int(remaining)}
+                                    )
+                                ),
+                                seed=pass_seed + index + sessions_done,
+                                submission_extractor=_extract_submissions,
+                                seed_notes_from=attempt_seed(case.id),
+                            )
+                            elapsed = time.monotonic() - attempt_started
+                            sessions_done += 1
+                            correct = int(
+                                (result.get("flags") or {}).get("correct") or 0
+                            )
+                            gained = correct > best_correct
+                            best_correct = max(best_correct, correct)
+                            if result.get("success"):
+                                break
+                            if sessions_done >= MAX_SESSIONS_PER_CASE:
+                                break
+                            early_exit = elapsed < (
+                                case_budgets.wall_time * EARLY_EXIT_FRACTION
+                            )
+                            if not early_exit and not gained:
+                                # A full-length attempt that gained nothing;
+                                # another session would repeat it.
+                                break
+                            print(
+                                f"[tsec] {case.id} session {sessions_done} ended in "
+                                f"{elapsed:.0f}s (flags {correct}); continuing in the "
+                                "same slot",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                     except Exception as exc:  # noqa: BLE001 - classified below
                         kind = classify_platform_failure(exc)
                         failures.append(
@@ -947,6 +1104,15 @@ async def run_tsec_challenges(
                             "message": f"case failed: {type(exc).__name__}",
                         }
 
+                    if not result:
+                        return {
+                            "run_id": None,
+                            "benchmark": {"challenge": case.id, "case_id": case.id},
+                            "status": "skipped",
+                            "success": False,
+                            "score": 0.0,
+                            "message": "no session budget left in this slot",
+                        }
                     evaluation = result.get("evaluation", {})
                     session_meta = result.get("benchmark", {}).get("session", {})
                     result["benchmark"].update(

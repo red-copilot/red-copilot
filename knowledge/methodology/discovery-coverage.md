@@ -23,9 +23,10 @@ Coverage is a property of your wordlists and tools, not of the target.
 - **Parameters are a wordlist too.** `arjun` on every endpoint that takes input,
   and mine parameter names from JavaScript bundles, source maps, error pages and
   redirect locations.
-- **Flag location priors first.** Sweep the usual flag paths (`/challenge/flag.txt`,
-  `/flag.txt`, `/admin/info`, `/internal/info`, ...) after any file-read or SSRF
-  primitive before reaching for a large dictionary.
+- **Flag location priors first.** `/opt/red-harness/wordlists/flag-paths.txt`
+  lists the usual flag paths (`/challenge/flag.txt`, `/flag.txt`, `/admin/info`,
+  `/internal/info`, ...). After any file-read or SSRF primitive, sweep those
+  before reaching for a large dictionary.
 - **Structured tool output beats memory.** `ffuf -of json -o out.json`,
   `feroxbuster --json`, and scripts that print status, length and elapsed time
   per candidate make the one anomalous response visible.
@@ -37,10 +38,13 @@ Coverage is a property of your wordlists and tools, not of the target.
 | Directory and route discovery | `ffuf`, `feroxbuster`, `gobuster` | `/usr/share/seclists/Discovery/Web-Content/`, `dirb/common.txt`, `dirb/big.txt` |
 | Recursive content discovery | `feroxbuster -u URL -w LIST --depth 3` | SecLists `raft-*` |
 | Parameter discovery | `arjun -u URL -m GET,POST` | — |
-| Flag locations | `curl`/`ffuf` over a short built-in path list | challenge paths first |
+| Flag locations | `ffuf -u URL/FUZZ -w /opt/red-harness/wordlists/flag-paths.txt` | curated priors |
 | Credentials | `hydra`, `john`, `hashcat` | `/usr/share/wordlists/rockyou.txt` |
 | AD / SMB | `netexec`, `impacket-*`, `certipy-ad`, `bloodhound.py`, `smbclient`, `rpcclient` | — |
 | Kerberos users | `impacket-GetNPUsers`, `kerbrute` (if present) | — |
+| Known-CVE scanning | `nuclei -t /opt/nuclei-templates -severity critical,high,medium` | templates are local; never update offline |
+| Exploit lookup | `searchsploit <product> <version>`, `searchsploit -m <edb-id>` | offline exploitdb |
 | Binary hardening / RE | `checksec`, `r2 -A`, `ROPgadget`, `patchelf`, `objdump` | — |
+| Java deserialization | `ysoserial <Gadget> '<cmd>'`, `marshalsec marshalsec.jndi.LDAPRefServer ...` | JDK 11 runtime for ysoserial |
 | Cloud / K8s | `awscli`, `kubectl` | credentials from the target |
-| Through a tunnel | `ssh -D 1080 -N user@host`, or `socat TCP-LISTEN:PORT,fork TCP:HOST:PORT` | use only for the authorized target |
+| Through a tunnel | `proxychains4 -f /opt/red-harness/proxychains.conf <tool>` | socks5 in the config's last line |

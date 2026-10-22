@@ -81,6 +81,9 @@ TSEC_PREFLIGHT_TIMEOUT_SECONDS = 45.0
 class TSecConfig:
     base_url: str
     token: str
+    # Hosted evaluation sandboxes already live inside the benchmark network:
+    # the SDK's entry-time VPN probe is skipped there (connectivity is still
+    # proven by the challenge listing).
     check_vpn: bool = True
 
 
@@ -88,6 +91,7 @@ def load_tsec_config(
     *,
     base_url_env: str = "BENCHMARK_BASE_URL",
     token_env: str = "BENCHMARK_TOKEN",
+    skip_vpn_env: str = "TSEC_SKIP_VPN_CHECK",
 ) -> TSecConfig:
     base_url = os.environ.get(base_url_env, "")
     token = os.environ.get(token_env, "")
@@ -98,7 +102,7 @@ def load_tsec_config(
     return TSecConfig(
         base_url=base_url,
         token=token,
-        check_vpn=True,
+        check_vpn=os.environ.get(skip_vpn_env, "") != "1",
     )
 
 

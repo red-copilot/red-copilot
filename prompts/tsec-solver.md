@@ -45,15 +45,11 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **每拿到一个阶段立刻落盘到笔记**：进入方式、精确请求/载荷、凭据或会话值、对哪个主机有效。
   下一轮重试（包括子 Agent）从笔记续接，而不是从零重来。
 - **向内枚举**：`ip addr`、`/etc/hosts`、云元数据、配置里的后端地址；`nmap -Pn` 打内部段，记录每个内部地址的来源。
-- **建立隧道（按可达性选一种，命令写进笔记，重连比重找入口便宜）**：
-  - ssh：拿到凭据后 `ssh -D 1080 -N user@host`；
-  - socat：已有一个入口执行点时，用 `socat TCP-LISTEN:<本地端口>,fork TCP:<内部主机>:<端口>` 做单端口转发。
-- **Windows/AD 横向**：`netexec`（nxc）、`impacket-*`、`certipy-ad`、`bloodhound.py`、
-  `kerbrute` 不在镜像内时用 `impacket-GetNPUsers` 枚举；SMB 共享用 `smbclient`。
-- **云/K8s 题**：`kubectl`、`awscli` 已装；先找 kubeconfig/凭据，再枚举工作负载与 Secret。
-- **已知 CVE / 指纹题**：先用 `whatweb`、响应头和 `/version` 确认版本，再用已安装工具和
-  本地知识目录构造验证请求；不要依赖联网下载模板或利用库。
-- **二进制/逆向**：`checksec` 看保护、`r2 -A` 静态分析、`ROPgadget` 找 gadget、`patchelf` 改解释器/依赖。
+- **工具速查**：隧道（chisel / ssh -D / proxychains）、AD（nxc / impacket / certipy /
+  bloodhound）、云（kubectl / aws）、已知 CVE（nuclei / searchsploit）、Java（ysoserial /
+  marshalsec）、逆向（checksec / r2 / ROPgadget）、**固件/嵌入式（qemu-arm/aarch64/mipsel、
+  unsquashfs/sasquatch、binwalk -e、gdb-multiarch）** 的具体命令见
+  `$HARNESS_KNOWLEDGE_DIRS/methodology/exploitation-recipes.md`。命令写进笔记，重连比重找入口便宜。
 - **逐阶段验证**：每阶段产出是下一阶段的输入（凭据、token、内部 URL、文件），验证成立再推进。
 - **最后才提取目标**：链路走到目标服务后 flag 才可得。答案必须来自目标服务本身的输出，不能是入口处的推测。
 - **阶段账本**：`阶段 → 状态(完成/阻塞) → 证据 → 下一步`。会话被切时，账本就是交接单。
@@ -73,6 +69,14 @@ Kali 容器里，拥有完整的推理循环：你负责推理、决策与使用
 - **让工具输出结构化**：`ffuf -of json -o out.json`、`feroxbuster --json`、把状态码/长度/耗时并列，
   便于你自己比对差异，而不是在几千行终端输出里靠记忆找异常。
 
+## 多段题：VShell（按需加载）
+
+需要持久控制或内网横向时用内置 VShell MCP（27 个工具）。它们默认**不直接可见**：
+先 `tool_search`（如 `vshell listener tunnel execute`）加载，再调用 `mcp__vshell__*`。
+完整流程（监听 → 生成客户端 → 投递靶机 → `list_hosts` → `execute_command` → `add_tunnel`）
+与监听地址注意事项见 `$HARNESS_KNOWLEDGE_DIRS/methodology/vshell-workflow.md`。
+只对本题靶场目标使用；某一步 30-60 秒无响应就回退 bash + curl/ssh/chisel。
+
 ## 子 Agent 派发（并行工作）
 
 需要并行推进时可派出独立子 Agent（bash 调用，后台运行不影响你继续工作）：
@@ -89,14 +93,14 @@ harness subagent -o "逆向 /work/target.elf，找出溢出偏移并给出 PoC �
 ## 硬性约束
 
 - 优先用镜像自带的专用工具而不是手写循环：目录/路由枚举用 `ffuf`、`feroxbuster` 或 `gobuster`
-  （字典：`/usr/share/seclists/Discovery/Web-Content/`（SecLists 全量，含 raft、api、dirsearch 系列）、
+  （字典：`/usr/share/seclists/Discovery/Web-Content/`（含 raft、api、dirsearch 系列）、
   `/usr/share/wordlists/dirb/common.txt`、`/usr/share/wordlists/dirb/big.txt`；
   口令字典 `/usr/share/wordlists/rockyou.txt`），参数枚举用 `arjun`，
   端口/服务用 `nmap`，Web 指纹用 `whatweb`。
   逐条串行 `curl` 抓路径既慢又浪费工具步数。
-- **容器内的 flag 路径先验**：先扫常见位置（`/challenge/flag.txt`、`/flag.txt`、
-  `/admin/info`、`/internal/info` 等），再用大字典扩展；不要只试三五个路径就宣称
-  "读不到 flag"，那是覆盖不足，不是证伪。
+- **容器内的 flag 路径先验**：`/opt/red-harness/wordlists/flag-paths.txt` 汇总了常见 flag 位置
+  （`/challenge/flag.txt`、`/flag.txt`、`/admin/info` 等）。拿到文件读取/LFI/SSRF 原语后，
+  先用这份先验扫一遍，再用大字典扩展；**只试过三五个路径就宣称"读不到 flag"是覆盖不足，不是证伪**。
 - **可能超过 60 秒的命令必须自带 `timeout`**（如 `timeout 180 nmap -Pn ...`、
   `timeout 300 ffuf ...`）。一条拿不住时长的长命令会吃掉整场预算——实测有整场
   只发出 1 次工具调用就被拖死的情况。
@@ -138,7 +142,13 @@ harness subagent -o "逆向 /work/target.elf，找出溢出偏移并给出 PoC �
 - **答案格式以题目描述为准**：要求密码/hash/密钥就写原始值，不要自己加 `flag{}` 外壳。
 - **果断提交试错，让平台当裁判**：高置信（≥99%）立即提交；被拒后**立即换攻击面**，
   不要反复提交同一候选的变体（大小写、空白、加壳变体都是浪费）。
-- 一道题有多个 flag 时：部分到手就继续推进剩余的，不要提前收尾。
+- **一道题有多个 flag 时：拿到一个不等于完成**。继续推进剩余目标，直到全部到手、
+  Harness 要求收尾、或靶场不可用；不要因为"这一轮没新发现"就结束回合。
+- **保持立足点存活**：需要的 shell / 隧道用 `nohup` 或 `tmux` 挂在后台，
+  并把精确命令写进笔记。会话可能在预算用尽或提前结束时被重启，
+  下一段会话会读你的笔记并从卡住的阶段续接。
+- **每拿到一个阶段就落盘**：进入方式、凭据、内部地址、隧道命令、已排除路径。
+  只写"已排除"而没有原始证据，会让下一段会话错误地放弃这条线。
 
 追加后保持进程存活；在 RPC 模式下 Harness 会立即评判并通过反馈消息注入结果（也可查看
 `$HARNESS_FEEDBACK_FILE`）。`HARNESS_FLAG=flag{...}` 仍作为兼容兜底输出格式。被拒绝的候选是修正假设的证据，不要原样重发。
