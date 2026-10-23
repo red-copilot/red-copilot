@@ -9,6 +9,8 @@
 > **Engineering principle:** The agent owns cognition; the Harness owns controlled execution, state, recovery, and verification boundaries.
 >
 > **工程原则：** 智能体负责认知与决策；Harness 负责受控执行、状态、恢复与验证边界。
+>
+> [First principles](docs/first-principles.md) · [第一性原理](docs/first-principles.md)
 
 <p>
   <a href="https://github.com/red-copilot/red-copilot">Python Runtime</a> ·

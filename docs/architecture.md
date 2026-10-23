@@ -7,6 +7,8 @@
 > and [ADR 0002](adr/0002-incremental-causal-kernel.md); the shadow contract remains in
 > [ADR 0001](adr/0001-causal-ledger.md).
 
+The project-wide engineering principles are in [first-principles.md](first-principles.md).
+
 Diagrams of the current topology, control loop and trust boundary:
 [architecture-map.md](architecture-map.md).
 
