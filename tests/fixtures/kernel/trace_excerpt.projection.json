@@ -1,0 +1,36 @@
+{
+  "actions": [
+    {
+      "status": "succeeded",
+      "tool": "bash",
+      "tool_call_id": "call-slow"
+    },
+    {
+      "status": "failed",
+      "tool": "bash",
+      "tool_call_id": "call-fast"
+    }
+  ],
+  "active_actions": {},
+  "budget": {
+    "cost_usd": 0.0,
+    "model_calls": 0,
+    "tokens": 37820,
+    "tool_calls": 0
+  },
+  "event_count": 4,
+  "last_action": {
+    "status": "failed",
+    "tool": "bash",
+    "tool_call_id": "call-fast"
+  },
+  "objective_status": null,
+  "run_id": "tsec_a-05_test0001",
+  "submissions": {
+    "accepted": 0,
+    "proposed": 0,
+    "rejected": 0
+  },
+  "terminal": null,
+  "world_revision": 0
+}

@@ -390,3 +390,15 @@ def test_persist_run_result_keeps_result_on_projection_mismatch(tmp_path: Path) 
     assert comparison["ok"] is False
     assert any(item["field"] == "budget.tokens" for item in comparison["mismatches"])
     assert json.loads((tmp_path / "result.json").read_text(encoding="utf-8")) == result
+
+
+def test_projection_matches_kernel_golden_fixture(tmp_path: Path) -> None:
+    import json
+
+    from harness.ledger import import_trace, project_records
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "run_metrics" / "trace_excerpt.jsonl"
+    golden = Path(__file__).resolve().parent / "fixtures" / "kernel" / "trace_excerpt.projection.json"
+    records = import_trace(fixture, tmp_path / "ledger.db")
+
+    assert project_records(records).as_dict() == json.loads(golden.read_text(encoding="utf-8"))
