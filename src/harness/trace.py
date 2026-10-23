@@ -10,9 +10,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .kernel import LedgerAppender, SQLiteLedgerAppender
 from .ledger import (
     LEDGER_SHADOW_ERROR_SCHEMA_VERSION,
-    LedgerStore,
     ledger_db_path,
     shadow_ledger_enabled,
     write_ledger_comparison,
@@ -88,6 +88,7 @@ class TraceRecorder:
         *,
         shadow_ledger: bool | None = None,
         ledger_path: Path | None = None,
+        ledger_appender: LedgerAppender | None = None,
     ) -> None:
         self.path = path
         self.run_id = _redact_string(run_id)
@@ -96,10 +97,12 @@ class TraceRecorder:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.ledger_error: str | None = None
         self._ledger_path = ledger_path or ledger_db_path(self.path)
-        self._ledger: LedgerStore | None = None
-        if shadow_ledger if shadow_ledger is not None else shadow_ledger_enabled():
+        self._ledger: LedgerAppender | None = ledger_appender
+        if self._ledger is None and (
+            shadow_ledger if shadow_ledger is not None else shadow_ledger_enabled()
+        ):
             try:
-                self._ledger = LedgerStore(self._ledger_path)
+                self._ledger = SQLiteLedgerAppender(self._ledger_path)
             except Exception as exc:  # noqa: BLE001 - shadowing must never fail a run
                 self._record_ledger_error(exc)
 
