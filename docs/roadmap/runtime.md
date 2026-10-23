@@ -22,6 +22,14 @@ Result, Progress and Checkpoint reads remain authoritative; M2 is not started. E
 passed 513 tests with one Starlette/httpx deprecation warning. The Docker-backed recovery fault
 matrix and a live TSec sweep remain unexecuted.
 
+Stage 0-1 of the incremental causal-kernel refactor is implemented. `TraceRecorder` now writes
+shadow events through the `harness.kernel.LedgerAppender` port; `SQLiteLedgerAppender` delegates to
+the append-only store, and `LedgerStore.append_batch` commits or rolls back a batch atomically. The
+v2 trace remains the production read path and M2 is not started. Evidence:
+`tests/test_ledger.py`, `tests/test_ledger_baseline.py`, `tests/test_kernel_appender.py`,
+`tests/test_trace_appender.py`, `tests/test_architecture.py`, `tests/test_control_metrics.py`; the
+frozen decision is [ADR 0002](../adr/0002-incremental-causal-kernel.md).
+
 ### RUN-03 [x] P1 — Event processing and bounded autonomy
 Deliver: persisted event identity for dedupe, stable ordering and world-event revisions, plus a pure external stop decision that never infers replanning or exhaustion from Agent behavior.
 Accept: duplicate/reordered event tests, goal verification dominates generic completion, deterministic counterexamples show diagnostic counters cannot stop the loop, reproducible trace transitions.

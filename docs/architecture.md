@@ -2,8 +2,10 @@
 
 > Target architecture: [first-principles architecture v3](superpowers/specs/2026-10-22-first-principles-architecture-design.md)
 > (Chinese) is the proposed causality-and-trust kernel. Its M0 contract and M1 causal ledger shadow
-> are implemented; v2 remains the production read path and M2 is not started. The frozen decision is
-> recorded in [ADR 0001](adr/0001-causal-ledger.md).
+> are implemented; v2 remains the production read path and M2 is not started. The incremental
+> migration route is frozen in [the Stage 0-1 design](superpowers/specs/2026-10-23-causal-kernel-incremental-refactor-design.md)
+> and [ADR 0002](adr/0002-incremental-causal-kernel.md); the shadow contract remains in
+> [ADR 0001](adr/0001-causal-ledger.md).
 
 Diagrams of the current topology, control loop and trust boundary:
 [architecture-map.md](architecture-map.md).
@@ -16,6 +18,8 @@ the Agent-facing cognition layer and the agent-side architecture as a whole
 are consolidated in [agent-architecture.md](agent-architecture.md) (Chinese).
 
 - `runtime/`: application-level composition, solver initialization, run state.
+- `kernel/`: narrow causal write ports. `LedgerAppender` is the trace-to-ledger seam; kernel code
+  does not import infrastructure adapters or decide Run outcomes.
 - `world/`: domain state, event storage, snapshots, retrieval. No benchmark or HTTP dependencies.
 - `benchmark/`: externally provisioned challenge lifecycle, submissions and adapters.
 - `agent.py`, `session.py`, `pi_*.py`: agent/session integration and infrastructure.
@@ -55,9 +59,11 @@ now the closed loop plus its composition points.
 ## Causal ledger shadow (M0/M1)
 
 Every Run can carry a `ledger.db` beside its existing v2 artifacts. `TraceRecorder` writes the v2
-trace line first, then mirrors the same event into the ledger under store schema
-`harness/ledger-store/v1` and event schema `harness/ledger-event/v1`. The ledger is append-only,
-uses WAL with `synchronous=FULL`, and verifies contiguous sequence numbers and a SHA-256 hash chain.
+trace line first, then mirrors the same event through `harness.kernel.LedgerAppender` into the
+ledger under store schema `harness/ledger-store/v1` and event schema `harness/ledger-event/v1`.
+`SQLiteLedgerAppender` owns the concrete `LedgerStore`; batches append under one transaction and
+roll back completely on conflict. The ledger is append-only, uses WAL with `synchronous=FULL`, and
+verifies contiguous sequence numbers and a SHA-256 hash chain.
 The chain detects accidental corruption and projection drift; it is not a cryptographic defense
 against host administrators.
 
@@ -66,8 +72,8 @@ A ledger error never changes the Run status or `result.json`: the first failure 
 `ledger.error.json` and disables further shadow appends for that recorder. After terminal result
 persistence, best-effort replay compares terminal, objective, action, budget and submission state
 with v2 and writes `ledger.comparison.json`. World, Context, Result, Progress and Checkpoint still
-read only their v2 sources. See [ADR 0001](adr/0001-causal-ledger.md) for the frozen contract and
-rollback rule.
+read only their v2 sources. See [ADR 0001](adr/0001-causal-ledger.md) for the shadow contract and
+[ADR 0002](adr/0002-incremental-causal-kernel.md) for the Stage 0-1 appender seam and rollback rule.
 
 ## Enforced dependency direction
 

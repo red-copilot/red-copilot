@@ -46,6 +46,8 @@ CONTROL_SPINE: frozenset[str] = frozenset(
         "harness.budget",
         "harness.extract",
         "harness.hints",
+        "harness.kernel",
+        "harness.kernel.appender",
         "harness.ledger",
         "harness.models",
         "harness.network_policy",
@@ -494,3 +496,8 @@ def test_spike_swarm_is_independent_from_harness() -> None:
                 if module == "harness" or module.startswith("harness."):
                     violations.append(f"{path.relative_to(spike_root)} -> {module}")
     assert not violations, f"spike_swarm imported the production package: {violations}"
+
+
+def test_trace_does_not_import_concrete_ledger_store() -> None:
+    imports = _imports(PACKAGE_ROOT / "trace.py", PACKAGE_ROOT)
+    assert "harness.ledger.LedgerStore" not in imports
