@@ -263,6 +263,32 @@ class LedgerStore:
             )
 
     def append_trace_event(self, event: Mapping[str, Any]) -> LedgerRecord:
+        return self.append(**self._trace_event_kwargs(event))
+
+    def append_batch(
+        self,
+        events: Sequence[Mapping[str, Any]],
+    ) -> tuple[LedgerRecord, ...]:
+        """Append trace events in one transaction.
+
+        Every event is normalized before the transaction starts, so malformed
+        input cannot leave a partial batch. Any conflict or write failure rolls
+        back the whole batch.
+        """
+        normalized = [self._trace_event_kwargs(event) for event in events]
+        if not normalized:
+            return ()
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                records = tuple(self._append_locked(**kwargs) for kwargs in normalized)
+                self._connection.commit()
+                return records
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def _trace_event_kwargs(self, event: Mapping[str, Any]) -> dict[str, Any]:
         event_id = _safe_identifier(event.get("event_id"), "event_id")
         run_id = _safe_identifier(event.get("run_id"), "run_id")
         kind = _safe_identifier(event.get("type"), "event type")
@@ -283,22 +309,61 @@ class LedgerStore:
         occurred_at = event.get("ts")
         if not isinstance(occurred_at, str) or not occurred_at:
             occurred_at = datetime.now(UTC).isoformat()
-        return self.append(
-            event_id=event_id,
-            run_id=run_id,
-            attempt_id=attempt_id,
-            producer=producer,
-            trust_tier=trust_tier,
-            kind=kind,
-            schema_version=LEDGER_EVENT_SCHEMA_VERSION,
-            occurred_at=occurred_at,
-            causation_id=causation_id,
-            correlation_id=correlation_id,
-            payload=payload,
-            artifact_refs=_artifact_refs(payload),
-        )
+        return {
+            "event_id": event_id,
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "producer": producer,
+            "trust_tier": trust_tier,
+            "kind": kind,
+            "schema_version": LEDGER_EVENT_SCHEMA_VERSION,
+            "occurred_at": occurred_at,
+            "causation_id": causation_id,
+            "correlation_id": correlation_id,
+            "payload": payload,
+            "artifact_refs": _artifact_refs(payload),
+        }
 
     def append(
+        self,
+        *,
+        event_id: str,
+        run_id: str,
+        kind: str,
+        occurred_at: str,
+        producer: str,
+        trust_tier: str,
+        payload: Mapping[str, Any],
+        attempt_id: str | None = None,
+        causation_id: str | None = None,
+        correlation_id: str | None = None,
+        schema_version: str = LEDGER_EVENT_SCHEMA_VERSION,
+        artifact_refs: Sequence[str] = (),
+    ) -> LedgerRecord:
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                record = self._append_locked(
+                    event_id=event_id,
+                    run_id=run_id,
+                    kind=kind,
+                    occurred_at=occurred_at,
+                    producer=producer,
+                    trust_tier=trust_tier,
+                    payload=payload,
+                    attempt_id=attempt_id,
+                    causation_id=causation_id,
+                    correlation_id=correlation_id,
+                    schema_version=schema_version,
+                    artifact_refs=artifact_refs,
+                )
+                self._connection.commit()
+                return record
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def _append_locked(
         self,
         *,
         event_id: str,
@@ -332,68 +397,60 @@ class LedgerStore:
                 "artifact_refs": list(refs),
             }
         )
-        with self._lock:
-            try:
-                self._connection.execute("BEGIN IMMEDIATE")
-                existing = self._connection.execute(
-                    "SELECT * FROM ledger_records WHERE event_id = ?", (event_id,)
-                ).fetchone()
-                if existing is not None:
-                    self._connection.commit()
-                    if existing["content_hash"] != content_hash:
-                        raise LedgerConflict(f"event_id {event_id!r} was reused with new content")
-                    return _row_to_record(existing)
+        existing = self._connection.execute(
+            "SELECT * FROM ledger_records WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if existing is not None:
+            if existing["content_hash"] != content_hash:
+                raise LedgerConflict(f"event_id {event_id!r} was reused with new content")
+            return _row_to_record(existing)
 
-                previous = self._connection.execute(
-                    "SELECT ledger_seq, record_hash FROM ledger_records "
-                    "ORDER BY ledger_seq DESC LIMIT 1"
-                ).fetchone()
-                ledger_seq = 1 if previous is None else int(previous["ledger_seq"]) + 1
-                prev_hash = GENESIS_HASH if previous is None else str(previous["record_hash"])
-                record_hash = _sha256_json(
-                    {
-                        "ledger_seq": ledger_seq,
-                        "content_hash": content_hash,
-                        "prev_hash": prev_hash,
-                    }
-                )
-                self._connection.execute(
-                    """
-                    INSERT INTO ledger_records(
-                        ledger_seq, event_id, run_id, attempt_id, producer, trust_tier,
-                        kind, schema_version, occurred_at, causation_id, correlation_id,
-                        payload_json, artifact_refs_json, prev_hash, record_hash, content_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ledger_seq,
-                        event_id,
-                        run_id,
-                        attempt_id,
-                        producer,
-                        trust_tier,
-                        kind,
-                        schema_version,
-                        occurred_at,
-                        causation_id,
-                        correlation_id,
-                        _canonical_json(payload_dict),
-                        _canonical_json(list(refs)),
-                        prev_hash,
-                        record_hash,
-                        content_hash,
-                    ),
-                )
-                row = self._connection.execute(
-                    "SELECT * FROM ledger_records WHERE ledger_seq = ?", (ledger_seq,)
-                ).fetchone()
-                self._connection.commit()
-                if row is None:
-                    raise LedgerError("ledger insert did not produce a record")
-                return _row_to_record(row)
-            except Exception:
-                self._connection.rollback()
-                raise
+        previous = self._connection.execute(
+            "SELECT ledger_seq, record_hash FROM ledger_records "
+            "ORDER BY ledger_seq DESC LIMIT 1"
+        ).fetchone()
+        ledger_seq = 1 if previous is None else int(previous["ledger_seq"]) + 1
+        prev_hash = GENESIS_HASH if previous is None else str(previous["record_hash"])
+        record_hash = _sha256_json(
+            {
+                "ledger_seq": ledger_seq,
+                "content_hash": content_hash,
+                "prev_hash": prev_hash,
+            }
+        )
+        self._connection.execute(
+            """
+            INSERT INTO ledger_records(
+                ledger_seq, event_id, run_id, attempt_id, producer, trust_tier,
+                kind, schema_version, occurred_at, causation_id, correlation_id,
+                payload_json, artifact_refs_json, prev_hash, record_hash, content_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ledger_seq,
+                event_id,
+                run_id,
+                attempt_id,
+                producer,
+                trust_tier,
+                kind,
+                schema_version,
+                occurred_at,
+                causation_id,
+                correlation_id,
+                _canonical_json(payload_dict),
+                _canonical_json(list(refs)),
+                prev_hash,
+                record_hash,
+                content_hash,
+            ),
+        )
+        row = self._connection.execute(
+            "SELECT * FROM ledger_records WHERE ledger_seq = ?", (ledger_seq,)
+        ).fetchone()
+        if row is None:
+            raise LedgerError("ledger insert did not produce a record")
+        return _row_to_record(row)
 
     def records(self) -> list[LedgerRecord]:
         with self._lock:

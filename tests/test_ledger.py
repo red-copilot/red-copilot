@@ -402,3 +402,38 @@ def test_projection_matches_kernel_golden_fixture(tmp_path: Path) -> None:
     records = import_trace(fixture, tmp_path / "ledger.db")
 
     assert project_records(records).as_dict() == json.loads(golden.read_text(encoding="utf-8"))
+
+
+def test_append_batch_is_atomic_on_conflict(tmp_path: Path) -> None:
+    store = LedgerStore(tmp_path / "ledger.db")
+    existing = _event("evt-existing", "tool.call", {"tool": "bash"})
+    store.append_trace_event(existing)
+
+    conflict = _event("evt-existing", "tool.result", {"is_error": True})
+    fresh = _event("evt-fresh", "tool.result", {"tool_call_id": "call-1"})
+    with pytest.raises(LedgerConflict):
+        store.append_batch([fresh, conflict])
+
+    assert [record.event_id for record in store.records()] == ["evt-existing"]
+    assert [record.ledger_seq for record in store.records()] == [1]
+
+
+def test_append_batch_returns_ordered_records_and_reopens_chain(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    store = LedgerStore(path)
+    records = store.append_batch(
+        [
+            _event("evt-1", "run.started", {"task": "ledger"}),
+            _event("evt-2", "tool.call", {"tool": "bash", "tool_call_id": "call-1"}),
+        ]
+    )
+
+    assert [record.ledger_seq for record in records] == [1, 2]
+    store.verify()
+    store.close()
+
+    reopened = LedgerStore(path)
+    third = reopened.append_trace_event(_event("evt-3", "tool.result", {"tool_call_id": "call-1"}))
+    assert third.ledger_seq == 3
+    reopened.verify()
+    reopened.close()
