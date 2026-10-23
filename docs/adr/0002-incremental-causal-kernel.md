@@ -67,7 +67,7 @@ non-authoritative and require no schema downgrade or data migration.
 ## Consequences
 
 - The control spine deliberately gains `harness.kernel` and `harness.kernel.appender`.
-- The package ceiling is re-measured at 60 modules and 16,972 source lines.
+- The package ceiling is re-measured at 60 modules and 16,983 source lines.
 - Future stages can introduce transaction batches and alternative appenders without changing
   `TraceRecorder` or the v2 trace contract.
 - The system still has two write-side representations during the migration window; projection

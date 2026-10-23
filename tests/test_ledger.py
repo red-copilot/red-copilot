@@ -437,3 +437,77 @@ def test_append_batch_returns_ordered_records_and_reopens_chain(tmp_path: Path) 
     assert third.ledger_seq == 3
     reopened.verify()
     reopened.close()
+
+
+def test_append_batch_rejects_malformed_payload_before_write(tmp_path: Path) -> None:
+    store = LedgerStore(tmp_path / "ledger.db")
+    valid = _event("evt-valid", "tool.call", {"tool": "bash"})
+    malformed = _event("evt-malformed", "tool.call", ["lost"])
+
+    with pytest.raises(TypeError, match="data must be an object"):
+        store.append_batch([valid, malformed])
+
+    assert store.records() == []
+
+
+@pytest.mark.parametrize("timestamp", [None, "", "not-a-date", "2026-10-23T12:00:00"])
+def test_append_trace_event_requires_timezone_aware_timestamp(
+    tmp_path: Path,
+    timestamp: str | None,
+) -> None:
+    store = LedgerStore(tmp_path / "ledger.db")
+    event = _event("evt-time", "run.started", {})
+    event["ts"] = timestamp
+
+    with pytest.raises(ValueError, match="ts must be a timezone-aware ISO-8601 timestamp"):
+        store.append_trace_event(event)
+
+    assert store.records() == []
+
+
+def test_append_batch_rolls_back_on_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LedgerStore(tmp_path / "ledger.db")
+    original = store._append_locked
+    calls = 0
+
+    def interrupt_after_first_insert(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt
+        return original(**kwargs)
+
+    monkeypatch.setattr(store, "_append_locked", interrupt_after_first_insert)
+
+    with pytest.raises(KeyboardInterrupt):
+        store.append_batch(
+            [
+                _event("evt-1", "run.started", {}),
+                _event("evt-2", "tool.call", {"tool": "bash"}),
+            ]
+        )
+
+    assert store._connection.in_transaction is False
+    assert store.records() == []
+    store.append_trace_event(_event("evt-3", "run.started", {}))
+    assert [record.event_id for record in store.records()] == ["evt-3"]
+
+
+def test_multi_session_projection_matches_golden_fixture(tmp_path: Path) -> None:
+    from harness.ledger import import_trace, project_records
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "kernel" / "multi_session.trace.jsonl"
+    golden = (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "kernel"
+        / "multi_session.projection.json"
+    )
+    records = import_trace(fixture, tmp_path / "ledger.db")
+    projection = project_records(records)
+
+    assert projection.as_dict() == json.loads(golden.read_text(encoding="utf-8"))
+    assert {action["attempt_id"] for action in projection.actions} == {"exec-a", "exec-b"}

@@ -97,14 +97,15 @@ class TraceRecorder:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.ledger_error: str | None = None
         self._ledger_path = ledger_path or ledger_db_path(self.path)
-        self._ledger: LedgerAppender | None = ledger_appender
-        if self._ledger is None and (
-            shadow_ledger if shadow_ledger is not None else shadow_ledger_enabled()
-        ):
-            try:
-                self._ledger = SQLiteLedgerAppender(self._ledger_path)
-            except Exception as exc:  # noqa: BLE001 - shadowing must never fail a run
-                self._record_ledger_error(exc)
+        self._ledger: LedgerAppender | None = None
+        if shadow_ledger if shadow_ledger is not None else shadow_ledger_enabled():
+            if ledger_appender is not None:
+                self._ledger = ledger_appender
+            else:
+                try:
+                    self._ledger = SQLiteLedgerAppender(self._ledger_path)
+                except Exception as exc:  # noqa: BLE001 - shadowing must never fail a run
+                    self._record_ledger_error(exc)
 
     def _record_ledger_error(self, exc: BaseException) -> None:
         if self.ledger_error is not None:
@@ -144,7 +145,8 @@ class TraceRecorder:
         if self._ledger is None:
             return None
         try:
-            return write_ledger_comparison(self._ledger_path, run_dir)
+            self._ledger.verify()
+            return write_ledger_comparison(self._ledger.path, run_dir)
         except Exception as exc:  # noqa: BLE001 - comparison is diagnostic only
             self._record_ledger_error(exc)
             return None

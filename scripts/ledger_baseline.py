@@ -52,7 +52,10 @@ def run_baseline(event_count: int, work_dir: Path | None) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix="ledger-baseline-") as directory:
             return _run_baseline(event_count, Path(directory) / "ledger.db")
     work_dir.mkdir(parents=True, exist_ok=True)
-    return _run_baseline(event_count, work_dir / "ledger.db")
+    path = work_dir / "ledger.db"
+    if path.exists():
+        raise FileExistsError(f"ledger baseline already exists: {path}")
+    return _run_baseline(event_count, path)
 
 
 def _run_baseline(event_count: int, path: Path) -> dict[str, object]:

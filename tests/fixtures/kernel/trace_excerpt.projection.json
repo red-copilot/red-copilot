@@ -1,11 +1,13 @@
 {
   "actions": [
     {
+      "attempt_id": null,
       "status": "succeeded",
       "tool": "bash",
       "tool_call_id": "call-slow"
     },
     {
+      "attempt_id": null,
       "status": "failed",
       "tool": "bash",
       "tool_call_id": "call-fast"
@@ -20,6 +22,7 @@
   },
   "event_count": 4,
   "last_action": {
+    "attempt_id": null,
     "status": "failed",
     "tool": "bash",
     "tool_call_id": "call-fast"

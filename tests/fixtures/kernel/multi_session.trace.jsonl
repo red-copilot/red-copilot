@@ -1,0 +1,9 @@
+{"event_id":"multi-1","run_id":"run-multi","type":"run.started","ts":"2026-10-23T12:00:00+00:00","actor":"harness","data":{"benchmark":"demo"}}
+{"event_id":"multi-2","run_id":"run-multi","type":"tool.call","ts":"2026-10-23T12:00:01+00:00","actor":"agent:exec-a","action_id":"call-a","data":{"tool":"bash","tool_call_id":"call-a","executor_id":"exec-a"}}
+{"event_id":"multi-3","run_id":"run-multi","type":"tool.result","ts":"2026-10-23T12:00:02+00:00","actor":"agent:exec-a","action_id":"call-a","data":{"tool":"bash","tool_call_id":"call-a","executor_id":"exec-a","execution_status":"succeeded","is_error":false}}
+{"event_id":"multi-4","run_id":"run-multi","type":"tool.call","ts":"2026-10-23T12:00:03+00:00","actor":"agent:exec-b","action_id":"call-b","data":{"tool":"bash","tool_call_id":"call-b","executor_id":"exec-b"}}
+{"event_id":"multi-5","run_id":"run-multi","type":"tool.result","ts":"2026-10-23T12:00:04+00:00","actor":"agent:exec-b","action_id":"call-b","data":{"tool":"bash","tool_call_id":"call-b","executor_id":"exec-b","execution_status":"failed","is_error":true}}
+{"event_id":"multi-6","run_id":"run-multi","type":"model.usage","ts":"2026-10-23T12:00:05+00:00","actor":"gateway","data":{"executor_id":"exec-b","input_tokens":10,"output_tokens":5,"total_tokens":15,"model_calls":1,"cost_usd":0.01}}
+{"event_id":"multi-7","run_id":"run-multi","type":"benchmark.submission.proposed","ts":"2026-10-23T12:00:06+00:00","actor":"agent:exec-b","data":{"executor_id":"exec-b","value_sha256":"abc"}}
+{"event_id":"multi-8","run_id":"run-multi","type":"benchmark.submission.result","ts":"2026-10-23T12:00:07+00:00","actor":"benchmark_evaluator","data":{"executor_id":"exec-b","accepted":true}}
+{"event_id":"multi-9","run_id":"run-multi","type":"run.finished","ts":"2026-10-23T12:00:08+00:00","actor":"harness","data":{"status":"objective_completed","success":true,"score":1.0}}

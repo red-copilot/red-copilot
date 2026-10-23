@@ -38,9 +38,10 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # tree was re-measured rather than estimated: 58 modules / 16,685 source lines;
 # the ledger completion path later measured 16,950. Stage 0-1 adds the explicit
 # `harness.kernel` appender port and moves the trace-to-ledger edge behind it.
-# Re-measured from the tree: 60 modules / 16,972 source lines.
+# Re-measured from the tree after final-review fixes: 60 modules / 16,983 source
+# lines.
 MAX_MODULES = 60
-MAX_SRC_LINES = 16_972
+MAX_SRC_LINES = 16_983
 
 
 def _module_names() -> set[str]:

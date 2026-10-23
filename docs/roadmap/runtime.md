@@ -29,10 +29,10 @@ v2 trace remains the production read path and M2 is not started. Evidence:
 `tests/test_ledger.py`, `tests/test_ledger_baseline.py`, `tests/test_kernel_appender.py`,
 `tests/test_trace_appender.py`, `tests/test_architecture.py`, `tests/test_control_metrics.py`; the
 frozen decision is [ADR 0002](../adr/0002-incremental-causal-kernel.md). Verification at this stage:
-the focused kernel/architecture matrix passed 40 tests in 2.98s; the full suite passed 523 tests in
-34.67s with one existing Starlette/httpx deprecation warning; `ruff check .` and `git diff --check`
-were clean. The 10,000-event baseline measured 745.783 appended events/s (13,408.721ms append),
-177.522ms verification, 182.759ms projection and a 4,304,896-byte ledger. M1 remains shadow and M2
+the focused kernel/architecture matrix passed 50 tests in 3.92s; the full suite passed 533 tests in
+32.39s with one existing Starlette/httpx deprecation warning; `ruff check .` and `git diff --check`
+were clean. The 10,000-event baseline measured 866.330 appended events/s (11,542.951ms append),
+165.376ms verification, 178.002ms projection and a 4,304,896-byte ledger. M1 remains shadow and M2
 has not started.
 
 ### RUN-03 [x] P1 — Event processing and bounded autonomy

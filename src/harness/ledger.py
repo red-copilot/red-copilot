@@ -16,7 +16,7 @@ import tempfile
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -284,7 +284,7 @@ class LedgerStore:
                 records = tuple(self._append_locked(**kwargs) for kwargs in normalized)
                 self._connection.commit()
                 return records
-            except Exception:
+            except BaseException:
                 self._connection.rollback()
                 raise
 
@@ -293,7 +293,9 @@ class LedgerStore:
         run_id = _safe_identifier(event.get("run_id"), "run_id")
         kind = _safe_identifier(event.get("type"), "event type")
         payload_value = event.get("data", {})
-        payload = dict(payload_value) if isinstance(payload_value, Mapping) else {}
+        if not isinstance(payload_value, Mapping):
+            raise TypeError("event data must be an object")
+        payload = dict(payload_value)
         actor = event.get("actor", "harness")
         producer, trust_tier = _producer_and_trust(payload, actor)
         attempt_id = _optional_identifier(payload.get("executor_id")) or _optional_identifier(
@@ -308,7 +310,13 @@ class LedgerStore:
         )
         occurred_at = event.get("ts")
         if not isinstance(occurred_at, str) or not occurred_at:
-            occurred_at = datetime.now(UTC).isoformat()
+            raise ValueError("ts must be a timezone-aware ISO-8601 timestamp")
+        try:
+            parsed_at = datetime.fromisoformat(occurred_at)
+        except ValueError as exc:
+            raise ValueError("ts must be a timezone-aware ISO-8601 timestamp") from exc
+        if parsed_at.tzinfo is None or parsed_at.utcoffset() is None:
+            raise ValueError("ts must be a timezone-aware ISO-8601 timestamp")
         return {
             "event_id": event_id,
             "run_id": run_id,
@@ -359,7 +367,7 @@ class LedgerStore:
                 )
                 self._connection.commit()
                 return record
-            except Exception:
+            except BaseException:
                 self._connection.rollback()
                 raise
 
@@ -555,6 +563,7 @@ def _project_action(record: LedgerRecord, status: str) -> dict[str, Any]:
     payload = record.payload
     action: dict[str, Any] = {
         "tool_call_id": record.correlation_id,
+        "attempt_id": record.attempt_id,
         "status": status,
     }
     tool = payload.get("tool")

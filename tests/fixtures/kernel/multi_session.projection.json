@@ -1,0 +1,55 @@
+{
+  "actions": [
+    {
+      "attempt_id": "exec-a",
+      "status": "running",
+      "tool": "bash",
+      "tool_call_id": "call-a"
+    },
+    {
+      "attempt_id": "exec-a",
+      "status": "succeeded",
+      "tool": "bash",
+      "tool_call_id": "call-a"
+    },
+    {
+      "attempt_id": "exec-b",
+      "status": "running",
+      "tool": "bash",
+      "tool_call_id": "call-b"
+    },
+    {
+      "attempt_id": "exec-b",
+      "status": "failed",
+      "tool": "bash",
+      "tool_call_id": "call-b"
+    }
+  ],
+  "active_actions": {},
+  "budget": {
+    "cost_usd": 0.01,
+    "model_calls": 1,
+    "tokens": 15,
+    "tool_calls": 2
+  },
+  "event_count": 9,
+  "last_action": {
+    "attempt_id": "exec-b",
+    "status": "failed",
+    "tool": "bash",
+    "tool_call_id": "call-b"
+  },
+  "objective_status": null,
+  "run_id": "run-multi",
+  "submissions": {
+    "accepted": 1,
+    "proposed": 1,
+    "rejected": 0
+  },
+  "terminal": {
+    "score": 1.0,
+    "status": "objective_completed",
+    "success": true
+  },
+  "world_revision": 0
+}
