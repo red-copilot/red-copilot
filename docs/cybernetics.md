@@ -74,9 +74,9 @@ Harness 治理外环（Harness 拥有）
 - 外环的输出是 allow/deny、continue/finalize/stop、checkpoint/reconcile 和持久事实，不是
   对 Agent 思维质量的评价。
 
-两层之间存在明确接口：Agent 事件与 submission 是 untrusted input；World Context 是有界事实
-投影；verifier feedback 是授权反馈；budget/deadline 是外部边界；objective verdict 是唯一能
-关闭目标闭环的信号。
+两层之间存在明确接口：Agent 事件与 submission 是 untrusted input；World Context 是有界、
+带来源和信任层的 facts/claims 投影；verifier feedback 是授权反馈；budget/deadline 是外部边界；
+objective verdict 是唯一能关闭目标闭环的信号。
 
 ## 3. 控制模型映射
 
@@ -87,7 +87,7 @@ Harness 治理外环（Harness 拥有）
 | 执行器 / actuator | Pi 工具、模型调用、Gateway 和受控 broker | 仅在 lease、网络、预算和隔离边界内行动。 |
 | 被控对象 / plant | 不可信目标环境、靶机、benchmark instance | 部分可观测、可能对抗、可能产生不可逆副作用。 |
 | 传感器 / sensor | task verifier、docker verifier、benchmark evaluator | 独立产生 observation/evidence/verdict；不是 Agent 自评。 |
-| 估计器 / estimator | World、Progress、Context、trace 投影 | 只从权威事实和有来源的 observation 派生；缺失必须披露。 |
+| 估计器 / estimator | World、Progress、Context、trace 投影 | 可保存权威事实、observation、claim 和诊断信息，但必须保留来源、信任层和缺失状态；不得把 untrusted input 升级为 fact。 |
 | 误差 / feedback | objective status、action outcome、budget remaining、deadline | 不是 LLM 分数；budget/deadline 是边界，不是“进展”。 |
 | 前馈/方向输入 | operator hint、task instructions、policy | 可改变探索方向，不能成为 verdict。 |
 | 扰动 / disturbance | 目标噪声、平台限流、网络故障、恶意输入、模型波动 | 必须分类、记录和失败关闭，不得升级为成功。 |
@@ -110,7 +110,7 @@ C1–C10 是规范性要求。任何新增控制器、steer、stop、retry、cac
 | C1 | 参考值只能由 Task/Harness 设定，Agent 不得改写目标或约束。 | submission 内容、goal.completed 或 notes 改变目标定义。 |
 | C2 | 只有授权 verifier/evaluator 能关闭 objective 闭环。 | Agent 自评、工具成功或 submission accepted 被当作完成。 |
 | C3 | Claim、Observation、Evidence、Verdict 必须保持生产者与信任等级分层。 | 未引用 observation 的文本升级为 evidence 或 verdict。 |
-| C4 | 控制输入必须显式、可观测、可追溯；重复、停滞、上下文长度等内部计数只作诊断。 | 启发式阈值触发 steer/stop，无法解释控制依据。 |
+| C4 | 控制输入必须显式、可观测、可追溯。重复、停滞、未确认进展等启发式计数不得触发 steer/stop；会话长度重启是显式、有上限的生命周期策略，只按记录阈值和事件执行。 | 启发式阈值触发 steer/stop；或会话重启越过阈值/上限，且被当作进展、认知建议或成功信号。 |
 | C5 | 停止必须有外部边界，不能由 Harness 猜测何时应该结束。 | 无进展或多次失败后 Harness 自行宣告停止。 |
 | C6 | dispatched/in-flight 不等于完成；unknown 副作用不得自动重放。 | 超时后重发动作，造成重复提交或重复破坏。 |
 | C7 | World/Context 估计必须有界、有来源、可重建；知识缺失必须显式披露。 | 漂移投影被当作真相，或缺失信息被静默省略。 |
@@ -123,18 +123,18 @@ C1–C10 是规范性要求。任何新增控制器、steer、stop、retry、cac
 证据等级沿用 [first-principles.md](first-principles.md) 的 E0–E4。下表只记录当前仓库中能够复核
 的证据；“未验证”不是缺陷豁免，而是下一次设计或评测的输入。
 
-| ID | 当前强制点 | 现有证据 | 等级与缺口 |
-| --- | --- | --- | --- |
-| C1 | `src/harness/progress.py`、`src/harness/solver_loop.py` | `tests/test_control_properties.py`：Agent events 不能改写 active goal；progress updates 不能完成目标。 | E1；没有跨进程/跨会话的 setpoint 改写负面测试。 |
-| C2 | `src/harness/verification.py`、`src/harness/runtime/evidence.py` | `tests/test_control_properties.py` 的 claim/tool exit/forged authority 测试；`tests/test_verification_evidence.py` 的不可用 evaluator 测试。 | E1；真实 verifier/evaluator 复跑仍待验证。 |
-| C3 | `src/harness/session.py`、`src/harness/progress.py`、`src/harness/runtime/evidence.py` | `tests/test_control_properties.py` 的 unreferenced signal 与 in-flight action 测试；`tests/test_verification_evidence.py` 的 evidence 引用测试。 | E1；Observation 到 Action 的完整因果绑定仍待加强。 |
-| C4 | `src/harness/solver_policy.py`、`src/harness/solver_loop.py`、`src/harness/pi_container.py` | `tests/test_control_properties.py` 的内部 stall counter 测试；`tests/test_solver_loop.py` 的 steer 白名单测试。 | E1；没有端到端验证所有环境下的控制输入来源。 |
-| C5 | `src/harness/solver_policy.py` | `tests/test_control_properties.py`、`tests/test_control_law_properties.py`：稳态继续、零预算停止、非有限输入失败关闭。 | E1；真实运行中的 deadline/多预算组合仍需故障注入。 |
-| C6 | `src/harness/kernel/action.py`、`src/harness/runtime/checkpoint.py` | `tests/test_kernel_action.py`、`tests/test_checkpoint.py`：重复接纳、未知动作、重开、显式对账、旧 lease 拒绝。 | E1/E2（局部故障注入）；缺 Docker-backed 五窗口崩溃矩阵。 |
-| C7 | `src/harness/world/`、`src/harness/world/context.py` | `tests/test_world_context.py`、`tests/test_sqlite_world.py`：确定性投影、来源、边界和 replay。 | E1/E2 局部；World/Context/Progress/Checkpoint/Result 的账本重建未完成。 |
-| C8 | `src/harness/kernel/action.py`、`src/harness/pi_container.py`、`src/harness/gateway.py` | `tests/test_architecture.py`、`tests/test_container_boundary.py`、`tests/test_network_policy.py`、`tests/test_kernel_action.py`。 | E0/E1；Docker/Pi 真实环境路径依赖本机能力，CI 之外仍需显式运行。 |
-| C9 | `src/harness/runtime/evidence.py`、`src/harness/runtime/lifecycle.py` | `tests/test_verification_evidence.py`、`tests/test_checkpoint.py` 的 unavailable/失败关闭路径。 | E1；没有真实 TSec sweep 和 evaluator 复跑证据。 |
-| C10 | `src/harness/solver_policy.py`、`src/harness/solver_loop.py`、`src/harness/pi_container.py` | `tests/test_architecture.py` 的 DELETE/CONTROL_SPINE 防线；`tests/test_solver_loop.py` 的 steer 白名单。 | E0/E1；架构边界有测试，认知层是否被模型正确使用仍需真实行为评测。 |
+| ID | 当前强制点 | 正向证据 | 负向/故障证据 | 等级与缺口 |
+| --- | --- | --- | --- | --- |
+| C1 | `src/harness/progress.py`、`src/harness/solver_loop.py` | `tests/test_control_properties.py::test_agent_claims_and_tool_exits_cannot_complete_the_reference`：授权 verdict 可以完成目标。 | 同名文件的 `test_agent_events_cannot_rewrite_the_reference` 和 `test_forged_verifier_authority_cannot_complete_the_reference`。 | E1；没有跨进程/跨会话的 setpoint 改写负面测试。 |
+| C2 | `src/harness/verification.py`、`src/harness/runtime/evidence.py` | `tests/test_verification_evidence.py::test_local_and_benchmark_evaluators_share_objective_verdict_contract`；`test_objective_verdict_has_content_addressed_redacted_evidence`。 | `test_agent_claims_and_tool_exits_cannot_complete_the_reference`；`test_forged_verifier_authority_cannot_complete_the_reference`；`test_unavailable_verifier_outcome_is_durable_and_never_completes_goal`。 | E1；真实 verifier/evaluator 复跑仍待验证。 |
+| C3 | `src/harness/session.py`、`src/harness/progress.py`、`src/harness/runtime/evidence.py` | `tests/test_verification_evidence.py::test_objective_verdict_has_content_addressed_redacted_evidence`；`tests/test_solver_loop.py::test_solver_loop_applies_aci_updates_world_without_action_id_verdict`。 | `tests/test_control_properties.py::test_unreferenced_signals_stay_claims_and_tool_exits_are_not_progress`；`test_in_flight_action_is_not_completion_before_a_verdict`。 | E1；Observation 到 Action 的完整因果绑定仍待加强。 |
+| C4 | `src/harness/solver_policy.py`、`src/harness/solver_loop.py`、`src/harness/progress.py`、`src/harness/pi_container.py` | `tests/test_solver_loop.py::test_pi_steer_whitelist_contains_only_external_or_verdict_signals`；`test_context_restart_uses_the_tool_call_count_trigger`；`test_solver_loop_steers_for_a_missing_submission_once_past_halfway`。 | `tests/test_control_properties.py::test_internal_stall_counters_do_not_decide_whether_to_stop`；`tests/test_solver_loop.py::test_heuristic_steers_are_not_delivered`；`test_a_blocking_command_is_traced_without_steering`。 | E1；会话重启是显式生命周期策略，但缺系统级阈值/延迟评估。 |
+| C5 | `src/harness/solver_policy.py` | `tests/test_control_properties.py::test_only_zero_remaining_budget_stops_the_loop`；`tests/test_control_law_properties.py::test_decision_is_total_deterministic_and_stops_only_at_zero_budget`。 | `tests/test_control_properties.py::test_a_steady_loop_only_continues`；`test_internal_stall_counters_do_not_decide_whether_to_stop`；`tests/test_control_law_properties.py::test_invalid_control_inputs_fail_closed`。 | E1；真实 deadline/多预算组合仍需故障注入。 |
+| C6 | `src/harness/kernel/action.py`、`src/harness/runtime/checkpoint.py` | `tests/test_checkpoint.py::test_pending_action_reconciliation_is_explicit_and_idempotent`；`tests/test_kernel_action.py::test_authoritative_admission_reserves_before_dispatch_and_settles`。 | `tests/test_checkpoint.py::test_recovery_refuses_unresolved_actions`；`tests/test_kernel_action.py::test_unknown_action_and_scope_are_not_re_admitted`；`test_stale_lease_and_disallowed_effect_are_rejected`。 | E1；有单进程 reopen/fault-injection，缺 Docker-backed 五窗口崩溃矩阵。 |
+| C7 | `src/harness/world/`、`src/harness/world/context.py` | `tests/test_sqlite_world.py::test_sqlite_world_repository_is_transactional_and_reopenable`；`test_sqlite_world_periodic_snapshot_flush_and_backup_restore`；`tests/test_world_context.py::test_ruled_out_hypotheses_are_rendered`。 | `tests/test_world_context.py::test_agent_authored_negatives_are_not_rendered_as_ruled_out`；`test_ruled_out_section_is_bounded_and_reports_omissions`；`test_bookkeeping_does_not_crowd_out_semantic_findings`。 | E1；World/Context/Progress/Checkpoint/Result 的账本重建未完成。 |
+| C8 | `src/harness/kernel/action.py`、`src/harness/pi_container.py`、`src/harness/gateway.py` | `tests/test_architecture.py::test_internal_module_dependency_direction`；`tests/test_network_policy.py::test_target_only_requires_and_uses_internal_environment_network`；`tests/test_kernel_action.py::test_authoritative_admission_reserves_before_dispatch_and_settles`。 | `tests/test_container_boundary.py::test_pi_container_cannot_reach_harness_state_secrets_or_host_network`；`tests/test_network_policy.py::test_target_only_fails_closed_on_non_internal_network`；`tests/test_kernel_action.py::test_forged_lease_effects_and_stale_dispatch_are_rejected`。 | E1；Docker/Pi 真实环境路径依赖本机能力，CI 之外仍需显式运行。 |
+| C9 | `src/harness/runtime/evidence.py`、`src/harness/runtime/lifecycle.py` | `tests/test_verification_evidence.py::test_objective_verdict_has_content_addressed_redacted_evidence`；`tests/test_checkpoint.py::test_checkpoint_save_failure_keeps_previous_record`。 | `tests/test_verification_evidence.py::test_unavailable_verifier_outcome_is_durable_and_never_completes_goal`；`test_objective_evidence_fails_closed_on_symlink_directory`；`tests/test_checkpoint.py::test_checkpoint_disk_full_during_sync_preserves_previous_record`。 | E1；没有真实 TSec sweep 和 evaluator 复跑证据。 |
+| C10 | `src/harness/solver_policy.py`、`src/harness/solver_loop.py`、`src/harness/pi_container.py` | `tests/test_solver_loop.py::test_solver_loop_uses_typed_trusted_action_verdict`；`tests/test_architecture.py::test_control_spine_import_closure_is_frozen`。 | `tests/test_solver_loop.py::test_solver_loop_never_echoes_world_changes_as_steers`；`test_heuristic_steers_are_not_delivered`；`tests/test_architecture.py::test_removed_subsystems_are_absent_from_the_package`。 | E1；认知层是否被模型正确使用仍需真实行为评测。 |
 
 ### 5.1 证据等级的含义
 

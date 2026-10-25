@@ -352,7 +352,7 @@ The current architecture and pruning rationale are documented in [`docs/agent-ar
 4. **Done:** Docker Verifier sandbox and host Gateway support.
 5. **Done:** Docker runtime profiles.
 6. **Done:** first-class Pi RPC adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
-7. **Done:** control-spine simplification (open-loop subsystems removed, single feedback loop).
+7. **Done:** control-spine simplification (open-loop subsystems removed, single control spine).
 8. **Done:** dead-contract removal and duplicate-path consolidation (Firecracker stub, file world store, unreferenced schemas removed; single Docker command builder, usage accounting and TSec path).
 9. Containerized Pi adapter hardening and snapshot pooling.
 10. **Done:** repository slimming (production-unreachable modules and orphaned fixtures removed, stale design docs consolidated with [`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md), roadmap trimmed to item definitions, redundant tests cut).

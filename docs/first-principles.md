@@ -215,7 +215,7 @@ benchmark、多 trial 和 trace 复核。
 | I3 | unknown 不自动重放 | 重复提交、重复破坏、重复计费 | 五个崩溃窗口故障注入 |
 | I4 | 信任不升级 | Agent 文本或工具退出码变成 verified | 伪造 producer/跨 run evidence 负面测试 |
 | I5 | 投影可重建 | 删除派生文件后无法恢复视图 | 删除投影后从权威事实重建 |
-| I6 | 控制律不含认知 | 重复命令、无进展、上下文长度触发 steer/stop | 反例测试：诊断指标不能改变控制决策 |
+| I6 | 控制律不含认知 | 重复/无进展启发式触发 steer/stop；会话重启越过显式阈值或上限 | 反例测试：诊断指标不能改变控制决策；上下文重启边界测试 |
 | I7 | 适配器不拥有真相 | Pi/TSec/Docker 直接决定 Run 成功 | adapter contract 与 architecture test |
 | I8 | 失败关闭 | 隔离不可用、schema 错误、证据缺失时继续运行 | 不可用/损坏输入测试 |
 | I9 | Agent 容器不能写权威状态 | Agent 可改 world/result/evidence/credentials | 挂载、权限与路径边界测试 |
@@ -252,7 +252,8 @@ Harness 治理外环（Harness 拥有）:
 - 内环负责探索、推理、选择工具和处理工具结果；Harness 不观察或规定每个认知步骤。
 - 外环负责接纳、拒绝、预算、隔离、记录、恢复和终止，不替 Agent 生成下一步计划。
 - Harness 只根据 deadline、预算、lease、operator cancel、objective verdict 和 unsafe unknown
-  等显式可判定条件控制；重复、停滞或上下文长度等内部计数只作诊断。
+  等显式可判定条件控制；重复和停滞等启发式计数只作诊断。会话长度重启只能作为有记录、有上限的
+  显式生命周期策略，不能作为进展、认知建议或成功证据。
 - 验证器/evaluator 是独立传感器，只有它能关闭 objective 闭环；工具成功、Agent 自述和
   submission accepted 都不是 goal verdict。
 - 完整模型、C1–C10 不变量和证据缺口见 [cybernetics.md](cybernetics.md)。
@@ -366,7 +367,7 @@ Harness 治理外环（Harness 拥有）:
 
 - Harness 侧 planner、DAG、技能排序或角色扮演；
 - 把 Agent 自评、置信度或工具 exit code 当目标证据；
-- 用“重复命令”“无进展”“上下文长度”自动 steer；
+- 用“重复命令”“无进展”推断策略并自动 steer；把有界的上下文重启当作进展、策略建议或成功信号；
 - 崩溃后重发未知外部副作用；
 - submission accepted 直接当 objective verified；
 - 把 raw tool output 无限写入 context；
