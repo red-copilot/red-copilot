@@ -665,6 +665,123 @@ class ActionAuthority:
         )
         self._append_events([event])
 
+    @staticmethod
+    def _unknown_severity(action: _ActionState) -> UnknownSeverity:
+        if action.effect_class == "observation_effect":
+            return "retryable_observation"
+        if action.effect_class == "model_effect":
+            return "cost_uncertain"
+        if action.effect_class == "brokered_effect":
+            return "unsafe_side_effect"
+        return "unsafe_side_effect" if action.side_effect else "retryable_observation"
+
+    def mark_unknown(self, action_id: str, reason: str) -> UnknownSeverity:
+        action = self._require_action(action_id)
+        if action.unknown_severity is not None and action.reconciled_outcome in {None, "unknown"}:
+            return action.unknown_severity
+        if action.settlement != "held":
+            raise AuthorityError("unknown transition requires a held reservation")
+        if not action.dispatched:
+            raise AuthorityError("only dispatched actions can become unknown")
+        severity = self._unknown_severity(action)
+        event = self._event(
+            "action.unknown",
+            {
+                "schema_version": "harness/action/v1",
+                "action_id": action_id,
+                "severity": severity,
+                "reason": _sanitize_reason(reason),
+            },
+            event_id=_event_id("action.unknown", action_id),
+            action_id=action_id,
+            attempt_id=action.attempt_id,
+        )
+        self._append_events([event])
+        return severity
+
+    def reconcile(
+        self,
+        action_id: str,
+        outcome: Literal["succeeded", "failed", "unknown"],
+        actual: BudgetAmounts | None = None,
+    ) -> None:
+        action = self._require_action(action_id)
+        if action.unknown_severity is None:
+            raise AuthorityError("only unknown actions can be reconciled")
+        if action.reconciled_outcome == outcome:
+            return
+        if (
+            action.reconciled_outcome in {"succeeded", "failed"}
+            or action.settlement in {"settled", "released"}
+        ):
+            raise AuthorityError("action reconciliation is already terminal")
+        if outcome == "unknown":
+            event = self._event(
+                "action.reconciled",
+                {
+                    "schema_version": "harness/action/v1",
+                    "action_id": action_id,
+                    "outcome": "unknown",
+                },
+                event_id=_event_id("action.reconciled", f"{action_id}\0{outcome}"),
+                action_id=action_id,
+                attempt_id=action.attempt_id,
+            )
+            self._append_events([event])
+            return
+        if outcome == "succeeded":
+            charged = actual or action.reservation
+            reconciled = self._event(
+                "action.reconciled",
+                {
+                    "schema_version": "harness/action/v1",
+                    "action_id": action_id,
+                    "outcome": "succeeded",
+                },
+                event_id=_event_id("action.reconciled", f"{action_id}\0{outcome}"),
+                action_id=action_id,
+                attempt_id=action.attempt_id,
+            )
+            settled = self._event(
+                "budget.settled",
+                {
+                    "schema_version": "harness/budget-reservation/v1",
+                    "action_id": action_id,
+                    "reservation_id": action.reservation_id,
+                    "actual": charged.model_dump(),
+                    "over_reservation": charged.exceeds(action.reservation),
+                },
+                event_id=_event_id("budget.settled", action_id),
+                action_id=action_id,
+                attempt_id=action.attempt_id,
+            )
+            self._append_events([reconciled, settled])
+            return
+        reconciled = self._event(
+            "action.reconciled",
+            {
+                "schema_version": "harness/action/v1",
+                "action_id": action_id,
+                "outcome": "failed",
+            },
+            event_id=_event_id("action.reconciled", f"{action_id}\0{outcome}"),
+            action_id=action_id,
+            attempt_id=action.attempt_id,
+        )
+        released = self._event(
+            "budget.released",
+            {
+                "schema_version": "harness/budget-reservation/v1",
+                "action_id": action_id,
+                "reservation_id": action.reservation_id,
+                "reason": "reconciled-failed",
+            },
+            event_id=_event_id("budget.released", action_id),
+            action_id=action_id,
+            attempt_id=action.attempt_id,
+        )
+        self._append_events([reconciled, released])
+
     def snapshot(self) -> AuthoritySnapshot:
         if self._replay_error is not None and self.mode == "authoritative":
             raise AuthorityUnavailable("authoritative ledger replay is unavailable")
