@@ -1,15 +1,31 @@
 # Red Harness 第一性原理
 
-> 状态：工程基线。日期：2026-10-24。本文不是产品宣传，也不是当前实现的完成证明；它用于在
+> 状态：工程基线。日期：2026-10-25。本文不是产品宣传，也不是当前实现的完成证明；它用于在
 > 设计评审、重构、评测和故障复盘中裁决“什么该由 Harness 做、什么必须由 Agent 做、什么根本
-> 不该做”。
+> 不该做”。控制闭环的规范性模型、证据矩阵和当前缺口见
+> [cybernetics.md](cybernetics.md)。
 
 ## 0. 一句话
 
 **Red Harness 是一个受控、可审计、可评测的安全智能体运行时：Agent 在有限权限和有限资源下
 探索不可信环境，Harness 负责隔离、授权、因果记录、恢复和独立验证，而不是替 Agent 思考。**
 
-## 1. 方法论与来源
+用控制论表述：**Agent 拥有认知内环，Harness 治理执行与验证外环。** 内环可以自主观察、推理和
+行动；外环只依据显式权限、预算、证据、裁决和故障状态执行接纳、拒绝、停止与恢复。
+
+## 1. 规范地位、方法与来源
+
+### 1.1 两篇规范的分工
+
+- [first-principles.md](first-principles.md) 回答“为什么存在、哪些事实和权限不可让渡、做什么与
+  不做什么”。它是项目的第一性原理总纲。
+- [cybernetics.md](cybernetics.md) 回答“闭环由哪些角色构成、哪些控制不变量必须成立、现有实现
+  有什么证据、哪里仍是缺口”。它是控制语义与架构评审基线。
+- 两篇文档冲突时，先按“事实权威、职责边界、控制安全”的顺序裁决并修正文档，不允许实现侧静默
+  选择更宽松的解释。
+- 代码、测试、trace、recovery 记录和真实评测才是实现证据；文档只规定目标与验收口径。
+
+### 1.2 推导方式
 
 本文采用“前提 -> 不变量 -> 架构 -> 验收证据”的推导方式：
 
@@ -19,22 +35,45 @@
 4. 用负面测试、故障注入、回放和真实评测证明机制成立；
 5. 模型能力、平台约束或运行数据变化后，重新审视并删除不再承重的复杂度。
 
-主要经验来源：
+### 1.3 来源使用规则
 
-- [Anthropic Engineering](https://www.anthropic.com/engineering)；
-- [Building effective agents](https://www.anthropic.com/research/building-effective-agents)：
-  先用最简单的方案，只有能证明改善结果时才增加复杂度；
-- [Effective context engineering for AI agents](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents)：
-  context 是有限注意力预算，应保留最小的高信号集合，并用结构化工件跨越上下文窗口；
-- [Effective harnesses for long-running agents](https://www.anthropic.com/research/effective-harnesses-for-long-running-agents)：
-  长周期任务需要增量推进、进度工件、可恢复环境、端到端自检和干净交接；
-- [Harness design for long-running application development](https://www.anthropic.com/research/harness-design-long-running-apps)：
-  harness 组件是对“模型当前做不到什么”的假设，模型升级后要重新压力测试并删除过时假设；
-- [Demystifying evals for AI agents](https://www.anthropic.com/research/demystifying-evals-for-ai-agents)：
-  agent 评测需要真实任务、trial、grader、transcript、outcome，以及多种评测层组合。
+外部工程资料只用于提出假设、暴露失败模式和设计对照，不能直接产生本项目的不变量。任何借用都
+必须同时回答：
 
-这些文章是经验材料，不是认证标准。Red Harness 面向不可信安全目标和外部副作用，不能机械复制
-面向应用生成的 harness 结构。
+1. 它补偿的是哪个可观察到的本地失败模式？
+2. 它属于 Agent 认知、Harness 治理、验证权威还是 benchmark 适配？
+3. 它由什么确定性机制强制，正反测试在哪里？
+4. 它引入什么新信任边界、延迟、成本或开放回路？
+5. 什么证据能证明它有效，模型或平台变化后何时删除？
+
+优先级固定为：本地失败模式与不可让渡边界 > 可复核的工程经验 > 通用架构模式。没有本地证据的
+外部经验只能写成假设或试验项，不能写成“已实现”或项目原则。
+
+### 1.4 来源卡
+
+所有来源访问日期均为 **2026-10-25**。Anthropic 与 OpenAI 的文章受各自版权约束，这里只记录
+必要短引文或中文释义；GitHub 仓库按其 MIT 许可引用，并固定到记录版本。这里不逐项盘点
+35 个 agentic 模式，只提炼能够被本项目失败模式检验的原则。索引来源为
+[Anthropic Engineering](https://www.anthropic.com/engineering) 和
+[OpenAI Engineering](https://openai.com/news/engineering/)。
+
+| ID | 来源与版本 | 关键提取 | 采用边界与裁决 |
+| --- | --- | --- | --- |
+| A1 | [Anthropic: Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) | 先寻找最简单可工作的方案，只有证据要求时才增加复杂度。 | 采用为复杂度准入和删除规则的来源；不把文章中的 workflow 结构直接搬进 kernel。 |
+| A2 | [Anthropic: Effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) | context 是有限注意力预算，应保留最小的高信号集合，并用结构化工件跨窗口。 | 采用到 World Context 的有界投影；Agent 仍拥有笔记和推理，Harness 不生成计划。 |
+| A3 | [Anthropic: Effective harnesses for long-running agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents) | 长任务依赖增量进度、可恢复环境、自检和清晰交接，而不是无限对话历史。 | 采用到 checkpoint、context restart、summary 和恢复协议；真实长任务效果仍待评测。 |
+| A4 | [Anthropic: Harness design for long-running application development](https://www.anthropic.com/engineering/harness-design-long-running-apps) | harness 组件是针对当前模型不足的假设，模型升级后应重新测试并可删除。 | 采用为“复杂度必须支付租金”；不能把应用生成类 harness 结构当成安全运行时模板。 |
+| A5 | [Anthropic: Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) | agent 评测需要真实任务、trial、grader、transcript 与 outcome，并区分过程观察和最终结果。 | 采用到证据分级；单元测试不能替代真实 agent 效果。 |
+| A6 | [Anthropic: Making Claude Code safer with sandboxing](https://www.anthropic.com/engineering/claude-code-sandboxing) | 文件系统与网络边界应由操作系统和运行时强制，而不是只靠提示或审批文案。 | 采用为 Actuator 隔离原则；具体 macOS/Linux 机制不照搬，Red Harness 使用自己的 Docker/verifier 边界。 |
+| A7 | [Anthropic: Writing effective tools for AI agents](https://www.anthropic.com/engineering/writing-tools-for-agents) | 工具应围绕 agent 的真实工作设计、评测并持续收敛，而不是按数量扩张。 | 采用为工具面最小化；工具选择属于 Agent，授权和副作用边界属于 Harness。 |
+| O1 | [OpenAI: Harness engineering](https://openai.com/index/harness-engineering/) | “Humans steer. Agents execute.” 工程重点是环境、意图和反馈回路，而不是替 agent 写每一步。 | 采用“环境/反馈回路是工程对象”；不采用“零人工代码”作为项目目标或通用效果承诺。 |
+| O2 | [OpenAI: Unrolling the Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/) | agent loop 在模型推理、工具调用和上下文压缩之间循环；最终消息只是内环终止信号。 | 采用为 Agent 内环与上下文管理证据；内环终止不升级为 objective verified。 |
+| O3 | [OpenAI: Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/) | 稳定的 harness 协议需要线程生命周期、持久化、配置、认证和工具执行的一致边界。 | 采用为能力分层与协议稳定性要求；不因复用 App Server 结构而把 Pi 替换成 Codex。 |
+| O4 | [OpenAI: Building a safe, effective sandbox for Codex on Windows](https://openai.com/index/building-codex-windows-sandbox/) | 沙箱限制应由 OS 传播到整个进程树，不能依赖 agent 自觉遵守。 | 采用为执行边界；平台实现和权限模型按 Red Harness 的 Docker 威胁模型独立验证。 |
+| G1 | [FareedKhan-dev/all-agentic-architectures @ cf9d620](https://github.com/FareedKhan-dev/all-agentic-architectures/tree/cf9d620a8cc55d59589399c30f305e6dfaa428ec)（MIT） | deterministic picker、PEV、dry-run、memory 和 multi-agent 可用于区分“确定性授权门”与“Agent 自身认知”。 | 仅采用原则：类型化特征可由 Python 组合成授权门，LLM 分数不能成为目标结论；planner、反思、搜索、记忆和角色编排留在 Agent 侧。 |
+
+这些材料不是认证标准。尤其不能把 OpenAI 的内部工程约束、Anthropic 的长期任务经验或
+all-agentic-architectures 的模式成功率直接外推为 Red Harness 的效果证据。
 
 ## 2. 项目目标
 
@@ -197,19 +236,26 @@ benchmark、多 trial 和 trace 复核。
 
 ## 6. 架构映射
 
-### 6.1 控制闭环
+### 6.1 两层控制闭环
 
 ```text
-objective -> agent action -> isolated environment -> observation
-    ^                                                   |
-    |                                                   v
-    +---------- bounded control law <- evidence/verdict-+
+Agent 认知内环（Agent 拥有）:
+  context/observation -> Pi reasoning -> action -> tool/model -> observation
+
+Harness 治理外环（Harness 拥有）:
+  reference/constraints -> admission/lease/budget -> dispatch
+      ^                                                   |
+      |                                                   v
+  verdict/bounds/recovery <- evidence <- independent sensor <-
 ```
 
-- Agent 负责选择下一步；
+- 内环负责探索、推理、选择工具和处理工具结果；Harness 不观察或规定每个认知步骤。
+- 外环负责接纳、拒绝、预算、隔离、记录、恢复和终止，不替 Agent 生成下一步计划。
 - Harness 只根据 deadline、预算、lease、operator cancel、objective verdict 和 unsafe unknown
-  等外部可判定条件控制；
-- 验证器/evaluator 独立判定目标。
+  等显式可判定条件控制；重复、停滞或上下文长度等内部计数只作诊断。
+- 验证器/evaluator 是独立传感器，只有它能关闭 objective 闭环；工具成功、Agent 自述和
+  submission accepted 都不是 goal verdict。
+- 完整模型、C1–C10 不变量和证据缺口见 [cybernetics.md](cybernetics.md)。
 
 ### 6.2 认知层
 
@@ -312,6 +358,9 @@ objective -> agent action -> isolated environment -> observation
 - **删除优先于叠加。** 保留每个组件的成本很高；能被模型或更简单机制替代的组件应退休。
 - **局部实验优先于大爆炸迁移。** 用 shadow、feature flag、fallback 和逐阶段删除条件。
 - **失败关闭优先于可用性。** 隔离、证据或账本不可用时，不得猜测成功。
+- **先指明闭环，再添加机制。** 任何控制相关变更都必须说明参考值、传感器、执行器、估计器、
+  扰动、延迟、停止条件和它属于 Agent 内环还是 Harness 外环。
+- **外部经验只能提出假设。** 来源中的成功率、架构名称和模式数量不是 Red Harness 的验收证据。
 
 ## 10. 反模式
 
@@ -326,7 +375,11 @@ objective -> agent action -> isolated environment -> observation
 - 只有一个巨大 YAML/prompt 而没有测试、回放和删除条件；
 - 宣称哈希链能证明恶意宿主不可篡改；
 - 宣称同一 prompt 必然产生相同 LLM 行为；
-- 用单元测试通过代替真实 agent 效果评估。
+- 用单元测试通过代替真实 agent 效果评估；
+- 把 Agent 的反思、规划、搜索或多 Agent 编排搬进 Harness，或反过来让 Harness 用启发式信号
+  驱动 Agent 的下一步认知；
+- 把 deterministic picker 扩展成给 Agent 打“质量分”或构造 reward，而不是把它限制在授权门和
+  目标结论等确定性边界上。
 
 ## 11. 重新审视原则的触发器
 
@@ -352,6 +405,7 @@ objective -> agent action -> isolated environment -> observation
 - [ ] 是否跑了真实 eval 或多 trial？如果没有，为什么？
 - [ ] 组件收益、成本和删除条件是什么？
 - [ ] 文档是否区分“已实现”“已验证”和“待验证”？
+- [ ] 它属于 Agent 内环还是 Harness 外环？对应 C1–C10 中哪些不变量和证据？
 
 ## 13. 当前应用与证据缺口
 
@@ -363,7 +417,7 @@ objective -> agent action -> isolated environment -> observation
 
 - 真实 TSec sweep 和最终 evaluator 复跑；
 - Docker-backed 五窗口崩溃矩阵；
-- action admission、预算预留与 unknown reconciliation；
+- action admission、预算预留与 unknown reconciliation 的端到端整合证据；
 - Observation 到 action 的显式因果绑定；
 - World/Context/Progress/Checkpoint/Result 的账本重建；
 - 多 trial 方差与基础设施噪声分析。
@@ -371,7 +425,7 @@ objective -> agent action -> isolated environment -> observation
 在这些证据完成前：
 
 - 不能说 v3 已成为生产架构；
-- 不能把 533 个通过的测试等同于 agent 效果已提升；
+- 不能把本地测试全绿等同于 agent 效果已提升；
 - 不能声称 shell 动作可逐命令前置验证；
 - 不能把 unknown 自动重试包装成可靠性。
 

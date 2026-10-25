@@ -10,7 +10,8 @@
 >
 > **工程原则：** 智能体负责认知与决策；Harness 负责受控执行、状态、恢复与验证边界。
 >
-> [First principles](docs/first-principles.md) · [第一性原理](docs/first-principles.md)
+> [First principles](docs/first-principles.md) · [第一性原理](docs/first-principles.md) ·
+> [Cybernetics](docs/cybernetics.md) · [控制论](docs/cybernetics.md)
 
 <p>
   <a href="https://github.com/red-copilot/red-copilot">Python Runtime</a> ·
@@ -184,18 +185,23 @@ authenticate their sources or independently prove task success.
 
 ## Control Loop · 控制闭环
 
-Red Harness keeps a single closed feedback loop:
+Red Harness keeps one control spine with two nested loops. The Agent owns the cognitive inner loop;
+the Harness owns the governance outer loop:
 
 ```
-reference (task / TSec objective) -> error -> controller
-   (solver_policy + Pi) -> actuator (tools) -> plant (target)
-   -> sensor (verifier / benchmark evaluator) -> estimator (world/) -> error
+Agent inner: observation/context -> Pi reasoning -> action -> tool/model -> observation
+
+Harness outer: reference/constraints -> admission/lease/budget -> dispatch
+   -> actuator -> plant -> independent sensor -> evidence/verdict
+   -> continue / finalize / deny / stop / recover
 ```
 
-Only the verifier can close the loop: agent claims and tool exit codes are recorded
-as claims, not evidence. Open-loop subsystems (control plane, queue, worker,
-coordination blackboard, OTLP export, scoring, suite, evaluation, benchmark
-registry) were removed to keep the loop minimal. See
+Only an authorized verifier/evaluator can close the objective loop: agent claims and tool exit codes
+are recorded as claims, not evidence. Harness control reads explicit bounds and verdicts, never
+inferred progress from repetition or context length. Open-loop subsystems (control plane, queue,
+worker, coordination blackboard, OTLP export, scoring, suite, evaluation, benchmark registry) were
+removed to keep the loop minimal. See
+[`docs/cybernetics.md`](docs/cybernetics.md) for the control model and invariant evidence,
 [`docs/agent-architecture-v2.md`](docs/agent-architecture-v2.md) for the design and the
 pruning rationale, and [`docs/agent-engineering.md`](docs/agent-engineering.md) for the
 agent-side engineering plan.
@@ -314,17 +320,16 @@ For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
 ## Architecture · 架构
 
 ```text
-        reference (task / TSec objective)
-                 │
-                 ▼
-        error  ──────────────►  controller
-          ▲                  solver_policy + Pi
-          │                            │
-          │                            ▼
-       estimator ◄── sensor ◄── plant ◄── actuator
-        world/     verifier    target    Pi tools
+Agent cognitive inner loop (Agent-owned)
+  observation/context -> Pi -> tool/model -> environment -> observation
 
-        only the sensor (verifier / evaluator) may close the loop
+Harness governance outer loop (Harness-owned)
+  reference/constraints -> admission/lease/budget -> dispatch
+      ^                                                   |
+      |                                                   v
+  control decision <- evidence/verdict <- independent sensor <- actuator/plant
+
+  only the independent verifier/evaluator may close the objective loop
 ```
 
 World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). Reusable technique metadata uses `harness/skill/v1`; skills describe state preconditions and possible outcomes but are not executable code. The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
