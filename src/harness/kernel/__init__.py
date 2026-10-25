@@ -1,5 +1,41 @@
-"""Causal kernel ports used by the Harness control spine."""
+"""Causal kernel ports and action authority used by the Harness control spine."""
 
-from .appender import LedgerAppender, SQLiteLedgerAppender
+from .appender import (
+    ActionAuthority,
+    ActionConflict,
+    ActionEffect,
+    ActionIntent,
+    ActionView,
+    Admission,
+    AdmissionDenied,
+    AttemptLease,
+    AuthorityError,
+    AuthorityMode,
+    AuthoritySnapshot,
+    AuthorityUnavailable,
+    BudgetAmounts,
+    LedgerAppender,
+    SQLiteLedgerAppender,
+    UnknownSeverity,
+    action_identity,
+)
 
-__all__ = ["LedgerAppender", "SQLiteLedgerAppender"]
+__all__ = [
+    "ActionAuthority",
+    "ActionConflict",
+    "ActionEffect",
+    "ActionIntent",
+    "ActionView",
+    "Admission",
+    "AdmissionDenied",
+    "AttemptLease",
+    "AuthorityError",
+    "AuthorityMode",
+    "AuthoritySnapshot",
+    "AuthorityUnavailable",
+    "BudgetAmounts",
+    "LedgerAppender",
+    "SQLiteLedgerAppender",
+    "UnknownSeverity",
+    "action_identity",
+]
