@@ -20,6 +20,8 @@ class LedgerAppender(Protocol):
         events: Sequence[Mapping[str, Any]],
     ) -> tuple[LedgerRecord, ...]: ...
 
+    def records(self) -> list[LedgerRecord]: ...
+
     def verify(self) -> None: ...
 
     def close(self) -> None: ...
@@ -40,6 +42,9 @@ class SQLiteLedgerAppender:
         events: Sequence[Mapping[str, Any]],
     ) -> tuple[LedgerRecord, ...]:
         return self._store.append_batch(events)
+
+    def records(self) -> list[LedgerRecord]:
+        return self._store.records()
 
     def verify(self) -> None:
         self._store.verify()

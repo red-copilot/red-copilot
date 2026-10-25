@@ -40,3 +40,15 @@ def test_sqlite_appender_preserves_batch_conflict_semantics(tmp_path) -> None:
 
     appender.verify()
     appender.close()
+
+
+def test_sqlite_appender_exposes_records_in_sequence_order(tmp_path) -> None:
+    appender = SQLiteLedgerAppender(tmp_path / "ledger.db")
+    appender.append_trace_event(_event("evt-1"))
+    appender.append_batch([_event("evt-2"), _event("evt-3")])
+
+    records = appender.records()
+
+    assert [record.ledger_seq for record in records] == [1, 2, 3]
+    assert [record.event_id for record in records] == ["evt-1", "evt-2", "evt-3"]
+    appender.close()
