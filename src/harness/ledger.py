@@ -298,8 +298,10 @@ class LedgerStore:
         payload = dict(payload_value)
         actor = event.get("actor", "harness")
         producer, trust_tier = _producer_and_trust(payload, actor)
-        attempt_id = _optional_identifier(payload.get("executor_id")) or _optional_identifier(
-            payload.get("session_id")
+        attempt_id = (
+            _optional_identifier(payload.get("attempt_id"))
+            or _optional_identifier(payload.get("executor_id"))
+            or _optional_identifier(payload.get("session_id"))
         )
         causation_id = _optional_identifier(event.get("parent_event_id"))
         action_id = _optional_identifier(event.get("action_id"))

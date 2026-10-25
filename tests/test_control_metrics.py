@@ -41,13 +41,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # Re-measured from the tree after final-review fixes: 60 modules / 16,983 source
 # lines.
 #
-# The kernel action-authority foundation adds admission, reservation, dispatch,
-# settlement, unknown severity and reconciliation to the existing appender module
-# without adding a module. Measured after focused kernel tests: 60 modules /
-# 17,805 source lines. The increase is deliberate: it is the first durable
-# enforcement point for unknown side effects and budget reservation.
-MAX_MODULES = 60
-MAX_SRC_LINES = 17_805
+# The kernel action-authority foundation was extracted into a dedicated
+# `harness.kernel.action` module after review: keeping the authority inside the
+# 48-line ledger port mixed the adapter, public models and mutable state machine.
+# Measured after the focused kernel tests: 61 modules / 18,065 source lines. The
+# deliberate +1 module and line increase buy the first durable enforcement point
+# for unknown side effects and budget reservation.
+MAX_MODULES = 61
+MAX_SRC_LINES = 18_065
 
 
 def _module_names() -> set[str]:

@@ -489,10 +489,14 @@ git commit -m "docs(kernel): record action authority evidence"
 - `0114960 feat(kernel): expose append-only records for replay`
 - `58d46f3 feat(kernel): add action admission and budget reservation`
 - `be02303 feat(kernel): reconcile unknown actions without replay`
-- Focused kernel matrix: 47 passed.
-- Architecture/metrics/docs matrix: 16 passed.
-- Full suite: 554 passed, 1 existing Starlette/httpx deprecation warning.
+- Final focused kernel/architecture/metrics/docs matrix: 75 passed.
+- Full suite after the review fix pass: 566 passed, 1 existing Starlette/httpx deprecation warning.
 - `ruff check .` and `git diff --check`: clean.
-- Package remains at 60 modules; source lines re-measured to 17,805. `MAX_SRC_LINES` was raised
-  from 16,983 to 17,805 because this is the first durable action-authority enforcement point.
+- Package is now 61 modules / 18,065 source lines after review extracted the authority into
+  `harness.kernel.action`; `MAX_MODULES` was deliberately raised from 60 to 61 and
+  `MAX_SRC_LINES` from 16,983 to 18,065.
+- Final review fixes: verified replay and strict transition validation, immutable lease effects,
+  stale-dispatch fencing, unknown-scope admission blocking, serialized budget decisions,
+  conflicting-reconcile detection, settle-after-unknown rejection, pending-dispatch recovery and
+  durable action-to-attempt envelopes.
 - No production Gateway/Orchestrator/BenchmarkRunner wiring was added in this slice.
