@@ -21,7 +21,10 @@ are consolidated in [agent-architecture.md](agent-architecture.md) (Chinese).
 
 - `runtime/`: application-level composition, solver initialization, run state.
 - `kernel/`: narrow causal write ports. `LedgerAppender` is the trace-to-ledger seam; kernel code
-  does not import infrastructure adapters or decide Run outcomes.
+  does not import infrastructure adapters or decide Run outcomes. `ActionAuthority` now models
+  durable admission, budget reservation, dispatch, settlement, unknown severity and reconciliation
+  over that same append-only store. It is not yet consumed by Gateway, Orchestrator or
+  BenchmarkRunner; v2 remains the production path.
 - `world/`: domain state, event storage, snapshots, retrieval. No benchmark or HTTP dependencies.
 - `benchmark/`: externally provisioned challenge lifecycle, submissions and adapters.
 - `agent.py`, `session.py`, `pi_*.py`: agent/session integration and infrastructure.

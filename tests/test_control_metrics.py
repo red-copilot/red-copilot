@@ -40,8 +40,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # `harness.kernel` appender port and moves the trace-to-ledger edge behind it.
 # Re-measured from the tree after final-review fixes: 60 modules / 16,983 source
 # lines.
+#
+# The kernel action-authority foundation adds admission, reservation, dispatch,
+# settlement, unknown severity and reconciliation to the existing appender module
+# without adding a module. Measured after focused kernel tests: 60 modules /
+# 17,805 source lines. The increase is deliberate: it is the first durable
+# enforcement point for unknown side effects and budget reservation.
 MAX_MODULES = 60
-MAX_SRC_LINES = 16_983
+MAX_SRC_LINES = 17_805
 
 
 def _module_names() -> set[str]:
