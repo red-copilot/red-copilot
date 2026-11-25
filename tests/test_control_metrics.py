@@ -66,8 +66,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # the cancellation/interrupt unwind path that persists before propagating, the
 # finalization guard, and the truncated-tail trace parser in `orchestrator.py`
 # (+203). Re-measured.
+#
+# QA recovery skew (2026-11-25). B5 added no module. Source lines moved
+# 18,390 -> 18,443: `persist_control_state` (checkpoint then progress) and the
+# one-event progress-ahead recovery contract in `runtime/checkpoint.py` (+53),
+# plus the call-site swaps. Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_390
+MAX_SRC_LINES = 18_443
 
 
 def _module_names() -> set[str]:

@@ -34,7 +34,7 @@ from ..runtime.executors import (
     prepare_shared_findings,
 )
 from ..agent_workspace import seed_notes_from_attempt, sync_agent_workspace
-from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
+from ..runtime.checkpoint import persist_control_state, run_action_owner
 from ..runtime.evidence import persist_objective_verdict
 from ..runtime.lifecycle import RunLifecycle, resolve_run_status
 from ..runtime.projections import finalize_world_goal, network_result, run_summary, world_result
@@ -486,7 +486,7 @@ class BenchmarkRunner:
         async for event in session.events():
             decision = await executor.runtime.loop.process_event(session, event)
             sync_agent_workspace(run_dir=planned.root, workspace=planned.workspace)
-            await save_session_checkpoint(
+            await persist_control_state(
                 run_dir=planned.root,
                 session=session,
                 world_revision=world.snapshot.revision,
@@ -515,7 +515,7 @@ class BenchmarkRunner:
                 if not restarted:
                     await executor.session.close("context-restart-failed")
                     return False
-                await save_session_checkpoint(
+                await persist_control_state(
                     run_dir=planned.root,
                     session=executor.session,
                     world_revision=world.snapshot.revision,
@@ -1008,7 +1008,7 @@ class BenchmarkRunner:
 
             executor.session = await adapter_instance.start_session(run_context)
             try:
-                await save_session_checkpoint(
+                await persist_control_state(
                     run_dir=planned.root,
                     session=executor.session,
                     world_revision=world.snapshot.revision,
@@ -1053,7 +1053,7 @@ class BenchmarkRunner:
                     executor.result = _merge_results(
                         [*executor.retired_results, executor.result]
                     )
-                await save_session_checkpoint(
+                await persist_control_state(
                     run_dir=planned.root,
                     session=executor.session,
                     world_revision=world.snapshot.revision,

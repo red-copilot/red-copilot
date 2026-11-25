@@ -232,18 +232,53 @@ async def save_session_checkpoint(
     return record
 
 
+async def persist_control_state(
+    *,
+    run_dir: Path,
+    session: Any,
+    world_revision: int,
+    progress: Any,
+    budget_used: dict[str, float] | None = None,
+    processed_event_ids: dict[str, str] | None = None,
+) -> RunCheckpoint | None:
+    """Commit the checkpoint, then the progress projection it describes.
+
+    Progress may lead the checkpoint by exactly one event when a crash lands
+    between these two writes; ``load_recovery_state`` accepts that skew and
+    rejects anything larger. The reverse skew fails closed.
+    """
+    record = await save_session_checkpoint(
+        run_dir=run_dir,
+        session=session,
+        world_revision=world_revision,
+        progress=progress,
+        budget_used=budget_used,
+        processed_event_ids=processed_event_ids,
+    )
+    progress.write(run_dir / "progress.json")
+    return record
+
+
 def load_recovery_state(
-    run_dir: Path, *, current_world_revision: int | None = None
+    run_dir: Path,
+    *,
+    current_world_revision: int | None = None,
+    trace: Any | None = None,
 ) -> tuple[RunCheckpoint, Any]:
     """Load one coherent checkpoint/progress view without launching a session."""
     with _reconciliation_lock(run_dir):
         return _load_recovery_state_locked(
-            run_dir, current_world_revision=current_world_revision
+            run_dir,
+            current_world_revision=current_world_revision,
+            trace=trace,
         )
 
 
 def _load_recovery_state_locked(
-    run_dir: Path, *, current_world_revision: int | None
+    run_dir: Path,
+    *,
+    current_world_revision: int | None,
+    trace: Any | None = None,
 ) -> tuple[RunCheckpoint, Any]:
     from ..progress import ProgressLedger
 
@@ -265,13 +300,29 @@ def _load_recovery_state_locked(
         isinstance(ledger.last_action, dict) and ledger.last_action.get("status") == "running"
     ):
         raise RuntimeError("unresolved actions remain in progress ledger")
+    skew = (
+        ledger.event_count - record.progress_event_count
+        if record.progress_event_count is not None
+        else 0
+    )
     if ledger.last_event_id and ledger.last_event_id not in record.processed_event_ids:
-        raise RuntimeError("progress ledger contains events newer than its checkpoint")
-    if (
-        record.progress_event_count is not None
-        and record.progress_event_count != ledger.event_count
-    ):
+        # A crash between the in-loop progress write and the checkpoint commit
+        # leaves exactly the newest event unaccounted for. That is the one
+        # documented window; any wider gap means a different corruption.
+        if skew != 1:
+            raise RuntimeError("progress ledger contains events newer than its checkpoint")
+    if record.progress_event_count is not None and skew not in {0, 1}:
         raise RuntimeError("progress and checkpoint event counts do not match")
+    if skew == 1 and trace is not None:
+        trace.emit(
+            "run.recovery.skew",
+            actor="harness",
+            data={
+                "skew": 1,
+                "checkpoint_event_count": record.progress_event_count,
+                "progress_event_count": ledger.event_count,
+            },
+        )
     return record, ledger
 
 

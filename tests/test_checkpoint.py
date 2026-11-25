@@ -14,10 +14,12 @@ from harness.runtime.checkpoint import (
     FileCheckpointStore,
     RunCheckpoint,
     load_recovery_state,
+    persist_control_state,
     reconcile_pending_actions,
     save_session_checkpoint,
 )
 from harness.session import AgentCheckpoint
+from harness.trace import TraceRecorder
 
 
 def test_checkpoint_roundtrip_and_replace(tmp_path: Path) -> None:
@@ -264,6 +266,130 @@ def test_recovery_refuses_unresolved_actions(tmp_path: Path) -> None:
     ProgressLedger().write(run_dir / "progress.json")
     with pytest.raises(RuntimeError, match="unresolved actions"):
         load_recovery_state(run_dir)
+def test_recovery_accepts_one_event_of_progress_skew(tmp_path: Path) -> None:
+    run_dir = tmp_path / "skewed-run"
+    run_dir.mkdir()
+    FileCheckpointStore(run_dir / "checkpoint.json").save(
+        RunCheckpoint(
+            run_id="skewed-run",
+            world_revision=1,
+            event_offset=3,
+            feedback_offset=0,
+            progress_event_count=4,
+            processed_event_ids={
+                "event-1": "h1",
+                "event-2": "h2",
+                "event-3": "h3",
+                "event-4": "h4",
+            },
+        )
+    )
+    ProgressLedger(event_count=5, last_event_id="event-5").write(
+        run_dir / "progress.json"
+    )
+    trace = TraceRecorder(run_dir / "trace.jsonl", "skewed-run", "task")
+
+    checkpoint, progress = load_recovery_state(run_dir, trace=trace)
+
+    assert checkpoint.progress_event_count == 4
+    assert progress.event_count == 5
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["type"] for row in rows] == ["run.recovery.skew"]
+    assert rows[0]["data"]["skew"] == 1
+
+
+def test_recovery_rejects_two_events_of_progress_skew(tmp_path: Path) -> None:
+    run_dir = tmp_path / "wider-skew-run"
+    run_dir.mkdir()
+    FileCheckpointStore(run_dir / "checkpoint.json").save(
+        RunCheckpoint(
+            run_id="wider-skew-run",
+            world_revision=1,
+            event_offset=3,
+            feedback_offset=0,
+            progress_event_count=4,
+            processed_event_ids={"event-1": "h1", "event-2": "h2"},
+        )
+    )
+    ProgressLedger(event_count=6, last_event_id="event-6").write(
+        run_dir / "progress.json"
+    )
+
+    with pytest.raises(RuntimeError, match="newer than its checkpoint"):
+        load_recovery_state(run_dir)
+
+
+def test_persist_control_state_commits_checkpoint_before_progress(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "ordered-run"
+    run_dir.mkdir()
+
+    class Session:
+        async def checkpoint(self):
+            return AgentCheckpoint(id="cp", event_offset=1, feedback_offset=0)
+
+    class Progress:
+        event_count = 1
+        active_actions: ClassVar[dict] = {}
+        last_action: ClassVar[dict | None] = None
+
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def write(self, path: Path) -> None:
+            # The checkpoint must be durable before its progress projection.
+            assert (run_dir / "checkpoint.json").is_file()
+            self.writes += 1
+            path.write_text("{}", encoding="utf-8")
+
+    progress = Progress()
+    record = asyncio.run(
+        persist_control_state(
+            run_dir=run_dir,
+            session=Session(),
+            world_revision=0,
+            progress=progress,
+            processed_event_ids={"event-1": "h1"},
+        )
+    )
+
+    assert record is not None
+    assert record.progress_event_count == 1
+    assert progress.writes == 1
+    assert (run_dir / "progress.json").is_file()
+
+
+def test_persist_control_state_still_writes_progress_for_legacy_adapters(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "legacy-run"
+    run_dir.mkdir()
+
+    class Progress:
+        event_count = 0
+        active_actions: ClassVar[dict] = {}
+        last_action: ClassVar[dict | None] = None
+
+        def write(self, path: Path) -> None:
+            path.write_text("{}", encoding="utf-8")
+
+    record = asyncio.run(
+        persist_control_state(
+            run_dir=run_dir,
+            session=object(),
+            world_revision=0,
+            progress=Progress(),
+        )
+    )
+
+    assert record is None
+    assert (run_dir / "progress.json").is_file()
+
+
 def test_pending_action_reconciliation_is_explicit_and_idempotent(tmp_path: Path) -> None:
     run_dir = tmp_path / "reconcile-run"
     run_dir.mkdir()

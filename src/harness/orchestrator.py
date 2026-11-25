@@ -32,8 +32,8 @@ from .models import AgentSpec, TaskSpec
 from .runtime import bootstrap_solver
 from .runtime.checkpoint import (
     load_recovery_state,
+    persist_control_state,
     run_action_owner,
-    save_session_checkpoint,
 )
 from .runtime.evidence import persist_objective_verdict
 from .runtime.lifecycle import RunLifecycle, resolve_run_status
@@ -346,7 +346,9 @@ class Orchestrator:
         if is_resume:
             try:
                 recovery_checkpoint, restored_progress = load_recovery_state(
-                    run_dir, current_world_revision=world.snapshot.revision
+                    run_dir,
+                    current_world_revision=world.snapshot.revision,
+                    trace=trace,
                 )
                 if restored_progress.reconciled_actions:
                     raise RuntimeError(
@@ -507,7 +509,7 @@ class Orchestrator:
             async def run_session():
                 agent_session = await adapter.start_session(run_context)
                 try:
-                    await save_session_checkpoint(
+                    await persist_control_state(
                         run_dir=run_dir,
                         session=agent_session,
                         world_revision=world.snapshot.revision,
@@ -532,7 +534,7 @@ class Orchestrator:
                         )
                         await agent_session.close(f"solver-stop:{startup_decision.reason}")
                         result = await agent_session.result()
-                        await save_session_checkpoint(
+                        await persist_control_state(
                             run_dir=run_dir,
                             session=agent_session,
                             world_revision=world.snapshot.revision,
@@ -544,7 +546,7 @@ class Orchestrator:
                     async for event in agent_session.events():
                         decision = await solver_loop.process_event(agent_session, event)
                         sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
-                        await save_session_checkpoint(
+                        await persist_control_state(
                             run_dir=run_dir,
                             session=agent_session,
                             world_revision=world.snapshot.revision,
@@ -589,7 +591,7 @@ class Orchestrator:
                                 )
                             )
                     result = await agent_session.result()
-                    await save_session_checkpoint(
+                    await persist_control_state(
                         run_dir=run_dir,
                         session=agent_session,
                         world_revision=world.snapshot.revision,
