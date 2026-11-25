@@ -759,3 +759,166 @@ def test_streaming_proxy_reports_upstream_disconnect_after_headers(tmp_path: Pat
     assert events[1]["data"]["stage"] == "stream"
     assert events[2]["data"]["complete"] is False
     assert "provider-secret" not in str(events)
+
+
+def test_gateway_requires_a_token_unless_tests_opt_out(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires a bearer token"):
+        create_gateway_app(
+            event_file=tmp_path / "events.jsonl",
+            workspace=tmp_path,
+            task_dir=tmp_path,
+        )
+
+    app = create_gateway_app(
+        event_file=tmp_path / "events.jsonl",
+        workspace=tmp_path,
+        task_dir=tmp_path,
+        allow_unauthenticated=True,
+    )
+
+    assert TestClient(app).get("/health").status_code == 200
+
+
+def test_model_request_body_is_bounded(tmp_path: Path) -> None:
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("oversized request must not reach the upstream")
+
+    app = create_gateway_app(
+        event_file=tmp_path / "events.jsonl",
+        workspace=tmp_path,
+        task_dir=tmp_path,
+        gateway_token="gateway-secret",
+        model_upstream="https://model.example/v1",
+        max_request_bytes=64,
+        http_transport=httpx.MockTransport(upstream),
+    )
+
+    response = TestClient(app).post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer gateway-secret"},
+        json={"model": "m", "messages": [{"role": "user", "content": "x" * 256}]},
+    )
+
+    assert response.status_code == 413
+
+
+def test_model_allowlist_rejects_unknown_models(tmp_path: Path) -> None:
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "ok",
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    app = create_gateway_app(
+        event_file=tmp_path / "events.jsonl",
+        workspace=tmp_path,
+        task_dir=tmp_path,
+        gateway_token="gateway-secret",
+        allowed_models={"allowed-model"},
+        model_upstream="https://model.example/v1",
+        http_transport=httpx.MockTransport(upstream),
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer gateway-secret"}
+
+    denied = client.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={"model": "other-model", "messages": []},
+    )
+    allowed = client.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={"model": "allowed-model", "messages": []},
+    )
+
+    assert denied.status_code == 400
+    assert allowed.status_code == 200
+    events = _events(tmp_path / "events.jsonl")
+    assert any(
+        event["type"] == "model.denied"
+        and event["data"].get("reason") == "model_not_allowed"
+        for event in events
+    )
+
+
+def test_model_request_quota_returns_429(tmp_path: Path) -> None:
+    calls = 0
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "id": "ok",
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    app = create_gateway_app(
+        event_file=tmp_path / "events.jsonl",
+        workspace=tmp_path,
+        task_dir=tmp_path,
+        gateway_token="gateway-secret",
+        model_upstream="https://model.example/v1",
+        max_model_requests=1,
+        http_transport=httpx.MockTransport(upstream),
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer gateway-secret"}
+
+    first = client.post(
+        "/v1/chat/completions", headers=headers, json={"model": "m", "messages": []}
+    )
+    second = client.post(
+        "/v1/chat/completions", headers=headers, json={"model": "m", "messages": []}
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert calls == 1
+
+
+def test_tool_adapter_timeout_returns_504(tmp_path: Path) -> None:
+    class SlowAdapter:
+        tool_name = "slow.echo"
+
+        async def execute(self, arguments, context):
+            await asyncio.sleep(3600)
+            return ToolExecutionResult(output={"ok": True})
+
+    app = create_gateway_app(
+        event_file=tmp_path / "events.jsonl",
+        workspace=tmp_path,
+        task_dir=tmp_path,
+        policy=GatewayPolicy(allowed_tools={"slow.echo"}),
+        gateway_token="gateway-secret",
+        tool_adapters=[SlowAdapter()],
+        tool_timeout_seconds=0.01,
+    )
+
+    response = TestClient(app).post(
+        "/v1/tools/call",
+        headers={"Authorization": "Bearer gateway-secret"},
+        json={"name": "slow.echo", "args": {}, "tool_call_id": "slow-1"},
+    )
+
+    assert response.status_code == 504
+    events = _events(tmp_path / "events.jsonl")
+    assert any(
+        event["type"] == "tool.result"
+        and event["data"].get("failure_class") == "tool_timeout"
+        for event in events
+    )

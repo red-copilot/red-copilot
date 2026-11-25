@@ -87,5 +87,16 @@ workspace stays owner-only, and the mounts, the network profiles and the un-moun
 unchanged. Evidence: `tests/test_agent_workspace.py`, `tests/test_container_boundary.py`,
 `tests/test_pi_adapter.py`, `tests/test_runtime_profiles.py`.
 
+### EXE-10 [~] P0 — Gateway authentication and execution bounds
+Deliver: the Gateway refuses unauthenticated construction, bounds model request bodies, supports
+an optional model allowlist and request quota, and gives every registered tool adapter a
+wall-clock deadline.
+Accept: tokenless construction fails; oversized bodies return 413; disallowed models return 400;
+the quota returns 429; a hung adapter returns 504 with `unknown` status and `tool_timeout`.
+State: implemented; `create_gateway_app` requires a token unless a test opts out, reads bounded
+JSON, counts accepted model requests, and passes `tool_timeout_seconds` to
+`execute_tool_adapter`. Evidence: `tests/test_gateway.py`. Awaiting maintainer review of the
+network/credential boundary.
+
 **Non-goals:** arbitrary unsandboxed host execution as a default, dynamic tool downloads in offline competition runs, schema-ing the Harness-normalized `tool.*`/`model.*` streams, multi-agent session contracts.
 

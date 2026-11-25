@@ -7,7 +7,7 @@ import secrets
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -189,12 +189,29 @@ def create_gateway_app(
     task_dir: Path,
     policy: GatewayPolicy | None = None,
     gateway_token: str | None = None,
+    allow_unauthenticated: bool = False,
+    allowed_models: Collection[str] | None = None,
+    max_request_bytes: int = 8 * 1024 * 1024,
+    max_model_requests: int | None = None,
+    tool_timeout_seconds: float = 30.0,
     model_upstream: str | None = None,
     model_api_key: str | None = None,
     model_pricing: ModelPricing | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
     tool_adapters: Sequence[ToolAdapter] = (),
 ) -> FastAPI:
+    if gateway_token is None and not allow_unauthenticated:
+        raise ValueError(
+            "gateway requires a bearer token; pass allow_unauthenticated=True only for tests"
+        )
+    if max_request_bytes < 1:
+        raise ValueError("max_request_bytes must be positive")
+    if tool_timeout_seconds <= 0:
+        raise ValueError("tool_timeout_seconds must be positive")
+    allowed_model_names = (
+        frozenset(allowed_models) if allowed_models is not None else None
+    )
+    model_request_count = 0
     app = FastAPI(title="Red Harness Gateway", version="0.4.0")
     writer = GatewayEventWriter(event_file, trusted_path=trusted_event_file)
     call_registry = ToolCallRegistry(event_file)
@@ -208,6 +225,31 @@ def create_gateway_app(
         if name in {"file.read", "file.write"} or name in adapters:
             raise ValueError(f"duplicate or reserved tool adapter name: {name}")
         adapters[name] = adapter
+
+    async def read_json_body(request: Request) -> dict[str, Any]:
+        """Read one bounded JSON object, rejecting oversized or malformed input."""
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid content-length") from exc
+            if length < 0:
+                raise HTTPException(status_code=400, detail="invalid content-length")
+            if length > max_request_bytes:
+                raise HTTPException(status_code=413, detail="request body too large")
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > max_request_bytes:
+                raise HTTPException(status_code=413, detail="request body too large")
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="request body must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="request body must be an object")
+        return payload
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -272,7 +314,12 @@ def create_gateway_app(
                     task_dir=task_dir,
                     cancelled=cancellation,
                 )
-                adapted = await execute_tool_adapter(adapters[call.name], call.args, context)
+                adapted = await execute_tool_adapter(
+                    adapters[call.name],
+                    call.args,
+                    context,
+                    timeout_seconds=tool_timeout_seconds,
+                )
                 result = adapted.output
             else:
                 raise HTTPException(status_code=501, detail=f"tool not implemented: {call.name}")
@@ -290,6 +337,18 @@ def create_gateway_app(
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
             raise
+        except TimeoutError:
+            writer.emit(
+                "tool.result",
+                tool=call.name,
+                tool_call_id=call_id,
+                ok=False,
+                is_error=True,
+                execution_status="unknown",
+                failure_class="tool_timeout",
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise HTTPException(status_code=504, detail="tool execution timed out") from None
         except HTTPException as exc:
             writer.emit(
                 "tool.result",
@@ -424,15 +483,23 @@ def create_gateway_app(
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(request: Request):
+        nonlocal model_request_count
         _authorize(request, gateway_token)
         if model_upstream is None:
             raise HTTPException(status_code=503, detail="model upstream is not configured")
+        if (
+            max_model_requests is not None
+            and model_request_count >= max_model_requests
+        ):
+            writer.emit("model.denied", reason="request_quota")
+            raise HTTPException(status_code=429, detail="model request quota exhausted")
 
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="request body must be an object")
-
+        payload = await read_json_body(request)
         model = str(payload.get("model", ""))
+        if allowed_model_names is not None and model not in allowed_model_names:
+            writer.emit("model.denied", model=model, reason="model_not_allowed")
+            raise HTTPException(status_code=400, detail=f"model not allowed: {model}")
+        model_request_count += 1
         is_stream = bool(payload.get("stream"))
         writer.emit(
             "model.request",

@@ -80,8 +80,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # QA gateway usage (2026-11-25). B2 added no module. Source lines moved
 # 18,475 -> 18,487: `_consume_gateway_events` returns the trusted usage events
 # and `events()` yields them into the solver stream (+12). Re-measured.
+#
+# QA gateway bounds (2026-11-25). B6 added no module. Source lines moved
+# 18,487 -> 18,581: mandatory-token construction, bounded JSON reads, model
+# allowlist/quota and the tool timeout in `gateway.py` (+74), the adapter
+# deadline (+13), `GatewayConfig` fields (+6) and the standalone CLI flags
+# (+10). Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_487
+MAX_SRC_LINES = 18_581
 
 
 def _module_names() -> set[str]:

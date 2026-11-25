@@ -533,6 +533,13 @@ def gateway(
     ),
     input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
     output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
+    allowed_model: Annotated[list[str], typer.Option("--allowed-model")] = [],
+    max_model_requests: Annotated[
+        int | None, typer.Option("--max-model-requests", min=1)
+    ] = None,
+    tool_timeout_seconds: Annotated[
+        float, typer.Option("--tool-timeout-seconds", min=0.1)
+    ] = 30.0,
 ) -> None:
     """Serve the policy-gated Tool Gateway and OpenAI-compatible model proxy."""
     import uvicorn
@@ -555,6 +562,9 @@ def gateway(
         task_dir=task_dir.resolve(),
         policy=load_policy(policy),
         gateway_token=gateway_token,
+        allowed_models=frozenset(allowed_model) or None,
+        max_model_requests=max_model_requests,
+        tool_timeout_seconds=tool_timeout_seconds,
         model_upstream=model_upstream,
         model_api_key=os.environ.get(model_api_key_env),
         model_pricing=ModelPricing(

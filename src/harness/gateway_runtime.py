@@ -25,6 +25,9 @@ class GatewayConfig:
     model_api_key: str | None = None
     input_price_per_million_usd: float = 0.0
     output_price_per_million_usd: float = 0.0
+    allowed_models: frozenset[str] | None = None
+    max_model_requests: int | None = None
+    tool_timeout_seconds: float = 30.0
 
 
 class HostGatewayRuntime:
@@ -55,6 +58,9 @@ class HostGatewayRuntime:
             task_dir=task_dir,
             policy=load_policy(config.policy_path),
             gateway_token=self.token,
+            allowed_models=config.allowed_models,
+            max_model_requests=config.max_model_requests,
+            tool_timeout_seconds=config.tool_timeout_seconds,
             model_upstream=config.model_upstream,
             model_api_key=config.model_api_key,
             model_pricing=ModelPricing(

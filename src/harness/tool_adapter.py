@@ -93,12 +93,23 @@ async def execute_tool_adapter(
     arguments: Mapping[str, Any],
     context: ToolExecutionContext,
     *,
+    timeout_seconds: float | None = 30.0,
     cancellation_grace_seconds: float = 1.0,
 ) -> ToolExecutionResult:
-    """Signal cancellation to a plugin before cancelling its coroutine."""
+    """Bound plugin execution and signal cancellation before cancelling it."""
     task = asyncio.create_task(adapter.execute(arguments, context))
     try:
-        result = await asyncio.shield(task)
+        if timeout_seconds is None:
+            result = await asyncio.shield(task)
+        else:
+            result = await asyncio.wait_for(
+                asyncio.shield(task), timeout=timeout_seconds
+            )
+    except TimeoutError:
+        context.cancelled.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
     except asyncio.CancelledError:
         context.cancelled.set()
         try:

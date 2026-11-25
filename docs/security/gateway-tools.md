@@ -33,3 +33,18 @@ For the Pi container, pass the verifier-free task snapshot as `task_dir` to the
 Gateway. Never mount the original task directory into a Gateway reachable by an
 untrusted Agent.
 
+## Authentication and resource bounds
+
+`create_gateway_app` refuses to construct without a bearer token; tests must pass
+`allow_unauthenticated=True` explicitly. `/v1/chat/completions` reads at most
+`max_request_bytes` (default 8 MiB), optionally rejects models outside
+`allowed_models`, and can cap accepted requests with `max_model_requests` (429).
+Registered adapters are bounded by `tool_timeout_seconds` (default 30s); a timeout
+is recorded as `tool_timeout` with `unknown` execution status and returns 504.
+The standalone `harness gateway` command exposes `--allowed-model`,
+`--max-model-requests` and `--tool-timeout-seconds`.
+
+The in-process Gateway binds `0.0.0.0` because the Pi container reaches it through
+`host.docker.internal:host-gateway`; the mandatory token is the network boundary.
+TLS termination and interface pinning remain deployment decisions.
+
