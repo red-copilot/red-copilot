@@ -99,6 +99,16 @@ def test_smoke_run(monkeypatch, tmp_path: Path) -> None:
     assert (run_dir / "summary.json").is_file()
     assert result["summary"]["outcome"]["status"] == "finished"
     assert result["summary"]["agent_report"]["present"] is False or True
+    phases = []
+    for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        if event["type"] == "run.phase":
+            phases.append(event)
+    assert [event["data"]["phase"] for event in phases] == [
+        "running",
+        "verifying",
+        "succeeded",
+    ]
 
 
 def test_unavailable_task_verifier_is_recorded_and_run_fails_closed(monkeypatch, tmp_path: Path) -> None:
@@ -131,6 +141,13 @@ def test_unavailable_task_verifier_is_recorded_and_run_fails_closed(monkeypatch,
     assert artifact["failure_type"] == "VerifierError"
     assert "private details" not in json.dumps(artifact)
     assert audit_run(run_dir).status == "consistent"
+    phases = []
+    for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        if event["type"] == "run.phase":
+            phases.append(event)
+    assert phases[-1]["data"]["status"] == "error"
+    assert phases[-1]["data"]["phase"] == "failed"
 
 
 def test_environment_start_failure_is_classified_separately_from_solver_failure(

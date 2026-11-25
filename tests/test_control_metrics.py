@@ -54,8 +54,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # ignores; the bootstrap workspace-sync lambda became a def (-1); the TSec
 # operator messages moved from `print(file=sys.stderr, flush=True)` to
 # `typer.echo` (-9). Re-measured from the tree rather than estimated.
+#
+# QA lifecycle coherence (2026-11-25). B3 added no module. Source lines moved
+# 18,075 -> 18,187: `RunStatus` error/cancelled plus `settle_for_status` and
+# `resolve_run_phase` (+33), the orchestrator phase trace and status-derived
+# terminal settle (+25), and the runner's verifying-before-evaluation ordering,
+# exception-path phase traces and status-derived settle (+54). Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_075
+MAX_SRC_LINES = 18_187
 
 
 def _module_names() -> set[str]:

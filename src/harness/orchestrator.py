@@ -291,6 +291,7 @@ class Orchestrator:
         progress_path = run_dir / "progress.json"
         sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
         lifecycle = RunLifecycle()
+        previous_phase = lifecycle.phase
         lifecycle.transition("running")
         status = "running"
         usage = UsageMetrics()
@@ -315,6 +316,10 @@ class Orchestrator:
             trace.emit("run.resumed", data={"agent_session_id": recovery_checkpoint.agent_session_id})
         else:
             trace.emit("run.started", data=start_event_data)
+        trace.emit(
+            "run.phase",
+            data={"previous": previous_phase, "phase": lifecycle.phase},
+        )
 
         run_phase = "environment_startup"
         try:
@@ -498,7 +503,12 @@ class Orchestrator:
                     "milestones": {},
                 }
             else:
+                previous_phase = lifecycle.phase
                 lifecycle.transition("verifying")
+                trace.emit(
+                    "run.phase",
+                    data={"previous": previous_phase, "phase": lifecycle.phase},
+                )
                 run_phase = "verification"
                 try:
                     verified, vout, verr = run_verifier(
@@ -550,9 +560,18 @@ class Orchestrator:
                     status = resolve_run_status(timed_out=False, budget_exceeded=False)
         except Exception as exc:  # noqa: BLE001 - orchestrator boundary records all failures.
             cancelled = isinstance(exc, RunInterrupted)
-            if not lifecycle.terminal:
-                lifecycle.settle(succeeded=False, cancelled=cancelled)
             status = "cancelled" if cancelled else "error"
+            if not lifecycle.terminal:
+                previous_phase = lifecycle.phase
+                lifecycle.settle_for_status(status)
+                trace.emit(
+                    "run.phase",
+                    data={
+                        "previous": previous_phase,
+                        "phase": lifecycle.phase,
+                        "status": status,
+                    },
+                )
             failure_class = (
                 "cancelled" if cancelled else
                 "environment_failure" if run_phase == "environment_startup" else
@@ -606,9 +625,15 @@ class Orchestrator:
         solver_loop.finish_ingest()
 
         if not lifecycle.terminal:
-            lifecycle.settle(
-                succeeded=bool(verification["success"]),
-                exhausted=status in {"timeout", "budget_exceeded"},
+            previous_phase = lifecycle.phase
+            lifecycle.settle_for_status(status, success=bool(verification["success"]))
+            trace.emit(
+                "run.phase",
+                data={
+                    "previous": previous_phase,
+                    "phase": lifecycle.phase,
+                    "status": status,
+                },
             )
 
         duration_ms = max(

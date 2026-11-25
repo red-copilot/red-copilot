@@ -574,7 +574,12 @@ class BenchmarkRunner:
                 )
             raise
         lifecycle = RunLifecycle()
+        previous_phase = lifecycle.phase
         lifecycle.transition("running")
+        trace.emit(
+            "run.phase",
+            data={"previous": previous_phase, "phase": lifecycle.phase},
+        )
         teardown_error: str | None = None
         teardown_started = False
 
@@ -763,12 +768,30 @@ class BenchmarkRunner:
 
         except asyncio.CancelledError:
             if not lifecycle.terminal:
-                lifecycle.settle(succeeded=False, cancelled=True)
+                previous_phase = lifecycle.phase
+                lifecycle.settle_for_status("cancelled")
+                trace.emit(
+                    "run.phase",
+                    data={
+                        "previous": previous_phase,
+                        "phase": lifecycle.phase,
+                        "status": "cancelled",
+                    },
+                )
             await teardown_once()
             raise
         except BaseException:
             if not lifecycle.terminal:
-                lifecycle.settle(succeeded=False)
+                previous_phase = lifecycle.phase
+                lifecycle.settle_for_status("error")
+                trace.emit(
+                    "run.phase",
+                    data={
+                        "previous": previous_phase,
+                        "phase": lifecycle.phase,
+                        "status": "error",
+                    },
+                )
             await teardown_once()
             raise
 
@@ -1134,9 +1157,14 @@ class BenchmarkRunner:
                 if agent_result is None:
                     raise RuntimeError("agent did not start")
 
+            previous_phase = lifecycle.phase
+            lifecycle.transition("verifying")
+            trace.emit(
+                "run.phase",
+                data={"previous": previous_phase, "phase": lifecycle.phase},
+            )
             if evaluation is None:
                 await evaluate_final()
-            lifecycle.transition("verifying")
             # The final evaluator is authoritative. A submission marked
             # completed is feedback, not a substitute for this result.
             if evaluation_error is None and evaluation is not None:
@@ -1180,11 +1208,29 @@ class BenchmarkRunner:
             progress.write(progress_path)
         except asyncio.CancelledError:
             if not lifecycle.terminal:
-                lifecycle.settle(succeeded=False, cancelled=True)
+                previous_phase = lifecycle.phase
+                lifecycle.settle_for_status("cancelled")
+                trace.emit(
+                    "run.phase",
+                    data={
+                        "previous": previous_phase,
+                        "phase": lifecycle.phase,
+                        "status": "cancelled",
+                    },
+                )
             raise
         except Exception:
             if not lifecycle.terminal:
-                lifecycle.settle(succeeded=False)
+                previous_phase = lifecycle.phase
+                lifecycle.settle_for_status("error")
+                trace.emit(
+                    "run.phase",
+                    data={
+                        "previous": previous_phase,
+                        "phase": lifecycle.phase,
+                        "status": "error",
+                    },
+                )
             raise
         finally:
             try:
@@ -1212,11 +1258,19 @@ class BenchmarkRunner:
                 budget_exceeded=budget_exhausted,
             )
         )
-        lifecycle.settle(
-            succeeded=progress.objective_completed,
-            exhausted=not progress.objective_completed
-            and (agent_result.timed_out or budget_exhausted),
-        )
+        if not lifecycle.terminal:
+            previous_phase = lifecycle.phase
+            lifecycle.settle_for_status(
+                status, success=bool(evaluation and evaluation.success)
+            )
+            trace.emit(
+                "run.phase",
+                data={
+                    "previous": previous_phase,
+                    "phase": lifecycle.phase,
+                    "status": status,
+                },
+            )
         finalize_world_goal(
             world=world,
             goal=root_goal,

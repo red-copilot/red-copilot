@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-RunStatus = Literal["objective_completed", "timeout", "budget_exceeded", "finished"]
+RunStatus = Literal[
+    "objective_completed",
+    "timeout",
+    "budget_exceeded",
+    "finished",
+    "error",
+    "cancelled",
+]
 RunPhase = Literal[
     "created",
     "running",
@@ -77,6 +84,14 @@ class RunLifecycle:
         )
         return self.transition(target)
 
+    def settle_for_status(self, status: RunStatus, *, success: bool = False) -> RunPhase:
+        """Settle from the public run status so status and phase cannot disagree.
+
+        ``success`` carries the local verifier verdict only for the terminal
+        ``finished`` status; a harness error or cancellation always wins.
+        """
+        return self.transition(resolve_run_phase(status, success=success))
+
 
 def resolve_run_status(
     *,
@@ -96,3 +111,21 @@ def resolve_run_status(
     if budget_exceeded:
         return "budget_exceeded"
     return "finished"
+
+
+def resolve_run_phase(status: RunStatus, *, success: bool = False) -> RunPhase:
+    """Map one terminal run status to its lifecycle phase.
+
+    Precedence is cancelled, error, exhausted, then success. ``finished`` is
+    the local run's "session ended" status, so its phase depends on the
+    verifier verdict carried by ``success``.
+    """
+    if status == "objective_completed":
+        return "succeeded"
+    if status == "cancelled":
+        return "cancelled"
+    if status == "error":
+        return "failed"
+    if status in {"timeout", "budget_exceeded"}:
+        return "exhausted"
+    return "succeeded" if success else "failed"

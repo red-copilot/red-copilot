@@ -5,7 +5,7 @@
 ### RUN-01 [x] P0 — Explicit run state machine
 Deliver: allowed transitions among created/running/paused/recovering/verifying/succeeded/failed/exhausted/cancelled, with pure decision separated from event normalization and disk side effects, and one lifecycle policy for local and benchmark paths.
 Accept: table-driven transition tests, illegal-transition rejection, exactly one terminal decision, cancellation-vs-success races, no benchmark import in runtime.
-State: `runtime.lifecycle.RunLifecycle` is wired into both run paths and rejects illegal or second terminal transitions.
+State: `runtime.lifecycle.RunLifecycle` is wired into both run paths and rejects illegal or second terminal transitions. `settle_for_status` maps the public status (including `error` and `cancelled`) to one terminal phase, so a harness error cannot be reported as exhaustion or success; both paths emit additive `run.phase` trace events and the benchmark path evaluates under `verifying`. Evidence: `tests/test_lifecycle.py`, `tests/test_smoke.py`.
 
 ### RUN-02 [~] P0 — Crash-safe checkpoints and action reconciliation
 Deliver: durable agent cursor, World revision, budget, feedback cursor and in-flight action IDs plus a recovery protocol for the dispatch/effect/feedback/checkpoint crash windows. This is not an exactly-once resume guarantee.
