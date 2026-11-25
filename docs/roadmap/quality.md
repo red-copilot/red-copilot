@@ -54,6 +54,17 @@ targeted architecture/docs/control/ledger/smoke suite 31 passed; full `.venv/bin
 513 passed with one Starlette/httpx deprecation warning. v2 remains the production read path, M2 is
 not started, and no live Docker recovery matrix or TSec sweep was run.
 
+QA gate hardening (2026-11-25). B0 of the quality sprint added `tests/conftest.py` with
+`require_docker` and `require_bwrap` probes, so tests that need those runtimes skip instead
+of failing on a host that lacks them. Ruff now enforces `BLE` and `T20`, a narrow blocking
+mypy gate covers `runtime/lifecycle.py`, `solver_policy.py` and `secureio.py`, CI has a 3.12
+pytest leg, and a path-filtered + nightly `pi-kali` workflow builds `harness/pi-kali:local`
+and runs both pi-kali suites. Coverage measured at 80.16% (branch, `harness` package) and CI
+gates at 78% pending a ratchet. Validation: `ruff check .` clean; the narrow `mypy
+--check-untyped-defs` command clean; `pytest -q --cov-fail-under=78` 560 passed, 6 skipped;
+both workflow files parse as YAML. Docker, Pi and the pi-kali image were not exercised
+locally.
+
 ## Validation sequence
 
 `ruff check .`; `pytest -q`; `pytest tests/test_architecture.py -q` after any module move; `harness validate`/`preflight` on touched fixtures; the hello smoke run. Docker and TSec paths run only in prepared environments and must be reported as unexecuted otherwise.

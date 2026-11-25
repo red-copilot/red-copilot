@@ -48,11 +48,12 @@ jobs:
               )
           PY
       - run: ruff check .
+      - run: mypy --check-untyped-defs src/harness/runtime/lifecycle.py src/harness/solver_policy.py src/harness/secureio.py
       - run: docker build -t harness-isolation-probe:ci agents/examples/isolation-probe
       - run: docker build -t harness-pi-rpc:ci tests/fixtures/pi-rpc
       - run: docker build -t harness-verifier:ci benchmarks/examples/hello-docker-verifier
       - run: pytest tests/test_container_boundary.py tests/test_network_profiles_docker.py -q
-      - run: pytest -q
+      - run: pytest -q --cov-fail-under=78
       - run: harness validate benchmarks/examples/hello/task.yaml
       - run: harness validate benchmarks/examples/zc-hackathon/task.yaml
       - run: harness validate benchmarks/examples/hello-docker-verifier/task.yaml
@@ -90,3 +91,30 @@ jobs:
             --timeout 30 \
             --workdir "$RUNNER_TEMP/subagent-work"
           test "$(cat "$RUNNER_TEMP/subagent-work/.fake-pi-touched")" = "subagent-ok"
+
+  test-py312:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install Python verifier sandbox
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff check .
+      - run: pytest -q --cov-fail-under=78
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev]"
+      - run: >-
+          mypy --check-untyped-defs
+          src/harness/runtime/lifecycle.py
+          src/harness/solver_policy.py
+          src/harness/secureio.py

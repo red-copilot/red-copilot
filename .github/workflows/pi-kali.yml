@@ -1,0 +1,38 @@
+name: pi-kali
+
+on:
+  pull_request:
+    paths:
+      - "docker/pi-kali/**"
+      - "src/harness/agent.py"
+      - "src/harness/agent_workspace.py"
+      - "src/harness/pi_container.py"
+      - "tests/test_pi_kali_image.py"
+      - "tests/test_pi_kali_tools_docker.py"
+  push:
+    paths:
+      - "docker/pi-kali/**"
+      - "src/harness/agent.py"
+      - "src/harness/agent_workspace.py"
+      - "src/harness/pi_container.py"
+      - "tests/test_pi_kali_image.py"
+      - "tests/test_pi_kali_tools_docker.py"
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev]"
+      - run: docker build -t harness/pi-kali:local docker/pi-kali
+      - run: pytest tests/test_pi_kali_image.py tests/test_pi_kali_tools_docker.py -q

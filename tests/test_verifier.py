@@ -13,7 +13,7 @@ from harness.verifier import VerifierError, _parse_result, _run_python_verifier,
 
 
 def test_python_verifier_receives_only_explicit_harness_environment(
-    monkeypatch, tmp_path: Path
+    require_bwrap, monkeypatch, tmp_path: Path
 ) -> None:
     task_path = Path("benchmarks/examples/hello/task.yaml")
     task = load_task(task_path)
@@ -134,7 +134,7 @@ def test_verifier_rejects_inconsistent_output_contract() -> None:
             _parse_result(output)
 
 
-def test_python_verifier_cannot_reach_host_loopback(tmp_path: Path) -> None:
+def test_python_verifier_cannot_reach_host_loopback(require_bwrap, tmp_path: Path) -> None:
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     run_dir = tmp_path / "run"

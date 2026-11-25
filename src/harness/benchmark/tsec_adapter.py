@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import sys
 import time
+import typer
 import typing
 import uuid
 from contextlib import asynccontextmanager
@@ -141,12 +141,11 @@ async def _discover_with_retry(adapter: BenchmarkAdapter) -> list[BenchmarkCase]
             if classify_platform_failure(exc) == PLATFORM_FAILURE_VPN:
                 raise
             if attempt < DISCOVER_ATTEMPTS - 1:
-                print(
+                typer.echo(
                     f"[tsec] challenge listing failed ({type(exc).__name__}); "
                     f"retrying in {DISCOVER_RETRY_WAIT_SECONDS:.0f}s "
                     f"({attempt + 1}/{DISCOVER_ATTEMPTS})",
-                    file=sys.stderr,
-                    flush=True,
+                    err=True,
                 )
                 await asyncio.sleep(DISCOVER_RETRY_WAIT_SECONDS)
     raise last_error  # type: ignore[misc]
@@ -420,12 +419,11 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                     continue
                 if _is_instance_conflict(exc) and conflict_attempts < INSTANCE_CONFLICT_ATTEMPTS:
                     conflict_attempts += 1
-                    print(
+                    typer.echo(
                         f"[tsec] instance slots full for {case_id}; waiting "
                         f"{INSTANCE_CONFLICT_WAIT_SECONDS:.0f}s "
                         f"({conflict_attempts}/{INSTANCE_CONFLICT_ATTEMPTS})",
-                        file=sys.stderr,
-                        flush=True,
+                        err=True,
                     )
                     await asyncio.sleep(INSTANCE_CONFLICT_WAIT_SECONDS)
                     continue
@@ -685,11 +683,10 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             if self._sessions[session_id].closed:
                 reaped += 1
         if reaped:
-            print(
+            typer.echo(
                 f"[tsec] re-closed {reaped} leaked challenge instance(s) at the "
                 "pass boundary",
-                file=sys.stderr,
-                flush=True,
+                err=True,
             )
         return reaped
 
@@ -717,12 +714,11 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                     return
                 if attempt < 2:
                     await asyncio.sleep(2.0 * (attempt + 1))
-        print(
+        typer.echo(
             f"[tsec] closing challenge {session.case_id} failed after retries "
             f"({type(last_error).__name__}); the platform will reclaim the "
             f"container",
-            file=sys.stderr,
-            flush=True,
+            err=True,
         )
 
 
@@ -918,12 +914,11 @@ async def run_tsec_challenges(
                             or attempt == DISCOVER_ATTEMPTS - 1
                         ):
                             raise
-                        print(
+                        typer.echo(
                             f"[tsec] platform preflight failed ({type(exc).__name__}); "
                             f"retrying in {DISCOVER_RETRY_WAIT_SECONDS:.0f}s "
                             f"({attempt + 1}/{DISCOVER_ATTEMPTS})",
-                            file=sys.stderr,
-                            flush=True,
+                            err=True,
                         )
                         await asyncio.sleep(DISCOVER_RETRY_WAIT_SECONDS)
             adapter = TSecBenchmarkAdapter(
@@ -978,11 +973,10 @@ async def run_tsec_challenges(
                 async with slots:
                     delay = cooldown_until - time.monotonic()
                     if delay > 0:
-                        print(
+                        typer.echo(
                             f"[tsec] cooling dispatch {delay:.0f}s after persistent "
                             "instance conflicts",
-                            file=sys.stderr,
-                            flush=True,
+                            err=True,
                         )
                         await asyncio.sleep(min(delay, 300.0))
                     case_budgets = _case_budget(
@@ -1057,12 +1051,11 @@ async def run_tsec_challenges(
                                 # A full-length attempt that gained nothing;
                                 # another session would repeat it.
                                 break
-                            print(
+                            typer.echo(
                                 f"[tsec] {case.id} session {sessions_done} ended in "
                                 f"{elapsed:.0f}s (flags {correct}); continuing in the "
                                 "same slot",
-                                file=sys.stderr,
-                                flush=True,
+                                err=True,
                             )
                     except Exception as exc:  # noqa: BLE001 - classified below
                         kind = classify_platform_failure(exc)
@@ -1226,22 +1219,20 @@ async def run_tsec_challenges(
                 completed_now = sum(
                     1 for result in pass_results if result.get("success")
                 )
-                print(
+                typer.echo(
                     f"[tsec] pass {pass_index + 1}/{max_passes}: "
                     f"{len(pass_cases)} cases, {completed_now} newly completed",
-                    file=sys.stderr,
-                    flush=True,
+                    err=True,
                 )
                 if completed_now == 0:
                     zero_score_passes += 1
                     # Keep the endgame alive: a scoreless pass is a signal to
                     # change the approach, not to resign while the window and
                     # the pass budget still allow another attempt.
-                    print(
+                    typer.echo(
                         f"[tsec] scoreless pass {zero_score_passes}; "
                         "continuing the endgame",
-                        file=sys.stderr,
-                        flush=True,
+                        err=True,
                     )
                 else:
                     zero_score_passes = 0

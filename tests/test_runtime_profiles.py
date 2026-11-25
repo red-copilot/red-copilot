@@ -174,7 +174,8 @@ def test_knowledge_roots_are_mounted_read_only_and_exported(
     assert any(str(entry).endswith("/run/harness:rw") for entry in command)
 
 
-def test_missing_knowledge_root_fails_closed(tmp_path: Path) -> None:
+def test_missing_knowledge_root_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
     adapter = _knowledge_adapter(tmp_path, [str(tmp_path / "absent")])
     run_dir = tmp_path / "run-missing"
     run_dir.mkdir()

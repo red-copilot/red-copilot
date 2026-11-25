@@ -47,8 +47,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # Measured after the focused kernel tests: 61 modules / 18,065 source lines. The
 # deliberate +1 module and line increase buy the first durable enforcement point
 # for unknown side effects and budget reservation.
+#
+# QA gate hardening (2026-11-25). The B0 gate batch added no module. Source
+# lines moved 18,065 -> 18,075: `secureio.open_regular_file` gained text/binary
+# overloads (+20) so the newly gated mypy modules can be checked without
+# ignores; the bootstrap workspace-sync lambda became a def (-1); the TSec
+# operator messages moved from `print(file=sys.stderr, flush=True)` to
+# `typer.echo` (-9). Re-measured from the tree rather than estimated.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_065
+MAX_SRC_LINES = 18_075
 
 
 def _module_names() -> set[str]:

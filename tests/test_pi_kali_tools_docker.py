@@ -3,8 +3,8 @@
 The static contract in ``tests/test_pi_kali_image.py`` proves what the image
 installs; this probe proves the image *works* under the exact container settings
 the harness uses, which is how the 2026-10-16 sweep lost 28 nmap calls to
-``Operation not permitted``. CI does not build this image, so the probe skips
-where it is absent - build it with
+``Operation not permitted``. The ``pi-kali`` workflow builds the image for
+changes that touch it and on a nightly schedule; locally, build it with
 ``docker build -t harness/pi-kali:local docker/pi-kali``.
 """
 from __future__ import annotations

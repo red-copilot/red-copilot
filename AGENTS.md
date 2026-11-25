@@ -106,18 +106,22 @@ actually has before assuming a run will work.
 ## Coding Style & Naming Conventions
 Python 3.11+, 4-space indentation, `from __future__ import annotations`, and type hints on
 public signatures. Use `snake_case` for modules, functions, variables, `PascalCase` for
-classes, and `UPPER_SNAKE_CASE` for constants. Ruff is the only enforced tool
-(`line-length = 100`, per `pyproject.toml`); no formatter is enforced, so match surrounding
-style. YAML uses `apiVersion: harness/v1`; pydantic models are the authoritative contracts.
+classes, and `UPPER_SNAKE_CASE` for constants. Ruff is the primary enforced tool
+(`line-length = 100`, with `BLE` and `T20`, per `pyproject.toml`); a narrow blocking mypy
+gate covers `runtime/lifecycle.py`, `solver_policy.py` and `secureio.py`. No formatter is
+enforced, so match surrounding style. YAML uses `apiVersion: harness/v1`; pydantic models
+are the authoritative contracts.
 
 ## Testing Guidelines
 Tests use pytest and follow `tests/test_*.py` with `test_*` functions;
 `testpaths = ["tests"]` in `pyproject.toml`. Run a targeted file first
 (`pytest tests/test_budget.py -q`), then the full `pytest -q`. Behavior changes need
 positive and negative cases; existing tests assert fail-closed handling of malformed input.
-No coverage threshold is configured. Tests requiring Docker, Pi, bubblewrap, or Linux/POSIX
-semantics skip themselves locally; note environment-dependent exclusions in the PR and make
-sure the CI-only paths were exercised explicitly.
+CI enforces a branch-coverage floor (currently 78%) on the full suite and runs a 3.12 leg;
+targeted runs report coverage without failing. Tests requiring Docker or bubblewrap use the
+shared `require_docker` / `require_bwrap` fixtures and skip themselves locally; note
+environment-dependent exclusions in the PR and make sure the CI-only paths were exercised
+explicitly.
 
 ## Commit & Pull Request Guidelines
 Commits follow Conventional Commits with a scope: `feat(runtime): ...`, `fix(pi): ...`,

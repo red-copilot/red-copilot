@@ -103,11 +103,10 @@ def bootstrap_solver(
     )
     verifier_registry = verifier_registry or VerifierRegistry()
     progress.write(run_dir / "progress.json")
-    sync_workspace = lambda: (
-        sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
-        if agent_workspace is not None
-        else None
-    )
+    def sync_workspace() -> None:
+        if agent_workspace is not None:
+            sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
+
     loop = SolverLoop(
         world=world,
         progress=progress,

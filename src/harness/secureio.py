@@ -5,9 +5,29 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
-from typing import IO
+from typing import IO, Literal, overload
 
 _DEFAULT_READ_LIMIT = 64 * 1024 * 1024
+
+
+@overload
+def open_regular_file(
+    path: Path,
+    mode: Literal["r", "a", "w"],
+    *,
+    encoding: str | None = "utf-8",
+    errors: str = "strict",
+) -> IO[str]: ...
+
+
+@overload
+def open_regular_file(
+    path: Path,
+    mode: Literal["rb", "ab", "wb"],
+    *,
+    encoding: str | None = "utf-8",
+    errors: str = "strict",
+) -> IO[bytes]: ...
 
 
 def open_regular_file(
@@ -16,7 +36,7 @@ def open_regular_file(
     *,
     encoding: str | None = "utf-8",
     errors: str = "strict",
-) -> IO[str]:
+) -> IO[str] | IO[bytes]:
     if not hasattr(os, "O_NOFOLLOW"):
         raise OSError("platform does not support no-follow Agent file access")
     flags = {
@@ -35,7 +55,7 @@ def open_regular_file(
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise OSError(f"expected a regular file: {path}")
         if "b" in mode:
-            return os.fdopen(descriptor, mode)  # type: ignore[return-value]
+            return os.fdopen(descriptor, mode)
         return os.fdopen(descriptor, mode, encoding=encoding, errors=errors)
     except BaseException:
         os.close(descriptor)
@@ -50,7 +70,7 @@ def read_regular_text(
     max_bytes: int = _DEFAULT_READ_LIMIT,
 ) -> str:
     with open_regular_file(path, "rb") as handle:
-        data = handle.read(max_bytes + 1)  # type: ignore[union-attr]
+        data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise OSError(f"Agent output exceeds the {max_bytes}-byte read limit: {path}")
     return data.decode(encoding, errors=errors)
@@ -101,7 +121,7 @@ def open_beneath(
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise OSError(f"expected a regular workspace file: {relative_path}")
             if "b" in mode:
-                return os.fdopen(descriptor, mode)  # type: ignore[return-value]
+                return os.fdopen(descriptor, mode)
             return os.fdopen(descriptor, mode, encoding="utf-8")
         except BaseException:
             os.close(descriptor)

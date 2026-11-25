@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import sys
 from collections.abc import Sequence
 from pathlib import Path
+
+import typer
 
 from . import __version__
 from .models import (
@@ -144,38 +145,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = config_from_args(args)
     except SpikeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        typer.echo(f"error: {exc}", err=True)
         return EXIT_USAGE
 
     if config.plan_only:
         try:
             plan = plan_only(config)
         except SpikeError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            typer.echo(f"error: {exc}", err=True)
             return EXIT_USAGE
-        print(json.dumps(plan, ensure_ascii=False, indent=2))
-        print(
+        typer.echo(json.dumps(plan, ensure_ascii=False, indent=2))
+        typer.echo(
             f"\nplan only: {len(plan)} container(s) across {len(config.challenges)} "
             f"challenge(s), {MAX_SESSIONS_PER_TASK} solvers each",
-            file=sys.stderr,
+            err=True,
         )
         return 0
 
     try:
         report = asyncio.run(run_sweep(config))
     except KeyboardInterrupt:  # pragma: no cover - operator abort
-        print("interrupted; teardown attempted to close every started instance", file=sys.stderr)
+        typer.echo("interrupted; teardown attempted to close every started instance", err=True)
         return 130
     for outcome in report.outcomes:
-        print(
+        typer.echo(
             f"{outcome.code}: {outcome.status} ({outcome.exit_reason}) "
             f"rounds={outcome.rounds} flags={len(outcome.flags)}"
         )
     if report.message:
-        print(f"message: {report.message}", file=sys.stderr)
+        typer.echo(f"message: {report.message}", err=True)
     if report.platform_kind:
-        print(f"platform failure: {report.platform_kind}", file=sys.stderr)
-    print(f"runs: {config.runs_root}")
+        typer.echo(f"platform failure: {report.platform_kind}", err=True)
+    typer.echo(f"runs: {config.runs_root}")
     return report.exit_code
 
 
