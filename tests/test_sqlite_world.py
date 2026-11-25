@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -206,6 +207,107 @@ def test_sqlite_world_repository_imports_legacy_jsonl(tmp_path) -> None:
     ]
     assert [item["id"] for item in exported] == ["wevt-1", "wevt-2"]
 
+
+def test_sqlite_world_imports_legacy_jsonl_idempotently(tmp_path) -> None:
+    event_path = tmp_path / "world.events.jsonl"
+    event_path.write_text(
+        WorldEvent(
+            id="wevt-1",
+            kind="goal",
+            object={"id": "goal-1", "description": "legacy"},
+        ).model_dump_json()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    first = SQLiteWorldRepository(event_path)
+    second = SQLiteWorldRepository(event_path)
+
+    assert first.snapshot.revision == 1
+    assert second.snapshot.revision == 1
+    assert list(second.snapshot.goals) == ["goal-1"]
+
+
+def test_sqlite_world_rejects_a_malformed_legacy_file_before_importing(tmp_path) -> None:
+    event_path = tmp_path / "world.events.jsonl"
+    event_path.write_text(
+        WorldEvent(
+            id="wevt-1",
+            kind="goal",
+            object={"id": "goal-1", "description": "legacy"},
+        ).model_dump_json()
+        + "\nnot-json\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        SQLiteWorldRepository(event_path)
+
+    with sqlite3.connect(tmp_path / "world.db") as connection:
+        count = connection.execute("SELECT COUNT(*) FROM world_events").fetchone()[0]
+    assert count == 0
+
+
+def test_sqlite_world_uses_full_synchronous(tmp_path) -> None:
+    repository = SQLiteWorldRepository(tmp_path / "world.db")
+
+    with repository._connect() as connection:
+        synchronous = connection.execute("PRAGMA synchronous").fetchone()[0]
+
+    assert synchronous == 2  # FULL
+
+
+def test_sqlite_world_flush_fsyncs_both_exports_and_the_directory(
+    tmp_path, monkeypatch
+) -> None:
+    repository = SQLiteWorldRepository(tmp_path / "world.db")
+    repository.upsert("goal", Goal(id="goal-1", description="durable"))
+    calls: list[int] = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(
+        "harness.world.sqlite.os.fsync",
+        lambda descriptor: calls.append(descriptor) or real_fsync(descriptor),
+    )
+
+    repository.flush()
+
+    # Two temporary files are made durable, then the publish directory is
+    # fsynced so the renames survive a crash.
+    assert len(calls) >= 3
+
+
+def test_concurrent_snapshot_reads_never_tear_a_committed_revision(tmp_path) -> None:
+    repository = SQLiteWorldRepository(tmp_path / "world.db")
+    stop = threading.Event()
+    failures: list[str] = []
+
+    def read() -> None:
+        last = 0
+        while not stop.is_set():
+            snapshot = repository.snapshot
+            if snapshot.revision < last:
+                failures.append("revision regressed")
+            last = snapshot.revision
+            if len(snapshot.observations) != snapshot.revision:
+                failures.append("torn snapshot")
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    try:
+        for index in range(50):
+            repository.upsert(
+                "observation",
+                Observation(
+                    id=f"obs-{index}",
+                    type="synthetic",
+                    content={"index": index},
+                ),
+            )
+    finally:
+        stop.set()
+        reader.join()
+
+    assert failures == []
 
 
 def test_sqlite_world_repository_serializes_concurrent_writers(tmp_path) -> None:

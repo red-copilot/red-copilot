@@ -71,8 +71,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # 18,390 -> 18,443: `persist_control_state` (checkpoint then progress) and the
 # one-event progress-ahead recovery contract in `runtime/checkpoint.py` (+53),
 # plus the call-site swaps. Re-measured.
+#
+# QA World durability (2026-11-25). B7 added no module. Source lines moved
+# 18,443 -> 18,475: the cache write lock (RLock), validated/idempotent legacy
+# import, and the fsync'd paired export publish plus `synchronous=FULL` in
+# `world/sqlite.py` (+32). Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_443
+MAX_SRC_LINES = 18_475
 
 
 def _module_names() -> set[str]:

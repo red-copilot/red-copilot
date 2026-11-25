@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -11,6 +12,23 @@ from pydantic import BaseModel
 from .models import KIND_COLLECTIONS, WorldEvent, WorldObjectKind, WorldSnapshot
 from .reducer import WorldReducer
 from .repository import WorldConflictError
+
+
+def _write_text_fsync(path: Path, data: str) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class SQLiteWorldRepository:
@@ -28,7 +46,7 @@ class SQLiteWorldRepository:
         )
         self.snapshot_path = self.db_path.with_name("world.snapshot.json")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._reducer = WorldReducer()
         self._initialize()
         self._import_legacy_jsonl_if_needed()
@@ -43,7 +61,9 @@ class SQLiteWorldRepository:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute("PRAGMA synchronous=NORMAL")
+        # The World is the authoritative store; pay for a durable commit rather
+        # than risk losing the last events on a power cut.
+        connection.execute("PRAGMA synchronous=FULL")
         return connection
 
     def _initialize(self) -> None:
@@ -100,7 +120,8 @@ class SQLiteWorldRepository:
             # read snapshot while writers commit concurrently in WAL mode.
             connection.execute("BEGIN")
             snapshot = self._load_snapshot(connection)
-            self._snapshot_cache = snapshot
+            with self._lock:
+                self._snapshot_cache = snapshot
             return snapshot.model_copy(deep=True)
 
     @property
@@ -337,19 +358,31 @@ class SQLiteWorldRepository:
         )
 
     def _import_legacy_jsonl_if_needed(self) -> None:
-        if self.revision != 0 or not self.export_event_path.is_file():
-            return
-        lines = [
-            line
-            for line in self.export_event_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        for line in lines:
-            self.append(WorldEvent.model_validate_json(line))
+        with self._lock:
+            if self.revision != 0 or not self.export_event_path.is_file():
+                return
+            lines = [
+                line
+                for line in self.export_event_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            # Validate the whole legacy file before touching the store so a
+            # malformed tail cannot leave a half-imported World. Appends are
+            # idempotent by event id, which also makes a cross-process retry
+            # safe even though the revision check is outside their transaction.
+            events = [WorldEvent.model_validate_json(line) for line in lines]
+            for event in events:
+                self.append(event)
 
     def _write_exports(self) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            temp_events = self.export_event_path.with_suffix(
+                self.export_event_path.suffix + ".tmp"
+            )
+            temp_snapshot = self.snapshot_path.with_suffix(
+                self.snapshot_path.suffix + ".tmp"
+            )
             try:
                 rows = connection.execute(
                     "SELECT payload_json FROM world_events ORDER BY sequence"
@@ -360,32 +393,31 @@ class SQLiteWorldRepository:
                 ]
                 snapshot = self._load_snapshot(connection)
 
-                temp_events = self.export_event_path.with_suffix(
-                    self.export_event_path.suffix + ".tmp"
-                )
-                temp_events.write_text(
+                # Make both files durable before publishing either one, then
+                # fsync the directory so the renames themselves survive a crash.
+                _write_text_fsync(
+                    temp_events,
                     "".join(event.model_dump_json() + "\n" for event in events),
-                    encoding="utf-8",
                 )
-                temp_events.replace(self.export_event_path)
-
-                temp_snapshot = self.snapshot_path.with_suffix(
-                    self.snapshot_path.suffix + ".tmp"
-                )
-                temp_snapshot.write_text(
+                _write_text_fsync(
+                    temp_snapshot,
                     json.dumps(
                         snapshot.model_dump(mode="json"),
                         ensure_ascii=False,
                         indent=2,
                     )
                     + "\n",
-                    encoding="utf-8",
                 )
-                temp_snapshot.replace(self.snapshot_path)
+                os.replace(temp_events, self.export_event_path)
+                os.replace(temp_snapshot, self.snapshot_path)
+                _fsync_directory(self.export_event_path.parent)
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+            finally:
+                temp_events.unlink(missing_ok=True)
+                temp_snapshot.unlink(missing_ok=True)
 
     def flush(self) -> None:
         """Write current event and snapshot exports at a checkpoint boundary."""

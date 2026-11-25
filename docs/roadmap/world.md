@@ -15,7 +15,7 @@ State: implemented via `WorldRetriever` and `WorldContextBuilder` with validity 
 ### WLD-03 [x] P2 — Compact storage, query and snapshots
 Deliver: retention and compaction without losing provenance, indexed SQLite queries and periodic snapshot/restore.
 Accept: replay parity after compaction, large synthetic runs within the stated latency and storage budgets, corruption detection.
-State: implemented; the 1,000-event fixture stays under 10s, 32 MiB traced allocation and 20 MiB stored bytes with replay/export/snapshot parity checks, backup/restore and corrupt-snapshot detection. The JSONL store was removed; SQLite is the only implementation.
+State: implemented; the 1,000-event fixture stays under 10s plain and 30s under branch coverage, 32 MiB traced allocation and 20 MiB stored bytes with replay/export/snapshot parity checks, backup/restore and corrupt-snapshot detection. SQLite is the only live store; a validated, idempotent legacy JSONL import remains as a one-time migration path. The authoritative DB uses `synchronous=FULL`, export files are fsynced and published as a pair with a directory fsync, and the informational snapshot cache is serialized with writers. Evidence: `tests/test_sqlite_world.py`.
 
 ### WLD-04 [ ] experimental — Learning-based retrieval
 Deliver: only propose after WLD-02 ablations establish retrieval bottlenecks, comparing against the deterministic baseline on held-out domains.
