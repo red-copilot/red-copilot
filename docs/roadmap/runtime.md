@@ -106,5 +106,14 @@ are removed; steer metrics are limited to `hint`, `finalize`, `submission` and `
 Evidence: `tests/test_control_law_properties.py`, `tests/test_control_properties.py`,
 `tests/test_solver_loop.py`, `tests/test_benchmark_streaming.py`, `tests/test_docs_consistency.py`.
 
+### RUN-10 [~] P0 — Gateway usage reaches the stop law
+Deliver: trusted gateway `model.usage` / `model.request` records are yielded into the solver
+stream so the external budget stop law sees them in gateway mode.
+Accept: gateway usage charges `ProgressLedger.budget_used` exactly once; an exhausted
+dimension makes `decide()` stop; non-gateway paths are unchanged.
+State: `_consume_gateway_events` returns the trusted events and `events()` yields them; the
+session-local usage ceiling remains separate. Evidence: `tests/test_gateway.py`. Awaiting
+maintainer review of the budget semantics.
+
 **Non-goals:** distributed workflow orchestrator, required DAG, reimplementation of Pi's internal reasoning loop.
 

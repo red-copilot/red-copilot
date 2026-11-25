@@ -448,12 +448,14 @@ class ContainerPiRpcSession:
             except TimeoutError:
                 # The loop top re-checks the deadline every pass, so a wait
                 # that overshot it is caught there on the next iteration.
-                self._consume_gateway_events()
+                for event in self._consume_gateway_events():
+                    yield event
                 if self._budget_exceeded:
                     await self._kill_container()
                     break
                 continue
-            self._consume_gateway_events()
+            for event in self._consume_gateway_events():
+                yield event
             if self._budget_exceeded:
                 await self._kill_container()
                 break
@@ -511,6 +513,8 @@ class ContainerPiRpcSession:
             if self._settled:
                 break
 
+        for event in self._consume_gateway_events():
+            yield event
         for event in self._consume_agent_events():
             yield event
         if not self._settled and not self._timed_out and not self._budget_exceeded:
@@ -748,53 +752,60 @@ class ContainerPiRpcSession:
             data={"message": self._telemetry_invalid},
         )
 
-    def _consume_gateway_events(self) -> None:
+    def _consume_gateway_events(self) -> list[AgentEvent]:
+        events: list[AgentEvent] = []
         if self.gateway_usage_path is None:
-            return
+            return events
         try:
             with open_regular_file(self.gateway_usage_path, "rb") as handle:
                 handle.seek(0, os.SEEK_END)
                 if self._gateway_event_offset > handle.tell():
                     self._invalid_gateway_telemetry("gateway usage cursor is ahead of its log")
-                    return
+                    return events
                 handle.seek(self._gateway_event_offset)
                 while True:
                     line = handle.readline(8 * 1024 * 1024 + 1)
                     if not line:
-                        return
+                        return events
                     if len(line) > 8 * 1024 * 1024:
-                        self._invalid_gateway_telemetry("gateway usage record exceeded size limit")
-                        return
+                        self._invalid_gateway_telemetry(
+                            "gateway usage record exceeded size limit"
+                        )
+                        return events
                     if not line.endswith(b"\n"):
-                        return
+                        return events
                     self._gateway_event_offset = handle.tell()
-                    self._consume_gateway_event_line(line)
+                    event = self._consume_gateway_event_line(line)
+                    if event is not None:
+                        events.append(event)
                     if self._budget_exceeded:
-                        return
+                        return events
         except FileNotFoundError:
             if self._gateway_event_offset:
-                self._invalid_gateway_telemetry("gateway usage log is missing at the saved cursor")
-            return
+                self._invalid_gateway_telemetry(
+                    "gateway usage log is missing at the saved cursor"
+                )
+            return events
 
-    def _consume_gateway_event_line(self, line: bytes) -> None:
+    def _consume_gateway_event_line(self, line: bytes) -> AgentEvent | None:
         try:
             record = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._invalid_gateway_telemetry("gateway usage log contains malformed JSON")
-            return
+            return None
         if isinstance(record, dict) and record.get("type") == "model.usage_missing":
             self.adapter.trace.emit("model.usage_missing", actor="gateway")
             self._invalid_gateway_telemetry("gateway did not report valid model usage")
-            return
+            return None
         if not isinstance(record, dict) or record.get("type") not in {
             "model.request",
             "model.usage",
         }:
-            return
+            return None
         data = record.get("data")
         if not isinstance(data, dict):
             self._invalid_gateway_telemetry("gateway usage record has invalid shape")
-            return
+            return None
         event = AgentEvent(
             type=record["type"],
             data=data,
@@ -802,6 +813,7 @@ class ContainerPiRpcSession:
         )
         self._account(event)
         self.adapter.trace.emit(event.type, actor="gateway", data=event.data)
+        return event
 
     def _invalid_gateway_telemetry(self, reason: str) -> None:
         self._telemetry_invalid = reason

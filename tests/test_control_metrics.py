@@ -76,8 +76,12 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # 18,443 -> 18,475: the cache write lock (RLock), validated/idempotent legacy
 # import, and the fsync'd paired export publish plus `synchronous=FULL` in
 # `world/sqlite.py` (+32). Re-measured.
+#
+# QA gateway usage (2026-11-25). B2 added no module. Source lines moved
+# 18,475 -> 18,487: `_consume_gateway_events` returns the trusted usage events
+# and `events()` yields them into the solver stream (+12). Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_475
+MAX_SRC_LINES = 18_487
 
 
 def _module_names() -> set[str]:

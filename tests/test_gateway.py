@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -119,8 +120,8 @@ def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path
         trace=TraceRecorder(tmp_path / "trace.jsonl", "run_gateway_budget", "task")
     )
 
-    session._consume_gateway_events()
-    session._consume_gateway_events()
+    first = session._consume_gateway_events()
+    second = session._consume_gateway_events()
     checkpoint = AgentCheckpoint(
         id="gateway-cursor",
         event_offset=0,
@@ -128,6 +129,9 @@ def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path
         gateway_event_offset=session._gateway_event_offset,
     )
 
+    assert [event.type for event in first] == ["model.request", "model.usage"]
+    assert first[1].data["total_tokens"] == 12
+    assert second == []
     assert session._metrics.model_calls == 1
     assert session._metrics.total_tokens == 12
     assert session._metrics.cost_usd == 0.0001
@@ -135,6 +139,54 @@ def test_pi_rpc_accounts_trusted_gateway_usage_once_and_persists_cursor(tmp_path
     # usage is still charged exactly once without stopping the run.
     assert session._budget_exceeded is None
     assert checkpoint.gateway_event_offset == trusted_events.stat().st_size
+
+
+def test_gateway_usage_event_drives_the_solver_stop_law(tmp_path: Path) -> None:
+    from harness.progress import ProgressLedger
+    from harness.session import AgentEvent
+    from harness.solver_loop import SolverLoop
+    from harness.solver_policy import SolverAction
+    from harness.trace import TraceRecorder
+    from harness.world import SQLiteWorldRepository
+
+    class Session:
+        async def observe(self, _observation) -> None:
+            return None
+
+        async def close(self, _reason) -> None:
+            return None
+
+    world = SQLiteWorldRepository(tmp_path / "world.db")
+    progress = ProgressLedger(budget_limits={"max_tokens": 10})
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run_gateway_law", "task"),
+        actor="agent:test",
+        context_query="gateway budget",
+        planned_world_revision=world.snapshot.revision,
+    )
+
+    asyncio.run(
+        loop.process_event(
+            Session(),
+            AgentEvent(
+                type="model.usage",
+                data={
+                    "input_tokens": 7,
+                    "output_tokens": 5,
+                    "total_tokens": 12,
+                    "cost_usd": 0.0,
+                },
+                event_id="gateway:1",
+            ),
+        )
+    )
+
+    assert progress.budget_used["tokens"] == 12
+    assert progress.remaining_budget_fraction == 0.0
+    assert loop.decide().action is SolverAction.STOP
 
 
 def test_gateway_usage_normalizes_underreported_total_tokens() -> None:
