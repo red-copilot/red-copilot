@@ -87,8 +87,12 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # (+29) replace the hand-written phase blocks in the runner (-42) and the
 # orchestrator (-25). Source lines moved 18,557 -> 18,519, so the ceiling is
 # ratcheted down with the tree.
+#
+# QA credential transport (2026-11-25). B6b added no module. Source lines moved
+# 18,519 -> 18,560: the secret env-file writer and path helper in `agent.py`
+# (+34) and the create-time cleanup in `pi_container.py` (+7). Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_519
+MAX_SRC_LINES = 18_560
 
 
 def _module_names() -> set[str]:

@@ -29,6 +29,14 @@ metadata, immutable content-hash references explicitly marked untrusted, 409 on
 duplicate call IDs (including after a Gateway restart) and `unknown` status for
 interrupted executions. Output hashes never prove objective effects.
 
+## Credential transport
+
+The in-process Gateway token (and the `OPENAI_API_KEY` alias) is written to a 0600 env file
+beside the mounted workspace and passed with `--env-file`; it never appears in the docker
+argv. Docker still records the container environment, so `docker inspect` shows the token to
+anyone with Docker access. Moving the token to a mounted read-once file is a follow-up if that
+residual exposure matters.
+
 For the Pi container, pass the verifier-free task snapshot as `task_dir` to the
 Gateway. Never mount the original task directory into a Gateway reachable by an
 untrusted Agent.

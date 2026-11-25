@@ -11,6 +11,7 @@ from .agent_workspace import (
 )
 from .budget import UsageMetrics
 from .models import AgentSpec, TaskSpec, _is_reserved_credential_env
+from .secureio import open_regular_file
 from .trace import TraceRecorder
 
 
@@ -98,6 +99,28 @@ def gateway_environment(gateway_url: str, gateway_token: str) -> dict[str, str]:
     }
 
 
+# Values that must never appear in the docker argv; they are written to a 0600
+# env file outside the mounted workspace instead.
+_SECRET_CONTAINER_ENV = ("HARNESS_GATEWAY_TOKEN", "OPENAI_API_KEY")
+
+
+def gateway_env_file_path(run_dir: Path, container_name: str) -> Path:
+    """Secret env-file path: a sibling of the mounted workspace, never inside it."""
+    return run_dir.parent / f".{container_name}.gateway.env"
+
+
+def _write_secret_env_file(path: Path, values: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open_regular_file(path, "w") as handle:
+        for key, value in values.items():
+            if "\n" in value or "\r" in value:
+                raise AgentError(
+                    f"secret environment value for {key} contains a newline"
+                )
+            handle.write(f"{key}={value}\n")
+    path.chmod(0o600)
+
+
 @dataclass(frozen=True)
 class ContainerLimits:
     """Docker resource limits shared by every container the Harness launches."""
@@ -134,6 +157,7 @@ def build_container_command(
     extra_cap_add: Sequence[str] = (),
     extra_env: dict[str, str] | None = None,
     env_passthrough: Sequence[str] = (),
+    secret_env_file: Path | None = None,
     interactive: bool = False,
 ) -> list[str]:
     """Build the hardened Docker command for the container Pi Agent."""
@@ -225,8 +249,18 @@ def build_container_command(
             if key not in os.environ:
                 raise AgentError(f"requested Pi environment variable is missing: {key}")
             environment[key] = os.environ[key]
+    secret_values: dict[str, str] = {}
+    if secret_env_file is not None:
+        for key in _SECRET_CONTAINER_ENV:
+            value = environment.pop(key, None)
+            if value is not None:
+                secret_values[key] = value
+        if secret_values:
+            _write_secret_env_file(secret_env_file, secret_values)
     for key, value in environment.items():
         command.extend(["-e", f"{key}={value}"])
+    if secret_values:
+        command.extend(["--env-file", str(secret_env_file)])
     command.extend(proxy_environment_overrides(spec.network_profile))
     if interactive:
         command.append("-i")

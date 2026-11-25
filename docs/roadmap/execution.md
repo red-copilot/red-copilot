@@ -88,5 +88,16 @@ workspace stays owner-only, and the mounts, the network profiles and the un-moun
 unchanged. Evidence: `tests/test_agent_workspace.py`, `tests/test_container_boundary.py`,
 `tests/test_pi_adapter.py`, `tests/test_runtime_profiles.py`.
 
+### EXE-11 [~] P0 — Gateway credential transport
+Deliver: the gateway token and its `OPENAI_API_KEY` alias never appear in the docker argv.
+Accept: the container command carries `--env-file` instead of the secret `-e` values; the file
+is 0600 outside the mounted workspace and is removed after `docker create`; newline values fail
+closed.
+State: implemented; `build_container_command` pops the two secret variables when a secret env
+file is supplied, `_container_command` places it beside the workspace, and `pi_container`
+deletes it after create. Evidence: `tests/test_pi_adapter.py`. Docker still records the
+container environment for `docker inspect`; mounting a read-once secret file remains the
+follow-up. Awaiting maintainer review of the credential boundary.
+
 **Non-goals:** arbitrary unsandboxed host execution as a default, dynamic tool downloads in offline competition runs, schema-ing the Harness-normalized `tool.*`/`model.*` streams, multi-agent session contracts.
 

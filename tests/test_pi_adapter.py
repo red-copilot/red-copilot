@@ -438,7 +438,37 @@ def test_pi_gateway_does_not_pass_direct_provider_secret(monkeypatch, tmp_path: 
         host_gateway=False,
     )
     assert "FAKE_PROVIDER_KEY=secret" not in command
-    assert "HARNESS_GATEWAY_TOKEN=one-time-token" in command
+    assert "HARNESS_GATEWAY_TOKEN=one-time-token" not in command
+    assert "OPENAI_API_KEY=one-time-token" not in command
+    env_file = Path(command[command.index("--env-file") + 1])
+    assert env_file.parent == run_dir.parent
+    assert env_file.stat().st_mode & 0o777 == 0o600
+    contents = env_file.read_text(encoding="utf-8")
+    assert "HARNESS_GATEWAY_TOKEN=one-time-token" in contents
+    assert "OPENAI_API_KEY=one-time-token" in contents
+
+
+def test_gateway_secret_env_file_rejects_newline_values(
+    monkeypatch, tmp_path: Path
+) -> None:
+    adapter = _adapter(monkeypatch, tmp_path)
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(AgentError, match="contains a newline"):
+        adapter._container_command(
+            task,
+            task_dir=Path("benchmarks/examples/hello").resolve(),
+            run_dir=run_dir,
+            container_name="pi-test",
+            network="gateway-net",
+            environment_project=None,
+            seed=1,
+            gateway_url="http://harness-gateway:8765",
+            gateway_token="bad\ntoken",
+            host_gateway=False,
+        )
 
 
 def test_pi_usage_with_malformed_counters_degrades_without_terminating(

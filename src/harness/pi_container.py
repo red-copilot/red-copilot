@@ -19,6 +19,7 @@ from .agent import (
     AgentError,
     AgentResult,
     AgentRunContext,
+    gateway_env_file_path,
     ContainerLimits,
     build_container_command,
 )
@@ -263,6 +264,8 @@ class ContainerPiRpcSession:
             },
         )
         await asyncio.to_thread(self.adapter._docker, create_command, cwd=task_dir)
+        if gateway_token:
+            gateway_env_file_path(run_dir, self.container_name).unlink(missing_ok=True)
         self._stderr_handle = open_regular_file(self.stderr_path, "ab")
         self.process = await asyncio.create_subprocess_exec(
             "docker",
@@ -900,6 +903,9 @@ class ContainerPiAdapter(PiAdapter):
         }
         if self.pi.offline or self.spec.network_profile != "unrestricted":
             pi_env["PI_OFFLINE"] = "1"
+        secret_env_file = (
+            gateway_env_file_path(run_dir, container_name) if gateway_token else None
+        )
         return build_container_command(
             spec=self.spec,
             task=task,
@@ -916,6 +922,7 @@ class ContainerPiAdapter(PiAdapter):
             shared_findings_dir=shared_findings_dir,
             extra_mounts=self.extra_mounts,
             workdir=self.workdir,
+            secret_env_file=secret_env_file,
             limits=ContainerLimits(
                 pids=512,
                 memory="4g",
