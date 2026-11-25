@@ -70,6 +70,11 @@ solver-loop, checkpoint and workspace boundaries; records carry the stage and er
 never untrusted exception text. Remaining pass-only handlers are documented as best-effort
 cleanup. Evidence: `tests/test_observability.py`.
 
+QA-04 dedup (2026-11-25). Extracted `transition_with_trace` and `settle_with_trace` into the
+lifecycle policy, replacing six hand-written phase-transition blocks across the local and
+benchmark paths. The source ceiling ratcheted down from 18,557 to 18,519 lines. Evidence:
+`tests/test_lifecycle.py`, `tests/test_smoke.py`.
+
 ## Validation sequence
 
 `ruff check .`; `pytest -q`; `pytest tests/test_architecture.py -q` after any module move; `harness validate`/`preflight` on touched fixtures; the hello smoke run. Docker and TSec paths run only in prepared environments and must be reported as unexecuted otherwise.

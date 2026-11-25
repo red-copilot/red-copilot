@@ -36,7 +36,12 @@ from .runtime.checkpoint import (
     run_action_owner,
 )
 from .runtime.evidence import persist_objective_verdict
-from .runtime.lifecycle import RunLifecycle, resolve_run_status
+from .runtime.lifecycle import (
+    RunLifecycle,
+    resolve_run_status,
+    settle_with_trace,
+    transition_with_trace,
+)
 from .runtime.projections import finalize_world_goal, network_result, run_summary, world_result
 from .runtime.results import persist_run_result
 from .secureio import read_regular_text
@@ -264,16 +269,7 @@ class Orchestrator:
                 "milestones": {},
             }
             if not lifecycle.terminal:
-                previous_phase = lifecycle.phase
-                lifecycle.settle_for_status(status)
-                trace.emit(
-                    "run.phase",
-                    data={
-                        "previous": previous_phase,
-                        "phase": lifecycle.phase,
-                        "status": status,
-                    },
-                )
+                settle_with_trace(lifecycle, trace, status)
             trace.emit(
                 "run.error",
                 data={"error_type": type(exc).__name__},
@@ -449,16 +445,7 @@ class Orchestrator:
                 "milestones": {},
             }
             if not lifecycle.terminal:
-                previous_phase = lifecycle.phase
-                lifecycle.settle_for_status(status)
-                trace.emit(
-                    "run.phase",
-                    data={
-                        "previous": previous_phase,
-                        "phase": lifecycle.phase,
-                        "status": status,
-                    },
-                )
+                settle_with_trace(lifecycle, trace, status)
             trace.emit(
                 "run.error",
                 data={"error_type": type(exc).__name__},
@@ -645,12 +632,7 @@ class Orchestrator:
                     "milestones": {},
                 }
             else:
-                previous_phase = lifecycle.phase
-                lifecycle.transition("verifying")
-                trace.emit(
-                    "run.phase",
-                    data={"previous": previous_phase, "phase": lifecycle.phase},
-                )
+                transition_with_trace(lifecycle, trace, "verifying")
                 run_phase = "verification"
                 try:
                     verified, vout, verr = run_verifier(
@@ -779,15 +761,8 @@ class Orchestrator:
         solver_loop.finish_ingest()
 
         if not lifecycle.terminal:
-            previous_phase = lifecycle.phase
-            lifecycle.settle_for_status(status, success=bool(verification["success"]))
-            trace.emit(
-                "run.phase",
-                data={
-                    "previous": previous_phase,
-                    "phase": lifecycle.phase,
-                    "status": status,
-                },
+            settle_with_trace(
+                lifecycle, trace, status, success=bool(verification["success"])
             )
 
         duration_ms = max(

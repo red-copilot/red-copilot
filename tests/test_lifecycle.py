@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from harness.runtime.lifecycle import (
@@ -8,7 +10,10 @@ from harness.runtime.lifecycle import (
     RunStatus,
     resolve_run_phase,
     resolve_run_status,
+    settle_with_trace,
+    transition_with_trace,
 )
+from harness.trace import TraceRecorder
 
 
 @pytest.mark.parametrize(
@@ -94,3 +99,26 @@ def test_cancellation_wins_over_a_successful_verdict() -> None:
     lifecycle.transition("running")
 
     assert lifecycle.settle_for_status("cancelled", success=True) == "cancelled"
+
+
+def test_transition_and_settle_helpers_emit_phase_events(tmp_path) -> None:
+    lifecycle = RunLifecycle()
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-helper", "task")
+
+    assert transition_with_trace(lifecycle, trace, "running") == "running"
+    assert transition_with_trace(lifecycle, trace, "verifying") == "verifying"
+    assert settle_with_trace(lifecycle, trace, "finished", success=True) == "succeeded"
+
+    phases = [
+        event["data"]
+        for event in (
+            json.loads(line)
+            for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+        )
+        if event["type"] == "run.phase"
+    ]
+    assert phases == [
+        {"previous": "created", "phase": "running"},
+        {"previous": "running", "phase": "verifying"},
+        {"previous": "verifying", "phase": "succeeded", "status": "finished"},
+    ]

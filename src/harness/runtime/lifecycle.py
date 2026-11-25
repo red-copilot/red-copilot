@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from ..trace import TraceRecorder
+
 RunStatus = Literal[
     "objective_completed",
     "timeout",
@@ -129,3 +131,30 @@ def resolve_run_phase(status: RunStatus, *, success: bool = False) -> RunPhase:
     if status in {"timeout", "budget_exceeded"}:
         return "exhausted"
     return "succeeded" if success else "failed"
+
+
+def transition_with_trace(
+    lifecycle: RunLifecycle, trace: TraceRecorder, target: RunPhase
+) -> RunPhase:
+    """Transition the lifecycle and record the phase change in the run trace."""
+    previous = lifecycle.phase
+    phase = lifecycle.transition(target)
+    trace.emit("run.phase", data={"previous": previous, "phase": phase})
+    return phase
+
+
+def settle_with_trace(
+    lifecycle: RunLifecycle,
+    trace: TraceRecorder,
+    status: RunStatus,
+    *,
+    success: bool = False,
+) -> RunPhase:
+    """Settle one terminal phase and record it with the public status."""
+    previous = lifecycle.phase
+    phase = lifecycle.settle_for_status(status, success=success)
+    trace.emit(
+        "run.phase",
+        data={"previous": previous, "phase": phase, "status": status},
+    )
+    return phase

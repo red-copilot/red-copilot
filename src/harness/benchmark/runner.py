@@ -37,7 +37,12 @@ from ..runtime.executors import (
 from ..agent_workspace import seed_notes_from_attempt, sync_agent_workspace
 from ..runtime.checkpoint import persist_control_state, run_action_owner
 from ..runtime.evidence import persist_objective_verdict
-from ..runtime.lifecycle import RunLifecycle, resolve_run_status
+from ..runtime.lifecycle import (
+    RunLifecycle,
+    resolve_run_status,
+    settle_with_trace,
+    transition_with_trace,
+)
 from ..runtime.projections import finalize_world_goal, network_result, run_summary, world_result
 from ..runtime.results import persist_run_result, submission_fraction
 from ..world import (
@@ -778,16 +783,7 @@ class BenchmarkRunner:
                 "benchmark session cancelled error_type=%s", type(exc).__name__
             )
             if not lifecycle.terminal:
-                previous_phase = lifecycle.phase
-                lifecycle.settle_for_status("cancelled")
-                trace.emit(
-                    "run.phase",
-                    data={
-                        "previous": previous_phase,
-                        "phase": lifecycle.phase,
-                        "status": "cancelled",
-                    },
-                )
+                settle_with_trace(lifecycle, trace, "cancelled")
             await teardown_once()
             raise
         except BaseException as exc:
@@ -795,16 +791,7 @@ class BenchmarkRunner:
                 "benchmark session failed error_type=%s", type(exc).__name__
             )
             if not lifecycle.terminal:
-                previous_phase = lifecycle.phase
-                lifecycle.settle_for_status("error")
-                trace.emit(
-                    "run.phase",
-                    data={
-                        "previous": previous_phase,
-                        "phase": lifecycle.phase,
-                        "status": "error",
-                    },
-                )
+                settle_with_trace(lifecycle, trace, "error")
             await teardown_once()
             raise
 
@@ -1170,12 +1157,7 @@ class BenchmarkRunner:
                 if agent_result is None:
                     raise RuntimeError("agent did not start")
 
-            previous_phase = lifecycle.phase
-            lifecycle.transition("verifying")
-            trace.emit(
-                "run.phase",
-                data={"previous": previous_phase, "phase": lifecycle.phase},
-            )
+            transition_with_trace(lifecycle, trace, "verifying")
             if evaluation is None:
                 await evaluate_final()
             # The final evaluator is authoritative. A submission marked
@@ -1224,32 +1206,14 @@ class BenchmarkRunner:
                 "benchmark session cancelled error_type=%s", type(exc).__name__
             )
             if not lifecycle.terminal:
-                previous_phase = lifecycle.phase
-                lifecycle.settle_for_status("cancelled")
-                trace.emit(
-                    "run.phase",
-                    data={
-                        "previous": previous_phase,
-                        "phase": lifecycle.phase,
-                        "status": "cancelled",
-                    },
-                )
+                settle_with_trace(lifecycle, trace, "cancelled")
             raise
         except Exception as exc:
             _logger.error(
                 "benchmark finalization failed error_type=%s", type(exc).__name__
             )
             if not lifecycle.terminal:
-                previous_phase = lifecycle.phase
-                lifecycle.settle_for_status("error")
-                trace.emit(
-                    "run.phase",
-                    data={
-                        "previous": previous_phase,
-                        "phase": lifecycle.phase,
-                        "status": "error",
-                    },
-                )
+                settle_with_trace(lifecycle, trace, "error")
             raise
         finally:
             try:
@@ -1278,17 +1242,11 @@ class BenchmarkRunner:
             )
         )
         if not lifecycle.terminal:
-            previous_phase = lifecycle.phase
-            lifecycle.settle_for_status(
-                status, success=bool(evaluation and evaluation.success)
-            )
-            trace.emit(
-                "run.phase",
-                data={
-                    "previous": previous_phase,
-                    "phase": lifecycle.phase,
-                    "status": status,
-                },
+            settle_with_trace(
+                lifecycle,
+                trace,
+                status,
+                success=bool(evaluation and evaluation.success),
             )
         finalize_world_goal(
             world=world,

@@ -81,8 +81,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # 18,475 -> 18,557: structured boundary loggers plus the ACI, recovery and
 # gateway warnings in the run, session, gateway and checkpoint modules (+82).
 # Re-measured.
+#
+# QA deduplication (2026-11-25). B9 added no module and removed duplication:
+# `transition_with_trace` / `settle_with_trace` in `runtime/lifecycle.py`
+# (+29) replace the hand-written phase blocks in the runner (-42) and the
+# orchestrator (-25). Source lines moved 18,557 -> 18,519, so the ceiling is
+# ratcheted down with the tree.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_557
+MAX_SRC_LINES = 18_519
 
 
 def _module_names() -> set[str]:
