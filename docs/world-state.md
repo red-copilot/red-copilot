@@ -12,8 +12,8 @@ runtime adds durable, replayable state without requiring the Harness to own the 
 - **Beliefs are not facts.** Observations and hypotheses may carry confidence and provenance.
 - **Capabilities are first-class.** Offensive progress is often best represented by what the Agent
   can now do rather than by a fixed task graph.
-- **Reasoning remains optional.** Agents may plan internally; future Harness planners can consume
-  the same state contract.
+- **Reasoning remains optional.** Agents may plan internally; the Harness stores the state
+  contract but does not plan for them.
 
 ## Core objects
 
@@ -92,9 +92,9 @@ through `HARNESS_EVENT_FILE`.
 1. **Done:** validated Agent-facing state-event ingestion protocol.
 2. **Done:** compact context builder over persisted world state.
 3. **Done:** resume from prior World State using a fresh Agent session.
-4. **Done:** domain-neutral Skill metadata registry.
-5. **Done:** rolling-horizon planner integrated with the interactive SolverLoop.
-6. **Done:** shared leased blackboard for explicit multi-agent coordination.
+4. **Removed:** domain-neutral Skill metadata registry (retired with the cognition scaffolding).
+5. **Removed:** rolling-horizon planner (cognition belongs to the Agent).
+6. **Removed:** shared leased blackboard (removed as open-loop complexity).
 7. **Research:** derived graph/timeline views, learned retrieval, and transition-model planning.
 
 The runtime loop treats World State as durable knowledge and `progress.json` as ephemeral control
@@ -131,7 +131,7 @@ materialized `world_objects` projection. It is the only World store implementati
 `world.events.jsonl` and `world.snapshot.json` files are compatibility/debug exports.
 
 Both the Orchestrator and State Plane API continue to accept a repository factory, so a future
-PostgreSQL implementation can replace SQLite without changing Agent, planner, or run semantics.
+PostgreSQL implementation can replace SQLite without changing Agent or run semantics.
 
 The authoritative source remains the event stream. Snapshots are derived and must never contain
 state that cannot be reconstructed from repository events.

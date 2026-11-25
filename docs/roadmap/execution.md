@@ -3,7 +3,7 @@
 **Scope:** `agent.py`, `session.py`, `pi_adapter.py`, `pi_container.py`, `subagent.py`, `gateway.py`, `gateway_runtime.py`, `tool_adapter.py`, `environment.py`, `docker/pi-kali/`. Pi RPC inside a Kali Rolling container is the only Agent execution path; the Gateway is host-only.
 
 ### EXE-01 [x] P0 — Execution trust boundary
-Deliver: documented threat model plus enforceable mounts, secret isolation, rootfs permissions, capability/PID/CPU/RAM limits, network rules, a non-privileged default and artifact handoff; the Agent must not reach the authoritative World DB, verifier source or credentials.
+Deliver: documented threat model plus enforceable mounts, secret isolation, rootfs permissions, capability/PID/CPU/RAM limits, network rules, an explicit container identity (root with the documented baseline capabilities since EXE-09) and artifact handoff; the Agent must not reach the authoritative World DB, verifier source or credentials.
 Accept: integration tests attempt to mutate protected state, obtain secrets, escape the allowed workspace and contact denied destinations; failures are observable.
 State: per-run `agent-workspace/` separation, no-follow file access, a verifier-free bounded task snapshot, blanked Docker proxy defaults, a cap-dropped container with an explicit capability baseline plus `cap_add` opt-in, shared `build_container_command` limits and six enforced network profiles are implemented. The isolation-probe boundary test runs in CI (`tests/test_container_boundary.py`, executed after the probe image build) and passed locally against `harness-isolation-probe:ci`; since EXE-09 it asserts the mount, capability and environment boundary instead of a non-root container UID.
 
@@ -52,7 +52,8 @@ platform actually receives is much smaller - `docker save ... | wc -c` reports 7
 and the gzipped form 763,061,574 bytes, both inside the 3 GB upload ceiling. Verified by `tests/test_pi_kali_image.py` (static contract: added tools,
 the capability strip, and no solve-time install anywhere in the image or the agent-facing
 markdown) and `tests/test_pi_kali_tools_docker.py` (connect and raw-socket scans, the Python
-stack, and a root-written artifact the harness can read back). The prompt and
+stack, and a root-written artifact the harness can read back). The path-filtered and nightly
+`pi-kali` workflow builds the image and runs both suites in CI. The prompt and
 `skills/offensive/active-recon` now carry the connect-scan default and the fallback path.
 
 ### EXE-08 [ ] P2 — Rendered observation (browser), phased

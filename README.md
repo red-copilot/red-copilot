@@ -128,7 +128,7 @@ agent_settled                 -> pi.agent_settled
 Pi model usage contributes input/output/total tokens and model cost to the Harness budget and result
 metrics. The raw Pi JSONL stream is retained in `agent.stdout.log`.
 
-By default, Pi runs in Docker with a read-only root filesystem, dropped Linux capabilities, bounded CPU/RAM/PIDs, read-only task mount, writable run workspace, and a fresh per-run `PI_CODING_AGENT_DIR`. Pi sessions are ephemeral, telemetry/update checks are disabled, project trust is denied, and project context/extensions/skills/MCP/templates/themes are not loaded unless explicitly enabled.
+By default, Pi runs in Docker with a read-only root filesystem, a root identity that keeps only the `DAC_OVERRIDE`/`FOWNER` baseline capabilities (every other capability is dropped), bounded CPU/RAM/PIDs, read-only task mount, writable run workspace, and a fresh per-run `PI_CODING_AGENT_DIR`. Pi sessions are ephemeral, telemetry/update checks are disabled, project trust is denied, and project context/extensions/skills/MCP/templates/themes are not loaded unless explicitly enabled.
 
 ### Route Pi Through the Model Gateway · 通过模型网关调用 Pi
 
@@ -332,7 +332,7 @@ Harness governance outer loop (Harness-owned)
   only the independent verifier/evaluator may close the objective loop
 ```
 
-World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). Reusable technique metadata uses `harness/skill/v1`; skills describe state preconditions and possible outcomes but are not executable code. The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
+World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
 
 Core separation rule:
 

@@ -45,7 +45,8 @@ Agent 的全部"认知基础设施"就是文件系统里的 markdown：
 
 - Agent 契约不再声明 `type` / `mode`；唯一执行内核是容器内 Pi RPC，保持既有硬化：只读根文件系统、
   `--cap-drop ALL`、no-new-privileges、无 docker socket、只读 `/task` 与 `/knowledge/*`、
-  可写 `/run/harness`。
+  可写 `/run/harness`。容器以 root 身份运行（EXE-09），并仅保留 `DAC_OVERRIDE`/`FOWNER`
+  两项基线能力以写入 harness 持有的工作区；其余能力全部丢弃。
 - `ExecutorSpec` 声明同一道题上并行的多个 Pi solver 会话（不同 provider / model / thinking /
   `extra_args` / system prompt），全部走同一容器 RPC 入口。
 - 并行度：**最多 3 道题并行**（平台并发实例上限），**每题可由多个 executor 竞争**。

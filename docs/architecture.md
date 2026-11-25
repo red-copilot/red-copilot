@@ -29,9 +29,9 @@ are consolidated in [agent-architecture.md](agent-architecture.md) (Chinese).
 - `benchmark/`: externally provisioned challenge lifecycle, submissions and adapters.
 - `agent.py`, `session.py`, `pi_*.py`: agent/session integration and infrastructure.
 - `tool_adapter.py`: domain-neutral async tool plugin contract; concrete tools are explicitly selected by application composition and remain subject to Gateway authorization.
-- `solver_loop.py`, `solver_policy.py`, `action_verifier.py`: solver policies.
-  `solver_policy.py` is a pure external stop law (budget/wall clock); cognition belongs
-  to the Agent, which keeps its own notes and reads markdown knowledge roots.
+- `solver_loop.py`, `solver_policy.py`: the interactive solver loop and the pure external stop
+  law (budget/wall clock). `action_verifier.py`: authorized action verification.
+  Cognition belongs to the Agent, which keeps its own notes and reads markdown knowledge roots.
 - `ledger.py`: append-only SQLite causal ledger, hash chain, trace adapter and replay comparison.
   It is a shadow of the v2 trace in M1, not a production source of truth.
 - `orchestrator.py`: local-run lifecycle and environment integration.

@@ -23,8 +23,8 @@ its source is excluded from the Agent's task input snapshot, and it sees the wor
 
 Harness reads Agent-produced files as hostile input: JSONL inboxes and telemetry require
 regular files opened without following a final symlink. Gateway writes use the same rule.
-The task mount and container root filesystem are read-only; only `/tmp` and the Agent
-workspace are writable. No Docker socket is mounted.
+The task mount and container root filesystem are read-only; only `/tmp`, `/var/tmp` and the
+Agent workspace are writable. No Docker socket is mounted.
 
 ### Competing sessions
 

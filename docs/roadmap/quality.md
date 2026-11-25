@@ -10,10 +10,10 @@ State: CI runs the namespace scan, Ruff, the isolation-probe build, the pytest s
 ### QA-02 [!] P1 — Evaluation harness for harness changes (descoped 2026-10-13)
 The suite and evaluation tooling (`suite.py`, `scoring.py`, `evaluation.py`, `harness compare-evaluations`) was removed as open-loop complexity during the control-spine simplification. Nine synthetic offline fixtures with independent verifiers remain as regression fixtures (`benchmarks/examples/`, `tests/test_benchmark_fixtures.py`); frozen-manifest comparison is no longer an acceptance path.
 
-### QA-03 [x] P2 — Performance and chaos
+### QA-03 [~] P2 — Performance and chaos
 Deliver: synthetic concurrent readers/writers, large event streams, worker kills and disk-full or truncated-artifact injection.
 Accept: bounded memory and latency targets documented from a measured baseline, fail-closed recovery and no unhandled corruption.
-State: 1,000-event append latency/storage/allocation bounds, concurrent reader snapshot stability, ENOSPC injection during checkpoint and result fsync, and a POSIX worker-kill lease reconciliation test are implemented.
+State: 1,000-event append latency/storage/allocation bounds, concurrent reader snapshot stability and checkpoint ENOSPC injection are implemented. Result-fsync ENOSPC injection and a real POSIX worker-kill lease test remain missing; the current "POSIX" case is a threading reconciliation race.
 
 ### QA-04 [~] continuous — Architectural hygiene
 Deliver: enforce import direction, no redundant wrappers, duplicate lifecycle logic or premature infrastructure, and documented public contract migrations.
@@ -74,6 +74,12 @@ QA-04 dedup (2026-11-25). Extracted `transition_with_trace` and `settle_with_tra
 lifecycle policy, replacing six hand-written phase-transition blocks across the local and
 benchmark paths. The source ceiling ratcheted down from 18,557 to 18,519 lines. Evidence:
 `tests/test_lifecycle.py`, `tests/test_smoke.py`.
+
+Docs truth pass (2026-11-25). Corrected the World evolution status (removed cognition
+subsystems), the README capability and skill-schema claims, the `/var/tmp` writable mount, the
+`action_verifier` classification, and demoted QA-03/VER-02 to `[~]` with the missing evidence
+named. `tests/test_docs_consistency.py` now also resolves backticked `harness.<module>`
+references (historical removals and design specs excluded).
 
 ## Validation sequence
 

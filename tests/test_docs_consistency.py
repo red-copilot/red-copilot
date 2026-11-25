@@ -29,6 +29,34 @@ PATH_REFERENCE = re.compile(
 ENVIRONMENT_VARIABLE = re.compile(r"\b((?:HARNESS|PI|BENCHMARK|TSEC)_[A-Z0-9_]+)\b")
 FLAG = re.compile(r"(?<![\w-])--([a-z][a-z0-9-]{1,})")
 INVOCATION = re.compile(r"^harness ([a-z][a-z0-9-]*)\b")
+MODULE_REFERENCE = re.compile(r"`(harness(?:\.[a-z_][a-z0-9_]*)+)`")
+
+# Modules removed on purpose; historical notes and roadmap entries may still
+# name them. New live references should resolve to a file under src/harness.
+HISTORICAL_MODULE_REFERENCES = frozenset(
+    {
+        "harness.api",
+        "harness.control_plane",
+        "harness.queue",
+        "harness.worker",
+        "harness.coordination",
+        "harness.otel",
+        "harness.scoring",
+        "harness.suite",
+        "harness.evaluation",
+        "harness.registry",
+        "harness.cognition",
+        "harness.crew",
+        "harness.planner",
+        "harness.skills",
+        "harness.runtime.solver_profile",
+        "harness.pi_host",
+        "harness.process_guard",
+        "harness.failures",
+        "harness.tool_plugins",
+        "harness.benchmark.zc_adapter",
+    }
+)
 
 
 def _document_texts() -> dict[Path, str]:
@@ -80,6 +108,26 @@ def test_documented_repo_paths_exist() -> None:
                 missing.append(f"{path.relative_to(REPO_ROOT)}: {reference}")
 
     assert not missing, "documentation references missing paths:\n" + "\n".join(missing)
+
+
+def test_documented_harness_modules_exist() -> None:
+    missing: list[str] = []
+    for path, text in _document_texts().items():
+        # Design specs may describe proposed modules that do not exist yet.
+        if "superpowers" in path.parts:
+            continue
+        for reference in MODULE_REFERENCE.findall(text):
+            if reference in HISTORICAL_MODULE_REFERENCES:
+                continue
+            parts = reference.split(".")[1:]
+            module_file = PACKAGE_ROOT.joinpath(*parts).with_suffix(".py")
+            package_init = PACKAGE_ROOT.joinpath(*parts, "__init__.py")
+            if not module_file.is_file() and not package_init.is_file():
+                missing.append(f"{path.relative_to(REPO_ROOT)}: {reference}")
+
+    assert not missing, "documentation references missing harness modules:\n" + "\n".join(
+        sorted(set(missing))
+    )
 
 
 def test_documented_environment_variables_exist_in_the_package() -> None:
