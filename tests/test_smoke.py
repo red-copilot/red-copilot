@@ -3,6 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from harness.agent import AgentResult
 from harness.agent_workspace import create_agent_workspace
 from harness.budget import UsageMetrics
@@ -109,6 +111,133 @@ def test_smoke_run(monkeypatch, tmp_path: Path) -> None:
         "verifying",
         "succeeded",
     ]
+
+
+def test_setup_failure_still_persists_a_terminal_result(monkeypatch, tmp_path: Path) -> None:
+    def failing_bootstrap(**_kwargs):
+        raise RuntimeError("bootstrap exploded with api_key=private-canary")
+
+    monkeypatch.setattr("harness.orchestrator.bootstrap_solver", failing_bootstrap)
+    task_path = Path("benchmarks/examples/hello/task.yaml")
+    agent_path = Path("agents/examples/pi.yaml")
+    result = Orchestrator(tmp_path / "runs").run(
+        task=load_task(task_path),
+        task_path=task_path,
+        agent=load_agent(agent_path),
+        agent_path=agent_path,
+        seed=3,
+        run_id="run_setup_failure",
+    )
+
+    run_dir = tmp_path / "runs" / "run_setup_failure"
+    persisted = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert persisted == result
+    assert result["status"] == "error"
+    assert result["failure_class"] == "harness_failure"
+    assert result["success"] is False
+    assert result["progress"] == {}
+    assert "private-canary" not in json.dumps(result)
+    trace = (run_dir / "trace.jsonl").read_text(encoding="utf-8")
+    assert "private-canary" not in trace
+    phases = [
+        json.loads(line)
+        for line in trace.splitlines()
+        if json.loads(line)["type"] == "run.phase"
+    ]
+    assert phases[-1]["data"]["phase"] == "failed"
+
+
+def test_cancellation_persists_result_and_propagates(monkeypatch, tmp_path: Path) -> None:
+    class _CancellingSession(_ProofSession):
+        async def events(self):
+            raise asyncio.CancelledError
+            yield AgentEvent(type="unused", data={})
+
+    class _CancellingAdapter(_ProofAdapter):
+        async def start_session(self, context, **_kwargs):
+            return _CancellingSession(Path(context.run_dir))
+
+    monkeypatch.setattr(
+        "harness.orchestrator.build_agent_adapter",
+        lambda *_args, **_kwargs: _CancellingAdapter(),
+    )
+    task_path = Path("benchmarks/examples/hello/task.yaml")
+    agent_path = Path("agents/examples/pi.yaml")
+
+    with pytest.raises(asyncio.CancelledError):
+        Orchestrator(tmp_path / "runs").run(
+            task=load_task(task_path),
+            task_path=task_path,
+            agent=load_agent(agent_path),
+            agent_path=agent_path,
+            seed=5,
+            run_id="run_cancelled",
+        )
+
+    run_dir = tmp_path / "runs" / "run_cancelled"
+    persisted = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert persisted["status"] == "cancelled"
+    assert persisted["failure_class"] == "cancelled"
+    assert persisted["success"] is False
+    phases = [
+        json.loads(line)
+        for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["type"] == "run.phase"
+    ]
+    assert phases[-1]["data"]["phase"] == "cancelled"
+
+
+def test_finalization_failure_still_persists_result(monkeypatch, tmp_path: Path) -> None:
+    _install_proof_adapter(monkeypatch)
+
+    def failing_finalize(**_kwargs):
+        raise RuntimeError("world finalization exploded")
+
+    monkeypatch.setattr("harness.orchestrator.finalize_world_goal", failing_finalize)
+    task_path = Path("benchmarks/examples/hello/task.yaml")
+    agent_path = Path("agents/examples/pi.yaml")
+    result = Orchestrator(tmp_path / "runs").run(
+        task=load_task(task_path),
+        task_path=task_path,
+        agent=load_agent(agent_path),
+        agent_path=agent_path,
+        seed=7,
+        run_id="run_finalize_failure",
+    )
+
+    run_dir = tmp_path / "runs" / "run_finalize_failure"
+    persisted = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert persisted == result
+    assert persisted["status"] == "finished"
+    assert persisted["success"] is True
+    assert "world" not in persisted
+    assert "summary" not in persisted
+    trace_types = {
+        json.loads(line)["type"]
+        for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    }
+    assert "run.finalize_error" in trace_types
+
+
+def test_resume_tolerates_a_truncated_final_trace_line(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "run_truncated"
+    run_dir.mkdir(parents=True)
+    started = {
+        "event_id": "e1",
+        "type": "run.started",
+        "task_id": "task-1",
+        "data": {},
+    }
+    (run_dir / "trace.jsonl").write_text(
+        json.dumps(started) + "\n" + '{"event_id": "e2", "type": "tool.',
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(runs_root)
+
+    assert orchestrator._validate_resume_directory(run_dir) == run_dir.resolve()
+    assert orchestrator._read_start_event(run_dir / "trace.jsonl")["task_id"] == "task-1"
 
 
 def test_unavailable_task_verifier_is_recorded_and_run_fails_closed(monkeypatch, tmp_path: Path) -> None:

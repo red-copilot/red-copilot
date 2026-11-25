@@ -43,7 +43,7 @@ State: `solver_policy.decide_solver_action` is the pure decision point. It stops
 ### RUN-04 [~] P2 — Resource ownership
 Deliver: one owner for container, session, gateway and task teardown with consistent timeouts, cancellation and idempotent terminal persistence.
 Accept: forced kill, signal interruption and external benchmark teardown tests; no leaked resources or overwritten terminal results.
-State: atomic first-writer-wins `result.json`, SIGINT/SIGTERM cancellation, single idempotent benchmark teardown bounded to 30s and per-run action-owner locking are implemented. Outstanding: Docker and live external benchmark teardown evidence.
+State: atomic first-writer-wins `result.json`, SIGINT/SIGTERM cancellation, single idempotent benchmark teardown bounded to 30s and per-run action-owner locking are implemented. Local runs now persist a terminal result on setup failure, cancellation/interrupt and finalization failure, and resume tolerates one crash-truncated trace tail; evidence is in `tests/test_smoke.py`. Outstanding: Docker and live external benchmark teardown evidence.
 
 ### RUN-05 [~] P1 — Terminal closure for externally evaluated runs
 Deliver: a scored, wall-clock-bounded run closes by handing in its best candidate and its report instead of only a report, and the loop stops spending turns on feedback it cannot act on.

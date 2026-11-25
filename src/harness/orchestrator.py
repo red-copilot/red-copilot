@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .agent import AgentRunContext, build_agent_adapter
@@ -221,27 +222,97 @@ class Orchestrator:
             run_dir = (self.runs_root / run_id).resolve()
             run_dir.mkdir(parents=True, exist_ok=False)
             agent_workspace = create_agent_workspace(run_dir)
-        task_dir = task_path.resolve().parent
-        agent_task_dir = prepare_agent_task_view(
-            task_dir=task_dir,
-            run_root=run_dir,
-            verifier_entrypoint=task.verification.entrypoint,
-        )
         trace = TraceRecorder(run_dir / "trace.jsonl", run_id, task.id)
-        world_event_path = run_dir / "world.events.jsonl"
-        world_db_path = run_dir / "world.db"
-        if resume_world_events is not None:
-            source = resume_world_events.resolve()
-            if not source.is_file():
-                raise FileNotFoundError(f"resume world state not found: {source}")
-            if source.suffix == ".db":
-                with (
-                    sqlite3.connect(source) as source_db,
-                    sqlite3.connect(world_db_path) as target_db,
-                ):
-                    source_db.backup(target_db)
-            else:
-                shutil.copyfile(source, world_event_path)
+        lifecycle = RunLifecycle()
+        previous_phase = lifecycle.phase
+        status = "running"
+        usage = UsageMetrics()
+        verification: dict[str, Any] = {
+            "success": False,
+            "score": 0.0,
+            "message": "run did not complete",
+            "milestones": {},
+        }
+        failure_class: str | None = None
+        progress = None
+        world = None
+        context_builder = None
+        solver_loop = None
+        gateway_runtime = None
+        environment = None
+        run_phase = "setup"
+
+        def fail_run(exc: Exception, stage: str) -> dict:
+            """Record a setup failure and persist a diagnosable terminal result."""
+            nonlocal status, failure_class, verification, previous_phase
+            status = "error"
+            failure_class = (
+                "environment_failure" if stage == "environment_startup"
+                else "gateway_failure" if stage == "gateway_startup"
+                else "solver_failure" if stage == "agent_execution"
+                else "harness_failure"
+            )
+            verification = {
+                "success": False,
+                "score": 0.0,
+                "message": f"{type(exc).__name__} (details omitted)",
+                "milestones": {},
+            }
+            if not lifecycle.terminal:
+                previous_phase = lifecycle.phase
+                lifecycle.settle_for_status(status)
+                trace.emit(
+                    "run.phase",
+                    data={
+                        "previous": previous_phase,
+                        "phase": lifecycle.phase,
+                        "status": status,
+                    },
+                )
+            trace.emit(
+                "run.error",
+                data={"error_type": type(exc).__name__},
+            )
+            result = self._base_result(
+                run_id=run_id,
+                task=task,
+                agent=agent,
+                seed=seed,
+                task_path=task_path,
+                agent_path=agent_path,
+                status=status,
+                failure_class=failure_class,
+                verification=verification,
+                metrics={"duration_ms": 0},
+                progress=progress,
+                gateway_config=gateway_config,
+            )
+            persist_run_result(run_dir=run_dir, trace=trace, result=result)
+            return result
+
+        try:
+            task_dir = task_path.resolve().parent
+            agent_task_dir = prepare_agent_task_view(
+                task_dir=task_dir,
+                run_root=run_dir,
+                verifier_entrypoint=task.verification.entrypoint,
+            )
+            world_event_path = run_dir / "world.events.jsonl"
+            world_db_path = run_dir / "world.db"
+            if resume_world_events is not None:
+                source = resume_world_events.resolve()
+                if not source.is_file():
+                    raise FileNotFoundError(f"resume world state not found: {source}")
+                if source.suffix == ".db":
+                    with (
+                        sqlite3.connect(source) as source_db,
+                        sqlite3.connect(world_db_path) as target_db,
+                    ):
+                        source_db.backup(target_db)
+                else:
+                    shutil.copyfile(source, world_event_path)
+        except Exception as exc:  # noqa: BLE001 - setup failure still leaves a result
+            return fail_run(exc, run_phase)
         root_goal = Goal(
             id=f"goal:{task.id}:objective",
             description=task.objective.description,
@@ -250,18 +321,21 @@ class Orchestrator:
             attributes={"task_id": task.id, "category": task.category},
         )
         budget_limits = enforced_budget_limits(task.budgets)
-        runtime = bootstrap_solver(
-            run_dir=run_dir,
-            trace=trace,
-            goal=root_goal,
-            actor=f"agent:{agent.id}",
-            context_query=task.objective.description,
-            world_repository_factory=self.world_repository_factory,
-            budget_limits=budget_limits,
-            agent_workspace=agent_workspace,
-            resume_existing=is_resume,
-            context_token_budget=context_token_budget,
-        )
+        try:
+            runtime = bootstrap_solver(
+                run_dir=run_dir,
+                trace=trace,
+                goal=root_goal,
+                actor=f"agent:{agent.id}",
+                context_query=task.objective.description,
+                world_repository_factory=self.world_repository_factory,
+                budget_limits=budget_limits,
+                agent_workspace=agent_workspace,
+                resume_existing=is_resume,
+                context_token_budget=context_token_budget,
+            )
+        except Exception as exc:  # noqa: BLE001 - setup failure still leaves a result
+            return fail_run(exc, run_phase)
         world = runtime.world
         context_builder = runtime.context_builder
         progress = runtime.progress
@@ -270,39 +344,51 @@ class Orchestrator:
         recovered_usage = UsageMetrics()
         session_task = task
         if is_resume:
-            recovery_checkpoint, restored_progress = load_recovery_state(
-                run_dir, current_world_revision=world.snapshot.revision
-            )
-            if restored_progress.reconciled_actions:
-                raise RuntimeError("reconciled action history prevents automatic session resume")
-            if not recovery_checkpoint.agent_session_id:
-                raise RuntimeError("checkpoint has no resumable Pi session ID")
-            solver_loop.processed_event_ids.update(recovery_checkpoint.processed_event_ids)
-            recovered_usage = UsageMetrics(
-                input_tokens=int(recovery_checkpoint.budget_used.get("input_tokens", 0)),
-                output_tokens=int(recovery_checkpoint.budget_used.get("output_tokens", 0)),
-                total_tokens=int(recovery_checkpoint.budget_used.get("total_tokens", 0)),
-                model_calls=int(recovery_checkpoint.budget_used.get("model_calls", 0)),
-                tool_calls=int(recovery_checkpoint.budget_used.get("tool_calls", 0)),
-                cost_usd=float(recovery_checkpoint.budget_used.get("cost_usd", 0)),
-            )
-            session_task = _remaining_budget_task(task, restored_progress.started_at, recovered_usage)
-        task_verifier_authority = runtime.verifier_registry.register("task_verifier")
-        progress_path = run_dir / "progress.json"
-        sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
-        lifecycle = RunLifecycle()
-        previous_phase = lifecycle.phase
+            try:
+                recovery_checkpoint, restored_progress = load_recovery_state(
+                    run_dir, current_world_revision=world.snapshot.revision
+                )
+                if restored_progress.reconciled_actions:
+                    raise RuntimeError(
+                        "reconciled action history prevents automatic session resume"
+                    )
+                if not recovery_checkpoint.agent_session_id:
+                    raise RuntimeError("checkpoint has no resumable Pi session ID")
+                solver_loop.processed_event_ids.update(
+                    recovery_checkpoint.processed_event_ids
+                )
+                recovered_usage = UsageMetrics(
+                    input_tokens=int(recovery_checkpoint.budget_used.get("input_tokens", 0)),
+                    output_tokens=int(
+                        recovery_checkpoint.budget_used.get("output_tokens", 0)
+                    ),
+                    total_tokens=int(recovery_checkpoint.budget_used.get("total_tokens", 0)),
+                    model_calls=int(recovery_checkpoint.budget_used.get("model_calls", 0)),
+                    tool_calls=int(recovery_checkpoint.budget_used.get("tool_calls", 0)),
+                    cost_usd=float(recovery_checkpoint.budget_used.get("cost_usd", 0)),
+                )
+                session_task = _remaining_budget_task(
+                    task, restored_progress.started_at, recovered_usage
+                )
+            except Exception as exc:  # noqa: BLE001 - setup failure still leaves a result
+                return fail_run(exc, run_phase)
+        try:
+            task_verifier_authority = runtime.verifier_registry.register("task_verifier")
+            progress_path = run_dir / "progress.json"
+            sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
+        except Exception as exc:  # noqa: BLE001 - setup failure still leaves a result
+            return fail_run(exc, run_phase)
         lifecycle.transition("running")
-        status = "running"
-        usage = UsageMetrics()
-        gateway_runtime = None
-        environment = build_environment(
-            task.environment,
-            task_dir=task_dir,
-            run_id=run_id,
-            trace=trace,
-            resume_existing=is_resume,
-        )
+        try:
+            environment = build_environment(
+                task.environment,
+                task_dir=task_dir,
+                run_id=run_id,
+                trace=trace,
+                resume_existing=is_resume,
+            )
+        except Exception as exc:  # noqa: BLE001 - setup failure still leaves a result
+            return fail_run(exc, run_phase)
 
         start_event_data = {
                 "agent_id": agent.id,
@@ -322,6 +408,49 @@ class Orchestrator:
         )
 
         run_phase = "environment_startup"
+        unwinding: BaseException | None = None
+
+        def record_failure(exc: BaseException, run_status: str) -> None:
+            nonlocal status, failure_class, verification, previous_phase
+            status = run_status
+            cancelled_error = isinstance(exc, RunInterrupted) or run_status == "cancelled"
+            failure_class = (
+                "cancelled" if cancelled_error else
+                "environment_failure" if run_phase == "environment_startup" else
+                "gateway_failure" if run_phase == "gateway_startup" else
+                "solver_failure" if run_phase == "agent_execution" else
+                "harness_failure"
+            )
+            verification = {
+                "success": False,
+                "score": 0.0,
+                # Exception messages from providers, containers and user code
+                # can contain credentials or other sensitive input. Keep the
+                # durable result useful for classification without persisting
+                # untrusted exception text into run artifacts.
+                "message": (
+                    "run cancelled" if isinstance(exc, asyncio.CancelledError)
+                    else str(exc) if cancelled_error
+                    else f"{type(exc).__name__} (details omitted)"
+                ),
+                "milestones": {},
+            }
+            if not lifecycle.terminal:
+                previous_phase = lifecycle.phase
+                lifecycle.settle_for_status(status)
+                trace.emit(
+                    "run.phase",
+                    data={
+                        "previous": previous_phase,
+                        "phase": lifecycle.phase,
+                        "status": status,
+                    },
+                )
+            trace.emit(
+                "run.error",
+                data={"error_type": type(exc).__name__},
+            )
+
         try:
             handle = environment.start()
             run_phase = "gateway_startup"
@@ -558,43 +687,18 @@ class Orchestrator:
                     )
                     progress.write(progress_path)
                     status = resolve_run_status(timed_out=False, budget_exceeded=False)
+        except asyncio.CancelledError as exc:
+            unwinding = exc
+            record_failure(exc, "cancelled")
+            raise
         except Exception as exc:  # noqa: BLE001 - orchestrator boundary records all failures.
-            cancelled = isinstance(exc, RunInterrupted)
-            status = "cancelled" if cancelled else "error"
-            if not lifecycle.terminal:
-                previous_phase = lifecycle.phase
-                lifecycle.settle_for_status(status)
-                trace.emit(
-                    "run.phase",
-                    data={
-                        "previous": previous_phase,
-                        "phase": lifecycle.phase,
-                        "status": status,
-                    },
-                )
-            failure_class = (
-                "cancelled" if cancelled else
-                "environment_failure" if run_phase == "environment_startup" else
-                "gateway_failure" if run_phase == "gateway_startup" else
-                "solver_failure" if run_phase == "agent_execution" else
-                "harness_failure"
+            record_failure(
+                exc, "cancelled" if isinstance(exc, RunInterrupted) else "error"
             )
-            verification = {
-                "success": False,
-                "score": 0.0,
-                # Exception messages from providers, containers and user code
-                # can contain credentials or other sensitive input. Keep the
-                # durable result useful for classification without persisting
-                # untrusted exception text into run artifacts.
-                "message": str(exc)
-                if cancelled
-                else f"{type(exc).__name__} (details omitted)",
-                "milestones": {},
-            }
-            trace.emit(
-                "run.error",
-                data={"error_type": type(exc).__name__, "message": str(exc)},
-            )
+        except BaseException as exc:  # noqa: BLE001 - record interrupts before propagating.
+            unwinding = exc
+            record_failure(exc, "error")
+            raise
         finally:
             cleanup_failures: list[tuple[str, Exception]] = []
             if gateway_runtime is not None:
@@ -602,10 +706,11 @@ class Orchestrator:
                     gateway_runtime.stop()
                 except Exception as exc:  # noqa: BLE001 - teardown must preserve run result.
                     cleanup_failures.append(("gateway", exc))
-            try:
-                environment.stop(preserve_state=is_resume and status == "error")
-            except Exception as exc:  # noqa: BLE001 - teardown must not hide the run result.
-                cleanup_failures.append(("environment", exc))
+            if environment is not None:
+                try:
+                    environment.stop(preserve_state=is_resume and status == "error")
+                except Exception as exc:  # noqa: BLE001 - teardown must not hide the run result.
+                    cleanup_failures.append(("environment", exc))
             # Resource cleanup has priority over trace reporting. A full or
             # unavailable trace filesystem must not prevent later owners from
             # receiving their stop call.
@@ -620,6 +725,42 @@ class Orchestrator:
                         "could not record %s cleanup failure in run trace (%s)",
                         owner,
                         type(report_exc).__name__,
+                    )
+            if unwinding is not None:
+                # A cancellation or interrupt must not lose the terminal
+                # artifact. Persist first, then let the original exception win.
+                try:
+                    duration_ms = 0
+                    if progress is not None:
+                        duration_ms = max(
+                            0,
+                            int(
+                                (datetime.now(UTC) - progress.started_at).total_seconds()
+                                * 1000
+                            ),
+                        )
+                    persist_run_result(
+                        run_dir=run_dir,
+                        trace=trace,
+                        result=self._base_result(
+                            run_id=run_id,
+                            task=task,
+                            agent=agent,
+                            seed=seed,
+                            task_path=task_path,
+                            agent_path=agent_path,
+                            status=status,
+                            failure_class=failure_class or "harness_failure",
+                            verification=verification,
+                            metrics={"duration_ms": duration_ms},
+                            progress=progress,
+                            gateway_config=gateway_config,
+                        ),
+                    )
+                except Exception as persist_exc:  # noqa: BLE001 - preserve the original unwind
+                    _logger.error(
+                        "could not persist terminal result during unwind (%s)",
+                        type(persist_exc).__name__,
                     )
 
         solver_loop.finish_ingest()
@@ -640,7 +781,7 @@ class Orchestrator:
             0, int((datetime.now(UTC) - progress.started_at).total_seconds() * 1000)
         )
         metrics = {"duration_ms": duration_ms, **usage.as_dict()}
-        if "failure_class" not in locals():
+        if failure_class is None:
             verdict = progress.objective_verdict
             if status in {"timeout", "budget_exceeded"}:
                 failure_class = "solver_budget_exhaustion"
@@ -654,7 +795,88 @@ class Orchestrator:
                 failure_class = "success"
             else:
                 failure_class = "solver_failure"
-        result = {
+        result = self._base_result(
+            run_id=run_id,
+            task=task,
+            agent=agent,
+            seed=seed,
+            task_path=task_path,
+            agent_path=agent_path,
+            status=status,
+            failure_class=failure_class,
+            verification=verification,
+            metrics=metrics,
+            progress=progress,
+            gateway_config=gateway_config,
+        )
+        if is_resume and status == "error":
+            try:
+                world.flush()
+            except Exception as exc:  # noqa: BLE001 - preserve the interrupted result
+                trace.emit(
+                    "world.flush_error", data={"error_type": type(exc).__name__}
+                )
+            trace.emit(
+                "run.interrupted",
+                data={"message": result["message"], "checkpoint_preserved": True},
+            )
+            persist_run_result(run_dir=run_dir, trace=trace, result=result)
+            return result
+        try:
+            finalize_world_goal(
+                world=world,
+                goal=root_goal,
+                context_builder=context_builder,
+                run_dir=run_dir,
+                status=status,
+                success=result["success"],
+                score=result["score"],
+            )
+            world.flush()
+            result["world"] = world_result(
+                world=world, solver_loop=solver_loop, agent_id=agent.id
+            )
+            result["world"]["resumed"] = resume_world_events is not None
+            # Deterministic harvest (Cairn-style conclude fallback): every local
+            # run leaves a summary of facts, intents, and exploration behind,
+            # whether or not the Agent managed to write its own report first.
+            result["summary"] = run_summary(
+                world=world,
+                progress=progress,
+                run_dir=run_dir,
+                outcome={
+                    "status": status,
+                    "success": result["success"],
+                    "failure_class": failure_class,
+                },
+                agent_report_path=agent_workspace / "agent.summary.md",
+            )
+        except Exception as exc:  # noqa: BLE001 - a summary failure must not lose the result
+            _logger.error("run finalization failed (%s)", type(exc).__name__)
+            trace.emit(
+                "run.finalize_error", data={"error_type": type(exc).__name__}
+            )
+        persist_run_result(run_dir=run_dir, trace=trace, result=result)
+        return result
+
+    @staticmethod
+    def _base_result(
+        *,
+        run_id: str,
+        task: TaskSpec,
+        agent: AgentSpec,
+        seed: int,
+        task_path: Path,
+        agent_path: Path,
+        status: str,
+        failure_class: str,
+        verification: dict[str, Any],
+        metrics: dict[str, Any],
+        progress: Any,
+        gateway_config: GatewayConfig | None,
+    ) -> dict:
+        """Build the terminal result fields shared by success and failure paths."""
+        return {
             "schema_version": "harness/result/v2",
             "run_id": run_id,
             "task_id": task.id,
@@ -672,7 +894,7 @@ class Orchestrator:
                 "docker_access": bool(gateway_config),
             },
             "metrics": metrics,
-            "progress": progress.model_dump(mode="json"),
+            "progress": progress.model_dump(mode="json") if progress is not None else {},
             "network": network_result(agent),
             "versions": {
                 "harness": __version__,
@@ -680,41 +902,24 @@ class Orchestrator:
                 "agent_sha256": _sha256(agent_path),
             },
         }
-        if is_resume and status == "error":
-            world.flush()
-            trace.emit(
-                "run.interrupted",
-                data={"message": result["message"], "checkpoint_preserved": True},
-            )
-            return result
-        finalize_world_goal(
-            world=world,
-            goal=root_goal,
-            context_builder=context_builder,
-            run_dir=run_dir,
-            status=status,
-            success=result["success"],
-            score=result["score"],
-        )
-        world.flush()
-        result["world"] = world_result(world=world, solver_loop=solver_loop, agent_id=agent.id)
-        result["world"]["resumed"] = resume_world_events is not None
-        # Deterministic harvest (Cairn-style conclude fallback): every local run
-        # leaves a summary of facts, intents, and exploration behind, whether or
-        # not the Agent managed to write its own report before the deadline.
-        result["summary"] = run_summary(
-            world=world,
-            progress=progress,
-            run_dir=run_dir,
-            outcome={
-                "status": status,
-                "success": result["success"],
-                "failure_class": failure_class,
-            },
-            agent_report_path=agent_workspace / "agent.summary.md",
-        )
-        persist_run_result(run_dir=run_dir, trace=trace, result=result)
-        return result
+
+    @staticmethod
+    def _trace_events(trace_path: Path) -> list[dict]:
+        """Parse a run trace, tolerating one crash-truncated final line."""
+        text = read_regular_text(trace_path, max_bytes=64 * 1024 * 1024)
+        lines = text.splitlines()
+        truncated_tail = bool(lines) and not text.endswith(("\n", "\r"))
+        events: list[dict] = []
+        for index, line in enumerate(lines):
+            if index == len(lines) - 1 and truncated_tail:
+                # The last event was never fully written; resume treats it as
+                # absent rather than permanently corrupting the directory.
+                break
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("run trace contains a non-object event")
+            events.append(event)
+        return events
 
     def _validate_resume_directory(self, candidate: Path) -> Path:
         runs_root = self.runs_root.resolve()
@@ -732,16 +937,14 @@ class Orchestrator:
         trace_stat = trace_path.stat(follow_symlinks=False)
         if not stat.S_ISREG(trace_stat.st_mode):
             raise ValueError("run trace must be a regular file")
-        for line in read_regular_text(trace_path, max_bytes=64 * 1024 * 1024).splitlines():
-            event = json.loads(line)
+        for event in self._trace_events(trace_path):
             if event.get("type") == "run.finished":
                 raise ValueError("terminal run cannot be resumed")
         return resolved
 
     @staticmethod
     def _read_start_event(trace_path: Path) -> dict:
-        for line in read_regular_text(trace_path, max_bytes=64 * 1024 * 1024).splitlines():
-            event = json.loads(line)
+        for event in Orchestrator._trace_events(trace_path):
             if event.get("type") == "run.started":
                 data = event.get("data")
                 if not isinstance(data, dict):

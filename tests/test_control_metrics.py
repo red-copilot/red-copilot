@@ -60,8 +60,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # `resolve_run_phase` (+33), the orchestrator phase trace and status-derived
 # terminal settle (+25), and the runner's verifying-before-evaluation ordering,
 # exception-path phase traces and status-derived settle (+54). Re-measured.
+#
+# QA terminal-result guarantee (2026-11-25). B4 added no module. Source lines
+# moved 18,187 -> 18,390: the setup guards and shared `_base_result` helper,
+# the cancellation/interrupt unwind path that persists before propagating, the
+# finalization guard, and the truncated-tail trace parser in `orchestrator.py`
+# (+203). Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_187
+MAX_SRC_LINES = 18_390
 
 
 def _module_names() -> set[str]:
