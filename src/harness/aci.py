@@ -156,6 +156,13 @@ class TypedACI:
             return 1
 
         if event.type == "tool.result":
+            # Only the Harness observes an execution. An Agent-authored
+            # tool.result is a claim, never evidence, even if a caller bypasses
+            # the container event-file filter.
+            if event.origin != "harness":
+                raise ValueError(
+                    "agent-authored tool.result cannot become harness evidence"
+                )
             call_id = str(event.data.get("tool_call_id") or _id("tool"))
             failed = bool(event.data.get("is_error", False))
             world.upsert(

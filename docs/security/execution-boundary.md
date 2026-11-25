@@ -6,6 +6,9 @@ The run root is Harness-owned state. It contains the authoritative World store a
 history, progress ledger, trace, result, checkpoint, objective evidence, and verifier logs.
 Agent output, tool output, submissions, and files in `agent-workspace/` are untrusted.
 An Agent claim or successful process exit is never objective evidence by itself.
+`tool.result` is normalized from the Pi RPC stream. An Agent-authored `tool.result`
+appended to `$HARNESS_EVENT_FILE` is rejected as `agent.telemetry_error` and cannot
+enter the evidence tier.
 
 ## Filesystem boundary
 

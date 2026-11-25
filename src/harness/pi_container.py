@@ -704,7 +704,19 @@ class ContainerPiRpcSession:
                 type=str(payload.get("type", "unknown")),
                 data=data if isinstance(data, dict) else {},
                 event_id=f"agent-event-line:{self._agent_event_line}",
+                origin="agent",
             )
+            if event.type == "tool.result":
+                # tool.result is harness-normalized from the RPC stream. An
+                # Agent-authored one carries no execution observation and could
+                # otherwise launder a claim into the evidence tier.
+                events.append(
+                    self._agent_event_error(
+                        "tool.result is harness-normalized and cannot be Agent-authored",
+                        line="",
+                    )
+                )
+                continue
             self._persist_event(event)
             events.append(event)
         return events

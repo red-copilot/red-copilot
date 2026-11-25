@@ -17,6 +17,10 @@ class AgentEvent:
     type: str
     data: dict[str, Any]
     event_id: str | None = None
+    # Where the event entered the Harness. Events read from the Agent-writable
+    # event file are claims; only harness-normalized results may become
+    # evidence. In-process and test callers default to the trusted origin.
+    origin: str = "harness"
 
 
 @dataclass(frozen=True)

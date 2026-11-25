@@ -65,6 +65,17 @@ gates at 78% pending a ratchet. Validation: `ruff check .` clean; the narrow `my
 both workflow files parse as YAML. Docker, Pi and the pi-kali image were not exercised
 locally.
 
+### QA-05 [~] P0 — Agent-origin evidence tiering
+Deliver: events read from the Agent-writable `$HARNESS_EVENT_FILE` are claims; only
+Harness-normalized `tool.result` may create evidence-tier World records.
+Accept: an Agent-authored `tool.result` is rejected, creates no World record, and surfaces
+as telemetry feedback; RPC-normalized results keep evidence semantics.
+State: `AgentEvent.origin` defaults to `harness`; the container event-file cursor marks
+events `agent` and rejects `tool.result` before persistence; `TypedACI.apply` refuses a
+non-harness origin. Evidence: `tests/test_aci.py` and
+`tests/test_pi_adapter.py::test_rpc_session_rejects_agent_authored_tool_result`. Awaiting
+maintainer review of the evidence-tier contract.
+
 ## Validation sequence
 
 `ruff check .`; `pytest -q`; `pytest tests/test_architecture.py -q` after any module move; `harness validate`/`preflight` on touched fixtures; the hello smoke run. Docker and TSec paths run only in prepared environments and must be reported as unexecuted otherwise.

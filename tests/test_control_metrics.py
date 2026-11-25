@@ -54,8 +54,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # ignores; the bootstrap workspace-sync lambda became a def (-1); the TSec
 # operator messages moved from `print(file=sys.stderr, flush=True)` to
 # `typer.echo` (-9). Re-measured from the tree rather than estimated.
+#
+# QA trust tiering (2026-11-25). B1 added no module. Source lines moved
+# 18,075 -> 18,098: `AgentEvent.origin` and its comment (+4), the container
+# event-file rejection of Agent-authored `tool.result` (+12), and the ACI
+# evidence guard (+7). Re-measured from the tree.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_075
+MAX_SRC_LINES = 18_098
 
 
 def _module_names() -> set[str]:
