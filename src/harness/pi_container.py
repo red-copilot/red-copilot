@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -45,6 +46,8 @@ from .session import (
     feedback_record,
 )
 from .trace import TraceRecorder
+
+_logger = logging.getLogger(__name__)
 
 # How long to wait for the ``session`` record Pi emits when resuming.
 RPC_RESUME_HANDSHAKE_TIMEOUT = 15.0
@@ -743,6 +746,7 @@ class ContainerPiRpcSession:
             if missing
             else "invalid or negative Pi usage telemetry"
         )
+        _logger.warning("agent telemetry error reason=%s", self._telemetry_invalid)
         self.adapter.trace.emit(
             "agent.telemetry_error",
             data={"message": self._telemetry_invalid},
@@ -805,6 +809,7 @@ class ContainerPiRpcSession:
 
     def _invalid_gateway_telemetry(self, reason: str) -> None:
         self._telemetry_invalid = reason
+        _logger.warning("gateway telemetry error reason=%s", reason)
         self.adapter.trace.emit("agent.telemetry_error", data={"message": reason})
 
     async def _kill_container(self) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections.abc import Callable
@@ -29,6 +30,8 @@ from .world import (
     WorldRepository,
 )
 from .world.live import WorldInboxCursor
+
+_logger = logging.getLogger(__name__)
 
 MAX_PROCESSED_EVENT_IDS = 50_000
 # Harness observations are kept bounded: they exist to answer "what did the
@@ -308,6 +311,11 @@ class SolverLoop:
         except (KeyError, TypeError, ValueError) as exc:
             aci_mutations = 0
             self.stats.aci_rejected += 1
+            _logger.warning(
+                "aci event rejected event_type=%s error_type=%s",
+                event.type,
+                type(exc).__name__,
+            )
             self.trace.emit(
                 "aci.rejected",
                 actor="harness",

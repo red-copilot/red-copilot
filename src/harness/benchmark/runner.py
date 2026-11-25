@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import contextlib
+import logging
 import math
 import shutil
 import time
@@ -49,6 +50,8 @@ from ..world import (
 )
 from .base import BenchmarkAdapter, BenchmarkCase, BenchmarkSession, EvaluationResult, Submission
 from .protocol import SubmissionInbox
+
+_logger = logging.getLogger(__name__)
 
 
 SubmissionExtractor = Callable[[AgentResult], list[Submission]]
@@ -635,6 +638,10 @@ class BenchmarkRunner:
                     cleanup_task.cancel()
             if cleanup_exception is not None:
                 teardown_error = f"{type(cleanup_exception).__name__}: details omitted"
+                _logger.warning(
+                    "benchmark teardown failed error_type=%s",
+                    type(cleanup_exception).__name__,
+                )
                 trace.emit(
                     "benchmark.teardown.error",
                     data={
@@ -766,7 +773,10 @@ class BenchmarkRunner:
             evaluation: EvaluationResult | None = None
             evaluation_error: Exception | None = None
 
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _logger.error(
+                "benchmark session cancelled error_type=%s", type(exc).__name__
+            )
             if not lifecycle.terminal:
                 previous_phase = lifecycle.phase
                 lifecycle.settle_for_status("cancelled")
@@ -780,7 +790,10 @@ class BenchmarkRunner:
                 )
             await teardown_once()
             raise
-        except BaseException:
+        except BaseException as exc:
+            _logger.error(
+                "benchmark session failed error_type=%s", type(exc).__name__
+            )
             if not lifecycle.terminal:
                 previous_phase = lifecycle.phase
                 lifecycle.settle_for_status("error")
@@ -1206,7 +1219,10 @@ class BenchmarkRunner:
                     },
                 )
             progress.write(progress_path)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _logger.error(
+                "benchmark session cancelled error_type=%s", type(exc).__name__
+            )
             if not lifecycle.terminal:
                 previous_phase = lifecycle.phase
                 lifecycle.settle_for_status("cancelled")
@@ -1219,7 +1235,10 @@ class BenchmarkRunner:
                     },
                 )
             raise
-        except Exception:
+        except Exception as exc:
+            _logger.error(
+                "benchmark finalization failed error_type=%s", type(exc).__name__
+            )
             if not lifecycle.terminal:
                 previous_phase = lifecycle.phase
                 lifecycle.settle_for_status("error")

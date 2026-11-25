@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 import stat
@@ -10,6 +11,8 @@ import tempfile
 from pathlib import Path
 
 from .secureio import open_beneath, read_regular_text
+
+_logger = logging.getLogger(__name__)
 
 _HARNESS_VIEWS = ("world.context.txt", "progress.json")
 # The container runs as root without owning the tree, so the harness keeps the
@@ -83,7 +86,8 @@ def seed_notes_from_attempt(*, workspace: Path, previous_run_dir: Path) -> list[
             )
         )
     except (FileNotFoundError, ValueError, OSError):
-        pass
+        # A carry-over is optional; the new run must still start.
+        _logger.warning("could not seed notes from the prior run")
 
     workspace_root = (
         previous_run_dir

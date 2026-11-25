@@ -115,6 +115,7 @@ def persist_objective_verdict(
                 try:
                     os.unlink(filename, dir_fd=directory_fd)
                 except OSError:
+                    # Best-effort rollback; the original write error is what matters.
                     pass
                 raise
         os.fsync(directory_fd)
@@ -157,6 +158,7 @@ def _open_evidence_directory(run_dir: Path) -> int:
             try:
                 os.mkdir(component, mode=0o700, dir_fd=current_fd)
             except FileExistsError:
+                # The artifact directory already exists; open it below.
                 pass
             next_fd = os.open(component, flags, dir_fd=current_fd)
             os.close(current_fd)

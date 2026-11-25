@@ -786,5 +786,6 @@ def write_ledger_comparison(ledger_path: Path, run_dir: Path) -> dict[str, Any]:
         try:
             os.unlink(temporary_name)
         except FileNotFoundError:
+            # Best-effort cleanup; the comparison payload is already durable.
             pass
     return payload

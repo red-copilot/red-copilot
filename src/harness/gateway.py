@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import secrets
 import threading
 import time
@@ -27,6 +28,8 @@ from .tool_adapter import (
     execute_tool_adapter,
 )
 from .trace import sanitize_observability_data
+
+_logger = logging.getLogger(__name__)
 
 
 class ToolCallRequest(BaseModel):
@@ -451,6 +454,11 @@ def create_gateway_app(
                 async with httpx.AsyncClient(transport=http_transport, timeout=120.0) as client:
                     response = await client.post(upstream_url, json=payload, headers=headers)
             except httpx.HTTPError as exc:
+                _logger.warning(
+                    "gateway upstream error stage=request model=%s error_type=%s",
+                    model,
+                    type(exc).__name__,
+                )
                 writer.emit(
                     "model.upstream_error",
                     model=model,
@@ -499,6 +507,11 @@ def create_gateway_app(
             response = await client.send(upstream_request, stream=True)
         except httpx.HTTPError as exc:
             await client.aclose()
+            _logger.warning(
+                "gateway upstream error stage=request model=%s error_type=%s",
+                model,
+                type(exc).__name__,
+            )
             writer.emit(
                 "model.upstream_error",
                 model=model,
@@ -517,6 +530,11 @@ def create_gateway_app(
             except httpx.HTTPError as exc:
                 await response.aclose()
                 await client.aclose()
+                _logger.warning(
+                    "gateway upstream error stage=response model=%s error_type=%s",
+                    model,
+                    type(exc).__name__,
+                )
                 writer.emit(
                     "model.upstream_error",
                     model=model,
@@ -558,6 +576,11 @@ def create_gateway_app(
                         usage_seen = True
             except httpx.HTTPError as exc:
                 stream_error = True
+                _logger.warning(
+                    "gateway upstream error stage=stream model=%s error_type=%s",
+                    model,
+                    type(exc).__name__,
+                )
                 writer.emit(
                     "model.upstream_error",
                     model=model,

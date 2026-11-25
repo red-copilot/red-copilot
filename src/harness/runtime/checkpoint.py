@@ -8,6 +8,7 @@ completed agent events as new work.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import stat
@@ -20,6 +21,8 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 from ..secureio import read_regular_text
+
+_logger = logging.getLogger(__name__)
 
 MAX_CHECKPOINT_BYTES = 8 * 1024 * 1024
 
@@ -313,16 +316,22 @@ def _load_recovery_state_locked(
             raise RuntimeError("progress ledger contains events newer than its checkpoint")
     if record.progress_event_count is not None and skew not in {0, 1}:
         raise RuntimeError("progress and checkpoint event counts do not match")
-    if skew == 1 and trace is not None:
-        trace.emit(
-            "run.recovery.skew",
-            actor="harness",
-            data={
-                "skew": 1,
-                "checkpoint_event_count": record.progress_event_count,
-                "progress_event_count": ledger.event_count,
-            },
+    if skew == 1:
+        _logger.warning(
+            "recovery progress skew checkpoint=%s progress=%s",
+            record.progress_event_count,
+            ledger.event_count,
         )
+        if trace is not None:
+            trace.emit(
+                "run.recovery.skew",
+                actor="harness",
+                data={
+                    "skew": 1,
+                    "checkpoint_event_count": record.progress_event_count,
+                    "progress_event_count": ledger.event_count,
+                },
+            )
     return record, ledger
 
 

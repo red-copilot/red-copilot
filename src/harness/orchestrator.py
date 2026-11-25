@@ -246,6 +246,11 @@ class Orchestrator:
             """Record a setup failure and persist a diagnosable terminal result."""
             nonlocal status, failure_class, verification, previous_phase
             status = "error"
+            _logger.error(
+                "run setup failed stage=%s error_type=%s",
+                stage,
+                type(exc).__name__,
+            )
             failure_class = (
                 "environment_failure" if stage == "environment_startup"
                 else "gateway_failure" if stage == "gateway_startup"
@@ -416,6 +421,12 @@ class Orchestrator:
             nonlocal status, failure_class, verification, previous_phase
             status = run_status
             cancelled_error = isinstance(exc, RunInterrupted) or run_status == "cancelled"
+            _logger.error(
+                "run failed phase=%s status=%s error_type=%s",
+                run_phase,
+                run_status,
+                type(exc).__name__,
+            )
             failure_class = (
                 "cancelled" if cancelled_error else
                 "environment_failure" if run_phase == "environment_startup" else

@@ -65,6 +65,11 @@ gates at 78% pending a ratchet. Validation: `ruff check .` clean; the narrow `my
 both workflow files parse as YAML. Docker, Pi and the pi-kali image were not exercised
 locally.
 
+Observability pass (2026-11-25). Added structured `logging` at the run, session, gateway,
+solver-loop, checkpoint and workspace boundaries; records carry the stage and error type and
+never untrusted exception text. Remaining pass-only handlers are documented as best-effort
+cleanup. Evidence: `tests/test_observability.py`.
+
 ## Validation sequence
 
 `ruff check .`; `pytest -q`; `pytest tests/test_architecture.py -q` after any module move; `harness validate`/`preflight` on touched fixtures; the hello smoke run. Docker and TSec paths run only in prepared environments and must be reported as unexecuted otherwise.
