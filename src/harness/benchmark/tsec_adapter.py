@@ -1036,7 +1036,7 @@ async def run_tsec_challenges(
                             elapsed = time.monotonic() - attempt_started
                             sessions_done += 1
                             correct = int(
-                                (result.get("flags") or {}).get("correct") or 0
+                                (result.get("evaluation") or {}).get("correct") or 0
                             )
                             gained = correct > best_correct
                             best_correct = max(best_correct, correct)

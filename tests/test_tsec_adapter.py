@@ -1786,3 +1786,106 @@ def test_loot_gate_blocks_repeat_submissions_across_sessions() -> None:
     assert second.accepted is False
     assert second.metadata.get("loot_gate") == "already_submitted"
     assert len(calls) == 1
+
+
+class _ContinuationProbeRunner:
+    """First attempt holds one flag but consumes most of its wall clock.
+
+    This exposes the gained-flag continuation path specifically: a
+    full-length session that gained flags must continue in the same slot
+    with a fresh session instead of being judged as "gained nothing". The
+    broken reader looked for ``result["flags"]``, a key the sweep only adds
+    to the result *after* this loop decides, so ``gained`` was always False.
+    """
+
+    calls: ClassVar[list[int]] = []
+
+    def __init__(self, *, runs_root: Path):
+        pass
+
+    async def run_case(self, *, case, budgets, **kwargs):
+        type(self).calls.append(budgets.wall_time)
+        if len(type(self).calls) == 1:
+            _clock().advance(260.0)
+            return {
+                "run_id": f"tsec_{case.id}_first",
+                "benchmark": {"type": "tsec", "case_id": case.id, "session": {}},
+                "status": "finished",
+                "success": False,
+                "score": 50.0,
+                "evaluation": {
+                    "expected_flags": 2,
+                    "initial_correct": 0,
+                    "remaining_at_start": 2,
+                    "correct": 1,
+                },
+            }
+        return {
+            "run_id": f"tsec_{case.id}_second",
+            "benchmark": {"type": "tsec", "case_id": case.id, "session": {}},
+            "status": "objective_completed",
+            "success": True,
+            "score": 100.0,
+            "evaluation": {
+                "expected_flags": 2,
+                "initial_correct": 0,
+                "remaining_at_start": 2,
+                "correct": 2,
+            },
+        }
+
+
+class _ScriptedClock:
+    """Controllable ``time.monotonic`` stand-in for the sweep loop."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+_CLOCK_HOLDER: list[_ScriptedClock] = []
+
+
+def _clock() -> _ScriptedClock:
+    """The scripted clock the probe runner burns time on."""
+    assert _CLOCK_HOLDER, "clock must be installed before run_case fires"
+    return _CLOCK_HOLDER[-1]
+
+
+def test_full_length_attempt_with_flag_progress_continues_in_the_same_slot(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _ContinuationProbeRunner.calls = []
+    _CLOCK_HOLDER.clear()
+    clock = _ScriptedClock()
+    _CLOCK_HOLDER.append(clock)
+    monkeypatch.setattr(tsec_adapter.time, "monotonic", clock)
+    monkeypatch.setattr(tsec_adapter, "TSecClientAdapter", FakeRunnerClient)
+    monkeypatch.setattr(tsec_adapter, "BenchmarkRunner", _ContinuationProbeRunner)
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(tsec_adapter.asyncio, "sleep", fake_sleep)
+
+    results = asyncio.run(
+        run_tsec_challenges(
+            config=TSecConfig(base_url="https://example.invalid", token="secret"),
+            agent=_runner_agent(),
+            budgets=BudgetSpec(wall_time=400),
+            runs_root=tmp_path,
+            challenge_code="WEB-001",
+            preflight=False,
+        )
+    )
+
+    # The first session consumed 260s of its 400s window (past the 0.6
+    # early-exit threshold) and ended holding 1 of 2 flags. Flag progress
+    # must continue the slot; the broken gained reader never did.
+    assert len(_ContinuationProbeRunner.calls) == 2
+    assert results[0]["success"] is True
