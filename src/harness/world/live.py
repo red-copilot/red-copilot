@@ -5,9 +5,13 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from ..secureio import open_regular_file
+from ..secureio import poll_regular_chunk
 from .protocol import IngestError, IngestReport, WorldSubmission
 from .repository import WorldRepository
+
+# One poll reads a bounded chunk of the Agent-writable inbox: an unbounded
+# read is a memory lever, and the cursor drains the rest on later polls.
+MAX_POLL_CHUNK_BYTES = 1024 * 1024
 
 
 class WorldInboxCursor:
@@ -26,21 +30,23 @@ class WorldInboxCursor:
         self.offset = 0
         self.remainder = ""
         self.line_number = 0
+        self._file_identity: tuple[int, int] | None = None
 
     def poll(self) -> IngestReport:
         report = IngestReport()
         if not self.path.exists():
             return report
 
-        with open_regular_file(self.path, "r", errors="replace") as handle:
-            handle.seek(self.offset)
-            chunk = handle.read()
-            self.offset = handle.tell()
-
+        chunk, self.offset, self._file_identity = poll_regular_chunk(
+            self.path,
+            self.offset,
+            chunk_bytes=MAX_POLL_CHUNK_BYTES,
+            identity=self._file_identity,
+        )
         if not chunk:
             return report
 
-        text = self.remainder + chunk
+        text = self.remainder + chunk.decode("utf-8", errors="replace")
         lines = text.splitlines(keepends=True)
         self.remainder = ""
 

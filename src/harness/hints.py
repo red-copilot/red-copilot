@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .secureio import open_regular_file
+from .secureio import open_regular_file, poll_regular_chunk
 
 HINTS_FILE = "hints.jsonl"
 MAX_HINT_TEXT_CHARS = 16_000
 MAX_HINT_LINE_BYTES = 256 * 1024
+# One poll reads a bounded chunk; the cursor drains the rest on later polls.
+MAX_POLL_CHUNK_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -61,21 +63,23 @@ class HintCursor:
         self.offset = 0
         self.remainder = ""
         self.line_number = 0
+        self._file_identity: tuple[int, int] | None = None
 
     def poll(self) -> list[HintRecord]:
         hints: list[HintRecord] = []
         if not self.path.exists():
             return hints
 
-        with open_regular_file(self.path, "r", errors="replace") as handle:
-            handle.seek(self.offset)
-            chunk = handle.read()
-            self.offset = handle.tell()
-
+        chunk, self.offset, self._file_identity = poll_regular_chunk(
+            self.path,
+            self.offset,
+            chunk_bytes=MAX_POLL_CHUNK_BYTES,
+            identity=self._file_identity,
+        )
         if not chunk:
             return hints
 
-        text = self.remainder + chunk
+        text = self.remainder + chunk.decode("utf-8", errors="replace")
         lines = text.splitlines(keepends=True)
         self.remainder = ""
 
