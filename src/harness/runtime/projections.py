@@ -20,6 +20,10 @@ from ..world import (
 MAX_SUMMARY_ITEMS = 40
 MAX_SUMMARY_TEXT = 200
 MAX_AGENT_REPORT_CHARS = 4000
+# Host-side read bound for the Agent-authored report before truncation to
+# MAX_AGENT_REPORT_CHARS: bounded memory on a workspace file the Agent can
+# inflate, without turning an over-long report into a missing one.
+MAX_AGENT_REPORT_READ_BYTES = 256 * 1024
 
 
 def finalize_world_goal(
@@ -146,10 +150,19 @@ def run_summary(
     ][:MAX_SUMMARY_ITEMS]
     report_path = agent_report_path or (run_dir / "agent.summary.md")
     report_text = ""
-    if report_path.is_file():
-        report_text = report_path.read_text(encoding="utf-8", errors="replace")[
-            :MAX_AGENT_REPORT_CHARS
-        ]
+    if report_path.is_symlink():
+        # The workspace is container-writable; a symlinked report is hostile
+        # input and reads as absent, never as a host file's content.
+        report_text = ""
+    elif report_path.is_file():
+        from ..secureio import read_regular_text_prefix
+
+        try:
+            report_text = read_regular_text_prefix(
+                report_path, max_bytes=MAX_AGENT_REPORT_READ_BYTES
+            )[:MAX_AGENT_REPORT_CHARS]
+        except OSError:
+            report_text = ""
     summary = {
         "schema_version": "harness/summary/v1",
         "outcome": outcome,

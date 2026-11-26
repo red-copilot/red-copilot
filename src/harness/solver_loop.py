@@ -15,6 +15,7 @@ from .aci import TypedACI
 from .action_verifier import ActionVerifier
 from .hints import HINTS_FILE, HintCursor, HintRecord
 from .progress import SLOW_TOOL_CALLS, ProgressLedger, empty_steer_counts
+from .secureio import read_regular_text
 from .session import AgentEvent, AgentObservation, AgentSession
 from .solver_policy import SolverAction, SolverDecision, decide_solver_action
 from .trace import TraceRecorder
@@ -75,13 +76,15 @@ def missing_summary_sections(summary_path: Path) -> list[str]:
     """Return the report sections the Agent did not write.
 
     A missing or unreadable summary reports every section as missing; the
-    caller decides whether that is worth a trace event.
+    caller decides whether that is worth a trace event. The path is
+    Agent-authored, so the read is bounded and refuses to follow a symlink
+    (the workspace is container-writable and every read is hostile input).
     """
     try:
-        if summary_path.stat().st_size > MAX_SUMMARY_BYTES:
+        if summary_path.stat(follow_symlinks=False).st_size > MAX_SUMMARY_BYTES:
             return [name for name, _ in SUMMARY_SECTIONS]
-        text = summary_path.read_text(encoding="utf-8", errors="replace").lower()
-    except OSError:
+        text = read_regular_text(summary_path, max_bytes=MAX_SUMMARY_BYTES).lower()
+    except (OSError, ValueError):
         return [name for name, _ in SUMMARY_SECTIONS]
     missing: list[str] = []
     for name, markers in SUMMARY_SECTIONS:
