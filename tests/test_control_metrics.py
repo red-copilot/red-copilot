@@ -87,8 +87,17 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # (+29) replace the hand-written phase blocks in the runner (-42) and the
 # orchestrator (-25). Source lines moved 18,557 -> 18,519, so the ceiling is
 # ratcheted down with the tree.
+#
+# First-principles hardening round 1 (2026-11-26). No module added. Source
+# lines moved 18,519 -> 18,613 (+94): the shared bounded, truncate-safe cursor
+# read `poll_regular_chunk` in `secureio.py` (+45, consumed by the world inbox,
+# submission inbox and hint cursor), hardened no-follow/bounded reads of the
+# Agent-authored summary in `solver_loop.py` and `runtime/projections.py`
+# (+20, including `read_regular_text_prefix`), and the gained-flag continuation
+# bookkeeping comment in the TSec sweep (+29 across the test-facing surface).
+# Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_519
+MAX_SRC_LINES = 18_613
 
 
 def _module_names() -> set[str]:
