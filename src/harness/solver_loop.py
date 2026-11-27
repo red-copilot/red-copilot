@@ -269,7 +269,13 @@ class SolverLoop:
                 self._processed_event_ids.pop(next(iter(self._processed_event_ids)))
 
         self.progress.record_event(event)
-        self.progress.write(self.progress_path)
+        # One durable progress write per event, at the end of this method.
+        # The write this replaces fired before the ACI and verification
+        # updates, so it recorded only the raw event counters: twice the
+        # fsyncs for less state, and a wider crash window where progress
+        # leads the checkpoint. The documented recovery skew (progress
+        # ahead by exactly one event) is created by this final write
+        # racing the checkpoint commit either way.
         # Rewrite the projection every event, not only on world changes: the
         # remaining window is part of it now, and a clock that only ticks when
         # the World happens to change would be worse than no clock at all.
