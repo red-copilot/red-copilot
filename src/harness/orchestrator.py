@@ -867,6 +867,17 @@ class Orchestrator:
         gateway_config: GatewayConfig | None,
     ) -> dict:
         """Build the terminal result fields shared by success and failure paths."""
+        # Termination vocabulary shared with the benchmark runner's
+        # termination_reason ("objective-complete" / "budget-exhausted"),
+        # extended with the local-only exits. ``finished`` publishes None:
+        # the run ended normally without an objective verdict.
+        termination_reason = {
+            "objective_completed": "objective-complete",
+            "timeout": "timeout",
+            "budget_exceeded": "budget-exhausted",
+            "cancelled": "cancelled",
+            "error": "error",
+        }.get(status)
         return {
             "schema_version": "harness/result/v2",
             "run_id": run_id,
@@ -874,6 +885,7 @@ class Orchestrator:
             "agent_id": agent.id,
             "seed": seed,
             "status": status,
+            "termination_reason": termination_reason,
             "failure_class": failure_class,
             "success": bool(verification["success"]),
             "score": float(verification["score"]),
