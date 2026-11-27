@@ -656,7 +656,11 @@ def test_model_proxy_handles_upstream_connect_failure_without_leaking_error(
     assert response.json() == {"error": {"message": "model upstream unavailable"}}
     assert "provider-secret" not in response.text
     events = _events(event_file)
-    assert [event["type"] for event in events] == ["model.request", "model.upstream_error"]
+    assert [event["type"] for event in events] == [
+        "model.request",
+        "model.upstream_retry",
+        "model.upstream_error",
+    ]
     assert events[-1]["data"]["error_type"] == "ConnectError"
     assert "provider-secret" not in str(events)
 
@@ -707,3 +711,80 @@ def test_streaming_proxy_reports_upstream_disconnect_after_headers(tmp_path: Pat
     assert events[1]["data"]["stage"] == "stream"
     assert events[2]["data"]["complete"] is False
     assert "provider-secret" not in str(events)
+
+
+def test_model_proxy_retries_a_connect_failure_once_then_succeeds(tmp_path: Path) -> None:
+    """Connect-phase failures are retried once: no bytes were exchanged, so
+    the retry cannot double-bill a request the provider saw. Adopted from
+    the Norma provider policy; mid-stream failures stay non-retryable."""
+    event_file = tmp_path / "events.jsonl"
+    calls: list[int] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    app = create_gateway_app(
+        event_file=event_file,
+        workspace=tmp_path,
+        task_dir=tmp_path,
+        gateway_token="gateway-secret",
+        model_upstream="https://model.example/v1",
+        model_api_key="provider-secret",
+        http_transport=httpx.MockTransport(upstream),
+    )
+    response = TestClient(app).post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer gateway-secret"},
+        json={"model": "m", "messages": [], "stream": False},
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    events = _events(event_file)
+    assert [event["type"] for event in events] == [
+        "model.request",
+        "model.upstream_retry",
+        "model.response",
+        "model.usage",
+    ]
+    assert events[1]["data"]["stage"] == "connect"
+
+
+def test_model_proxy_does_not_retry_read_timeouts(tmp_path: Path) -> None:
+    """A timeout after the request was sent is not retried: the provider may
+    have seen (and billed) the request; a blind retry duplicates effects."""
+    event_file = tmp_path / "events.jsonl"
+    calls: list[int] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        raise httpx.ReadTimeout("slow provider", request=request)
+
+    app = create_gateway_app(
+        event_file=event_file,
+        workspace=tmp_path,
+        task_dir=tmp_path,
+        gateway_token="gateway-secret",
+        model_upstream="https://model.example/v1",
+        model_api_key="provider-secret",
+        http_transport=httpx.MockTransport(upstream),
+    )
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer gateway-secret"},
+        json={"model": "m", "messages": [], "stream": False},
+    )
+
+    assert response.status_code == 502
+    assert len(calls) == 1
+    events = _events(event_file)
+    assert "model.upstream_retry" not in [event["type"] for event in events]

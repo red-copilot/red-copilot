@@ -107,9 +107,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # ledger and counted as growth since the previous restart), the
 # `context.compacted` trace mirror in `solver_loop.py` and the
 # `termination_reason` field on local results in `orchestrator.py`.
-# Re-measured.
+#
+# Norma-comparison round 1b (2026-11-28): the model proxy retries
+# connect-phase upstream failures once in `gateway.py` (+35) - no bytes
+# exchanged means no double-billed request; everything after the request
+# was sent stays non-retryable. Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_699
+MAX_SRC_LINES = 18_734
 
 
 def _module_names() -> set[str]:

@@ -449,10 +449,39 @@ def create_gateway_app(
 
         upstream_url = _upstream_url(model_upstream, "/v1/chat/completions")
 
+        async def _send_with_connect_retry(attempt: Any) -> Any:
+            """Run one upstream attempt, retrying connect-phase failures once.
+
+            A connect failure exchanged no bytes, so a single bounded retry
+            cannot double-bill a request the provider saw. Everything after
+            the request was sent (read timeouts, mid-stream disconnects,
+            HTTP error statuses) stays non-retryable: the provider may have
+            seen and billed it, and a blind retry would duplicate effects.
+            """
+            for attempt_number in (1, 2):
+                try:
+                    return await attempt()
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    if attempt_number == 2:
+                        raise
+                    writer.emit(
+                        "model.upstream_retry",
+                        model=model,
+                        stage="connect",
+                        attempt=2,
+                    )
+                    await asyncio.sleep(0.25)
+
         if not is_stream:
             try:
                 async with httpx.AsyncClient(transport=http_transport, timeout=120.0) as client:
-                    response = await client.post(upstream_url, json=payload, headers=headers)
+
+                    async def post_once() -> httpx.Response:
+                        return await client.post(
+                            upstream_url, json=payload, headers=headers
+                        )
+
+                    response = await _send_with_connect_retry(post_once)
             except httpx.HTTPError as exc:
                 _logger.warning(
                     "gateway upstream error stage=request model=%s error_type=%s",
@@ -497,14 +526,20 @@ def create_gateway_app(
         stream_payload["stream_options"] = {**stream_options, "include_usage": True}
 
         client = httpx.AsyncClient(transport=http_transport, timeout=120.0)
-        upstream_request = client.build_request(
-            "POST",
-            upstream_url,
-            json=stream_payload,
-            headers=headers,
-        )
+
+        async def send_once() -> httpx.Response:
+            # Each attempt needs a fresh request object; a discarded
+            # connect-failed request carries no state to clean up.
+            request = client.build_request(
+                "POST",
+                upstream_url,
+                json=stream_payload,
+                headers=headers,
+            )
+            return await client.send(request, stream=True)
+
         try:
-            response = await client.send(upstream_request, stream=True)
+            response = await _send_with_connect_retry(send_once)
         except httpx.HTTPError as exc:
             await client.aclose()
             _logger.warning(
