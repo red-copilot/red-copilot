@@ -96,8 +96,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # (+20, including `read_regular_text_prefix`), and the gained-flag continuation
 # bookkeeping comment in the TSec sweep (+29 across the test-facing surface).
 # Re-measured.
+#
+# Norma-comparison round 1 (2026-11-28). No module added. Source lines moved
+# 18,613 -> 18,651 (+38): the shared `head_tail_clip` helper in `trace.py`
+# (+27, adopted from Norma's head+tail tool-output capture; failure summaries
+# live at the end of output), its use in the Pi adapter excerpt, head+tail
+# previews in the harness Pi extension asset, and cheap `world.revision`
+# reads on the per-event checkpoint paths. Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_613
+MAX_SRC_LINES = 18_651
 
 
 def _module_names() -> set[str]:
