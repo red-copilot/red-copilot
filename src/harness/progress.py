@@ -20,6 +20,13 @@ from .verification import AuthorizedObjectiveVerdict, VerifierRegistry
 # a fresh stretch of work before the next one is considered.
 CONTEXT_RESTART_TOOL_CALLS = 300
 CONTEXT_RESTART_BUDGET_FRACTION = 0.6
+# Measured context pressure: the provider-reported prompt size (input +
+# cache_read of the latest model call) at which a session is considered
+# degraded regardless of how many tool calls produced it. Conservative under
+# common 200k windows; the trigger counts growth since the previous restart,
+# so a restart that failed to shrink the context (the degraded local-run path)
+# cannot re-fire on the value it was looking at.
+CONTEXT_RESTART_TOKENS = 150_000
 MAX_CONTEXT_RESTARTS = 2
 
 # Which delivered Agent observation feeds which metric bucket. These are the
@@ -108,6 +115,12 @@ class ProgressLedger(BaseModel):
     # instead of the run start.
     context_restarts: int = 0
     tool_calls_at_last_restart: int = 0
+    # Latest provider-reported prompt size (input + cache_read of the most
+    # recent model call) and its value at the last context restart. The pair
+    # turns measured context growth into a restart trigger alongside the
+    # tool-call counters.
+    context_tokens_final: int = 0
+    context_tokens_at_restart: int = 0
     # Correlates legacy events that predate tool_call_id, so replay uses the
     # same generated action identity after a checkpoint reload.
     tool_event_correlations: dict[str, str] = Field(default_factory=dict)
@@ -209,12 +222,23 @@ class ProgressLedger(BaseModel):
                 value = usage.get(source)
                 if isinstance(value, (int, float)) and value >= 0:
                     self.budget_used[field] = self.budget_used.get(field, 0.0) + float(value)
+            prompt = 0
+            for key in ("input_tokens", "cache_read_tokens"):
+                value = usage.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    prompt += value
+            if prompt:
+                self.context_tokens_final = prompt
 
     def context_restart_due(self) -> str | None:
         """Return why the session context should be reset, or ``None``.
 
-        Both triggers are counted from the previous restart, so a restart
-        cannot re-fire on the threshold it just crossed. Only while the
+        All triggers are counted from the previous restart, so a restart
+        cannot re-fire on the threshold it just crossed. The context-pressure
+        trigger measures provider-reported prompt growth since the restart
+        rather than absolute size, for the same reason: a restart that failed
+        to shrink the context (the degraded local-run path) needs fresh
+        growth before another one is worth steering. Only while the
         objective is still open: a finished objective has nothing left to
         re-inject.
         """
@@ -226,11 +250,15 @@ class ProgressLedger(BaseModel):
         limit = self.budget_limits.get("max_tool_calls", 0.0)
         if limit > 0 and calls_since_restart >= limit * CONTEXT_RESTART_BUDGET_FRACTION:
             return "tool_call_budget"
+        tokens_since_restart = self.context_tokens_final - self.context_tokens_at_restart
+        if tokens_since_restart >= CONTEXT_RESTART_TOKENS:
+            return "context_pressure"
         return None
 
     def record_context_restart(self) -> None:
         self.context_restarts += 1
         self.tool_calls_at_last_restart = self.tool_calls
+        self.context_tokens_at_restart = self.context_tokens_final
 
     def record_intent(self, intent: Any) -> None:
         data = intent.model_dump(mode="json") if hasattr(intent, "model_dump") else dict(intent)

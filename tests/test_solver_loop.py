@@ -773,3 +773,94 @@ def test_closure_switches_default_off_for_task_runs(tmp_path: Path) -> None:
 
     assert loop.finalize_requests_submission is False
     assert loop.submission_due_fraction is None
+
+
+def test_context_restart_fires_on_measured_context_pressure() -> None:
+    """Restart on real prompt-size growth, not only tool-call counts.
+
+    Mirrors the Norma compaction analysis: ten small tool calls and ten
+    oversized ones are not the same context pressure. The provider-reported
+    prompt size (input + cache_read of the latest model call) is already
+    measured; it must participate in the restart trigger, counted as growth
+    since the last restart so a restart that did not shrink the context
+    cannot re-fire on the value it was looking at.
+    """
+    import harness.progress as progress_module
+
+    threshold = progress_module.CONTEXT_RESTART_TOKENS
+    progress = ProgressLedger()
+
+    progress.record_event(
+        AgentEvent(
+            type="model.usage",
+            event_id="u1",
+            data={"input_tokens": threshold - 1000, "cache_read_tokens": 0},
+        )
+    )
+    assert progress.context_restart_due() is None
+
+    progress.record_event(
+        AgentEvent(
+            type="model.usage",
+            event_id="u2",
+            data={"input_tokens": threshold + 1000, "cache_read_tokens": 500},
+        )
+    )
+    assert progress.context_restart_due() == "context_pressure"
+
+    progress.record_context_restart()
+
+    # Same pressure right after the restart must not immediately re-fire:
+    # the trigger measures growth since the restart, and a restart that
+    # failed to shrink the context (the degraded local-run path) needs new
+    # growth before it is worth another one.
+    assert progress.context_restart_due() is None
+
+    # cache_read counts toward the prompt too: u2's prompt was
+    # threshold + 1500 (input + cache_read), so the third call needs
+    # exactly one more full threshold of growth to re-fire.
+    progress.record_event(
+        AgentEvent(
+            type="model.usage",
+            event_id="u3",
+            data={
+                "input_tokens": 2 * threshold + 1500,
+            },
+        )
+    )
+    assert progress.context_restart_due() == "context_pressure"
+
+
+def test_context_restart_pressure_trigger_respects_completion_and_cap() -> None:
+    import harness.progress as progress_module
+
+    progress = ProgressLedger()
+    progress.record_event(
+        AgentEvent(
+            type="model.usage",
+            event_id="u1",
+            data={"input_tokens": progress_module.CONTEXT_RESTART_TOKENS + 5},
+        )
+    )
+
+    progress.objective_completed = True
+    assert progress.context_restart_due() is None
+    progress.objective_completed = False
+
+    progress.context_restarts = progress_module.MAX_CONTEXT_RESTARTS
+    assert progress.context_restart_due() is None
+
+
+def test_context_restart_ignores_malformed_usage_for_pressure() -> None:
+    progress = ProgressLedger()
+    for bad in (
+        {"input_tokens": "160000"},
+        {"input_tokens": None},
+        {"input_tokens": True},
+        {"input_tokens": -5},
+    ):
+        progress.record_event(
+            AgentEvent(type="model.usage", event_id="bad", data=bad)
+        )
+    assert progress.context_tokens_final == 0
+    assert progress.context_restart_due() is None
