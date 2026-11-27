@@ -9,14 +9,15 @@ from typing import Any
 
 from .agent import AgentError
 from .models import AgentSpec, TaskSpec
-from .trace import TraceRecorder
+from .trace import TraceRecorder, head_tail_clip
 
 
 def _tool_output_excerpt(event: object, *, limit: int = 8 * 1024) -> str | None:
     """Bounded, sanitized excerpt of a tool result for fact extraction.
 
-    Only what an extractor needs is kept: the excerpt is truncated and scrubbed
-    by the shared observability sanitizer before it reaches any artifact.
+    Only what an extractor needs is kept: the excerpt is clipped head+tail
+    (failure summaries live at the end of output) and scrubbed by the shared
+    observability sanitizer before it reaches any artifact.
     """
     if not isinstance(event, dict):
         return None
@@ -35,7 +36,7 @@ def _tool_output_excerpt(event: object, *, limit: int = 8 * 1024) -> str | None:
             )
     if not isinstance(text, str) or not text:
         return None
-    excerpt = text[:limit]
+    excerpt = head_tail_clip(text, limit)
     from .trace import sanitize_observability_data
 
     return sanitize_observability_data({"output": excerpt}).get("output")

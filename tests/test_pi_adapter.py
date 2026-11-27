@@ -1144,3 +1144,43 @@ def test_pi_rpc_session_survives_missing_usage_mid_stream(monkeypatch, tmp_path:
     assert any(row["type"] == "agent.telemetry_error" for row in rows)
     assert not any(row["type"] == "budget.exceeded" for row in rows)
     del asyncio
+
+
+def test_tool_output_excerpt_keeps_head_and_tail_when_oversize(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Oversize tool output is clipped head+tail, not head-only.
+
+    Failure detail usually lives at the end of tool output (stack-trace
+    tails, test-run summaries), so a head-only cut hides exactly the part
+    an operator or the fact extractor needs. The clipped middle carries an
+    explicit truncation marker and both kept edges stay line-aligned.
+    """
+    adapter = _adapter(monkeypatch, tmp_path)
+    head_lines = "".join(f"head-{index} open 80/tcp\n" for index in range(50))
+    tail_lines = "".join(f"tail-{index} open 443/tcp\n" for index in range(50))
+    summary = "SUMMARY: 3 failed, 97 passed\n"
+    text = head_lines + "X" * (16 * 1024) + tail_lines + summary
+    raw = json.dumps(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "c1",
+            "toolName": "bash",
+            "isError": False,
+            "result": {
+                "structuredContent": {"output": text, "exit_code": 0},
+            },
+        }
+    )
+
+    normalized = adapter._normalize_line(raw, account_model=True)
+    data = normalized[0][1]
+    excerpt = data["output_excerpt"]
+
+    assert excerpt.startswith("head-0"), "head edge must survive the clip"
+    assert excerpt.endswith("SUMMARY: 3 failed, 97 passed\n"), (
+        "the tail edge (where failure summaries live) must survive the clip"
+    )
+    assert "[truncated" in excerpt, "the clip must be explicit, not silent"
+    assert "XXXX" not in excerpt, "the oversized middle must be dropped"
+    assert len(excerpt) <= 8 * 1024

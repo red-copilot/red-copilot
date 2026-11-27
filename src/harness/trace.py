@@ -35,6 +35,39 @@ _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _logger = logging.getLogger(__name__)
 
 
+def head_tail_clip(value: str, limit: int) -> str:
+    """Clip oversize text to ``limit`` chars keeping both edges, line-aligned.
+
+    Failure detail lives at the end of tool output (stack-trace tails, test
+    summaries) as often as at the start, so a head-only cut hides exactly the
+    part a reader needs. The kept head is the larger share; the cut is
+    snapped to line boundaries when the edges allow it, and the dropped
+    middle is replaced by an explicit marker so truncation is never silent.
+    """
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    marker_template = "\n…[truncated {} chars]…\n"
+    # Reserve the widest marker the drop could produce so the result never
+    # exceeds the limit even after formatting.
+    probe = marker_template.format(len(value))
+    keep = limit - len(probe)
+    head_len = keep * 2 // 3
+    tail_len = keep - head_len
+    head = value[:head_len]
+    tail = value[len(value) - tail_len :] if tail_len > 0 else ""
+    newline = head.rfind("\n")
+    if newline != -1:
+        head = head[: newline + 1]
+    snapped = tail.find("\n")
+    if snapped != -1:
+        tail = tail[snapped + 1 :]
+    marker = marker_template.format(len(value) - len(head) - len(tail))
+    clipped = head + marker + tail
+    return clipped if len(clipped) <= limit else clipped[:limit]
+
+
 def _redact_string(value: str) -> str:
     value = _ASSIGNMENT_SECRET.sub("[REDACTED]", value)
     value = _BEARER.sub("Bearer [REDACTED]", value)
