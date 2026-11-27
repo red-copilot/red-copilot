@@ -38,6 +38,10 @@ class SQLiteWorldRepository:
         if snapshot_interval < 1:
             raise ValueError("snapshot_interval must be positive")
         self.snapshot_interval = snapshot_interval
+        # The snapshot property serves unchanged-revision reads from this
+        # cache; it must exist before the first property access (the
+        # end-of-init refresh and any legacy JSONL import both reach it).
+        self._snapshot_cache: WorldSnapshot | None = None
         self.db_path = (
             path if path.suffix == ".db" else path.with_name("world.db")
         )
@@ -115,6 +119,17 @@ class SQLiteWorldRepository:
 
     @property
     def snapshot(self) -> WorldSnapshot:
+        # The append path already maintains an in-memory snapshot cache; an
+        # unchanged-revision read serves from it instead of reloading every
+        # materialized record (the SolverLoop re-renders its context
+        # projection on every agent event, so the reload was the dominant
+        # per-event cost). The deep copy preserves the isolation contract
+        # the load path always gave callers: they may freely mutate the
+        # returned snapshot without touching the cache.
+        with self._lock:
+            cached = self._snapshot_cache
+        if cached is not None and cached.revision == self.revision:
+            return cached.model_copy(deep=True)
         with self._connect() as connection:
             # Revision and materialized rows must come from the same SQLite
             # read snapshot while writers commit concurrently in WAL mode.

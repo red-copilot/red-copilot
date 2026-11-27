@@ -407,3 +407,68 @@ def test_sqlite_world_large_synthetic_append_budget(tmp_path) -> None:
     assert elapsed < 30, f"append loop took {elapsed:.2f}s"
     assert peak_python_bytes < 32 * 1024 * 1024, f"peak={peak_python_bytes}"
     assert stored_bytes < 20 * 1024 * 1024
+
+
+def test_snapshot_reads_are_served_from_the_revision_cache(tmp_path) -> None:
+    """Unchanged-revision snapshot reads must not reload the world.
+
+    The SolverLoop re-renders its context projection on every agent event,
+    and each render used to pay a full SQLite load plus a pydantic
+    revalidation of every materialized record just to observe a world that
+    had not changed. The append path already maintains an in-memory
+    snapshot cache; the read path must share it, reloading only when the
+    revision actually moved, while preserving the deep-copy isolation the
+    old read path guaranteed to callers.
+    """
+    repo = SQLiteWorldRepository(tmp_path / "world.db")
+    calls = 0
+    real_load = repo._load_snapshot
+
+    def counting_load(connection):
+        nonlocal calls
+        calls += 1
+        return real_load(connection)
+
+    repo._load_snapshot = counting_load
+
+    # __init__ primes the cache, so the first read is already a hit.
+    base = repo.snapshot
+    assert calls == 0
+    assert base.revision == 0
+
+    repo.upsert(
+        "observation",
+        Observation(id="obs-cache-1", type="note", content={"summary": "s"}),
+        actor="agent:test",
+    )
+    advanced = repo.snapshot
+    assert advanced.revision == base.revision + 1
+    # The append path maintains the cache itself, so the read after the
+    # append is still a hit: no reload happened.
+    assert calls == 0
+    assert any(obs.id == "obs-cache-1" for obs in advanced.observations.values())
+
+    first = repo.snapshot
+    second = repo.snapshot
+    assert calls == 0  # unchanged revision: served from cache, no reload
+    assert first == second
+    assert first is not second  # deep-copy isolation preserved
+
+    # Mutating a returned snapshot must not corrupt the cache.
+    first.revision = 99999
+    assert repo.snapshot.revision == base.revision + 1
+    assert calls == 0
+
+    # A writer outside this instance (a resumed run, a backup restore)
+    # moves the revision behind the cache's back; the next read must
+    # detect the moved revision and reload exactly once.
+    other = SQLiteWorldRepository(tmp_path / "world.db")
+    other.upsert(
+        "observation",
+        Observation(id="obs-external", type="note", content={"summary": "x"}),
+        actor="agent:test",
+    )
+    refreshed = repo.snapshot
+    assert refreshed.revision == base.revision + 2
+    assert calls == 1  # the stale cache was invalidated by the revision check
+    assert any(obs.id == "obs-external" for obs in refreshed.observations.values())
