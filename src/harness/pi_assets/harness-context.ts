@@ -91,9 +91,18 @@ export default function harnessContext(pi: ExtensionAPI) {
 			if (!isTextBlock(block)) return block;
 			if (!keptPreview) {
 				keptPreview = true;
+				// Head+tail preview: failure detail (stack-trace tails, test
+				// summaries) sits at the end of output as often as the start.
+				const head = Math.floor(PREVIEW_CHARS * 2 / 3);
+				const tail = PREVIEW_CHARS - head;
+				const dropped = block.text.length - head - tail;
+				const preview =
+					dropped > 0
+						? `${block.text.slice(0, head)}\n…[truncated ${dropped} chars]…\n${block.text.slice(block.text.length - tail)}\n[full output: ${spillPath}]`
+						: `${block.text}\n[full output: ${spillPath}]`;
 				return {
 					...block,
-					text: `${block.text.slice(0, PREVIEW_CHARS)}\n[full output: ${spillPath}]`,
+					text: preview,
 				};
 			}
 			return { ...block, text: `[omitted: full output at ${spillPath}]` };
