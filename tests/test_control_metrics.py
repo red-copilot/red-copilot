@@ -98,15 +98,18 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 # Re-measured.
 #
 # Norma-comparison round 1 (2026-11-28). No module added. Source lines moved
-# 18,613 -> 18,679 (+66): the shared `head_tail_clip` helper in `trace.py`
+# 18,613 -> 18,699 (+86): the shared `head_tail_clip` helper in `trace.py`
 # (+27, adopted from Norma's head+tail tool-output capture; failure summaries
 # live at the end of output), its use in the Pi adapter excerpt, head+tail
 # previews in the harness Pi extension asset, cheap `world.revision` reads on
-# the per-event checkpoint paths, and the measured context-pressure restart
+# the per-event checkpoint paths, the measured context-pressure restart
 # trigger in `progress.py` (+39: provider-reported prompt size tracked on the
-# ledger and counted as growth since the previous restart). Re-measured.
+# ledger and counted as growth since the previous restart), the
+# `context.compacted` trace mirror in `solver_loop.py` and the
+# `termination_reason` field on local results in `orchestrator.py`.
+# Re-measured.
 MAX_MODULES = 61
-MAX_SRC_LINES = 18_679
+MAX_SRC_LINES = 18_699
 
 
 def _module_names() -> set[str]:
