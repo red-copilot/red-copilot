@@ -301,6 +301,14 @@ class SolverLoop:
                 if event.type == "tool.result":
                     self._record_tool_metrics(event)
 
+        if event.type == "context.compacted":
+            # Agent-authored compaction telemetry (untrusted): mirrored with
+            # the agent actor so a run audit can see where the model's
+            # context was cut, never as evidence.
+            self.trace.emit(
+                "context.compacted", actor=self.actor, data=event.data
+            )
+
         if event.type == "model.usage":
             self._record_context_metrics(event)
 

@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from harness.orchestrator import Orchestrator
 from harness.progress import ProgressLedger
 from harness.session import AgentEvent
 from harness.solver_loop import SolverLoop
@@ -864,3 +865,99 @@ def test_context_restart_ignores_malformed_usage_for_pressure() -> None:
         )
     assert progress.context_tokens_final == 0
     assert progress.context_restart_due() is None
+
+
+def test_agent_compaction_event_is_mirrored_into_the_trace(tmp_path: Path) -> None:
+    """A Pi-side compaction must leave a trace mark the audit can read.
+
+    Norma records every compaction boundary in its transcript; without an
+    equivalent mark, a run audit cannot see where the model's context was
+    cut. The Agent-authored event is untrusted telemetry, so it is mirrored
+    with the agent actor, never as evidence.
+    """
+    from harness.trace import TraceRecorder
+    from harness.world import SQLiteWorldRepository
+
+    world = SQLiteWorldRepository(tmp_path / "world.db")
+    progress = ProgressLedger(budget_limits={"wall_time": 3600})
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-compact", "task-compact")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="solve the target",
+        planned_world_revision=world.revision,
+    )
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="context.compacted",
+                event_id="compact-1",
+                data={"tokens_before": 180000, "first_kept_entry_id": "entry-9"},
+            ),
+        )
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    marks = [row for row in rows if row["type"] == "context.compacted"]
+    assert len(marks) == 1
+    assert marks[0]["actor"] == "agent:test"
+    assert marks[0]["data"]["tokens_before"] == 180000
+
+
+def test_local_result_carries_a_termination_reason(tmp_path: Path) -> None:
+    """Local runs publish the same termination vocabulary as benchmark runs."""
+    from harness.models import AgentSpec, TaskSpec
+
+    task = TaskSpec.model_validate(
+        {
+            "apiVersion": "harness/v1",
+            "id": "t",
+            "name": "t",
+            "objective": {"description": "d"},
+        }
+    )
+    agent = AgentSpec.model_validate(
+        {"apiVersion": "harness/v1", "id": "a", "image": "i", "pi": {"model": "m"}}
+    )
+    verification = {"success": False, "score": 0.0, "message": None, "milestones": {}}
+    (tmp_path / "t.yaml").write_text("task", encoding="utf-8")
+    (tmp_path / "a.yaml").write_text("agent", encoding="utf-8")
+    build = Orchestrator()._base_result
+
+    def result_for(status: str, failure_class: str) -> dict:
+        return build(
+            run_id="run_x",
+            task=task,
+            agent=agent,
+            seed=0,
+            task_path=tmp_path / "t.yaml",
+            agent_path=tmp_path / "a.yaml",
+            status=status,
+            failure_class=failure_class,
+            verification=verification,
+            metrics={},
+            progress=None,
+            gateway_config=None,
+        )
+
+    assert result_for("objective_completed", "success")["termination_reason"] == (
+        "objective-complete"
+    )
+    assert result_for("timeout", "solver_budget_exhaustion")["termination_reason"] == (
+        "timeout"
+    )
+    assert result_for("budget_exceeded", "solver_budget_exhaustion")[
+        "termination_reason"
+    ] == "budget-exhausted"
+    assert result_for("cancelled", "cancelled")["termination_reason"] == "cancelled"
+    assert result_for("error", "harness_failure")["termination_reason"] == "error"
+    assert result_for("finished", "solver_failure")["termination_reason"] is None
