@@ -55,7 +55,9 @@ def test_audit_classifies_claims_and_untraceable_verdicts(tmp_path: Path) -> Non
     )
     report = audit_run(tmp_path)
     assert report.status == "contradictory"
-    assert report.counts["claims"] == 2
+    # Only the progress fact is a claim; the successful tool.result is
+    # execution evidence and is not counted.
+    assert report.counts["claims"] == 1
     assert report.counts["pending"] == report.counts["verified"] == 1
     assert report.counts["untraceable_verdicts"] == 2
     assert {i.code for i in report.issues} >= {
@@ -375,3 +377,43 @@ def test_audit_read_only_and_cli_exit_code(tmp_path: Path) -> None:
     )
     contradictory = CliRunner().invoke(app, ["audit-run", str(tmp_path)])
     assert contradictory.exit_code == 1
+
+
+def test_audit_treats_successful_tool_exits_as_execution_not_claims(
+    tmp_path: Path,
+) -> None:
+    """A successful tool exit is execution evidence, not a claim.
+
+    Counting every is_error=False tool.result as an unlinked claim warned
+    on every real run and pinned the audit status at "incomplete", which
+    made the 0/1/2 exit-code contract meaningless for anything that ran a
+    tool. Only Agent-authored statements (progress facts, completion
+    claims) stay claims.
+    """
+    _write_run(
+        tmp_path,
+        events=[
+            _event("tool.call", {"tool": "bash", "tool_call_id": "c1"}, "call"),
+            _event(
+                "tool.result",
+                {"tool": "bash", "tool_call_id": "c1", "is_error": False},
+                "result",
+            ),
+            _event(
+                "run.finished",
+                {"status": "finished", "success": True, "score": 1.0},
+                "end",
+            ),
+        ],
+    )
+
+    report = audit_run(tmp_path)
+
+    assert report.status == "consistent", (
+        f"expected a clean tool-only run to audit consistent; got "
+        f"{report.status}: {[i.code for i in report.issues]}"
+    )
+    assert report.counts["claims"] == 0
+    assert not any(
+        issue.code == "claim_without_linked_evidence" for issue in report.issues
+    )

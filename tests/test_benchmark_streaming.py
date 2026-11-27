@@ -547,7 +547,12 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
         for item in verdicts
     )
     audit = audit_run(tmp_path / result["run_id"])
-    assert audit.status == "incomplete"
+    # The failed final evaluator agrees with the failed result and the
+    # unavailable verdict, and successful tool exits are execution evidence
+    # rather than claims, so a fully agreeing run audits "consistent". The
+    # assertions above carry the test's point: the verdicts did not become
+    # verified and nothing overrides the evaluator.
+    assert audit.status == "consistent"
     assert audit.counts["untraceable_verdicts"] == 0
     assert not any(issue.severity == "error" for issue in audit.issues)
 

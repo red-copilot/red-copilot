@@ -442,17 +442,10 @@ def audit_run(run_dir: str | Path) -> AuditReport:
                 field="data.objective_completed",
                 event_id=event.get("event_id"),
             )
-        if kind == "tool.result" and data.get("is_error") is False:
-            counts["claims"] += 1
-            _add(
-                issues,
-                "claim_without_linked_evidence",
-                "warning",
-                "trace.jsonl",
-                line=line,
-                field="data.is_error",
-                event_id=event.get("event_id"),
-            )
+        # A successful tool exit is execution evidence, not a claim: counting
+        # every is_error=False tool.result here warned on every real run and
+        # pinned the audit status at "incomplete". Agent-authored statements
+        # (progress facts, completion claims) remain the audited claims.
         if kind == "action.verified":
             status = data.get("status")
             if status in {"verified", "contradicted", "pending", "unavailable"}:
