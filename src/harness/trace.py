@@ -20,6 +20,9 @@ from .ledger import (
 
 MAX_TRACE_EVENT_BYTES = 256 * 1024
 MAX_TRACE_STRING_CHARS = 16 * 1024
+# Shadow-ledger batching: buffered trace events drain as one atomic batch at
+# this threshold, and always before finalize compares the replay.
+SHADOW_LEDGER_FLUSH_EVENTS = 64
 _SENSITIVE_KEY = re.compile(
     r"(?:^|[_-])(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|"
     r"password|passwd|secret|credential|cookie|token)(?:$|[_-])",
@@ -131,6 +134,7 @@ class TraceRecorder:
         self.ledger_error: str | None = None
         self._ledger_path = ledger_path or ledger_db_path(self.path)
         self._ledger: LedgerAppender | None = None
+        self._shadow_pending: list[dict[str, Any]] = []
         if shadow_ledger if shadow_ledger is not None else shadow_ledger_enabled():
             if ledger_appender is not None:
                 self._ledger = ledger_appender
@@ -161,8 +165,22 @@ class TraceRecorder:
     def _append_shadow(self, event: dict[str, Any]) -> None:
         if self._ledger is None:
             return
+        # Bounded batching: the shadow mirrors the trace for replay
+        # equivalence measurement, so a crash losing the buffered tail of a
+        # non-authoritative ledger costs nothing, while one atomic batch per
+        # 64 events removes several WAL fsyncs from every agent event.
+        self._shadow_pending.append(event)
+        if len(self._shadow_pending) >= SHADOW_LEDGER_FLUSH_EVENTS:
+            self._flush_shadow_locked()
+
+    def _flush_shadow_locked(self) -> None:
+        """Drain the pending batch. The trace lock must already be held."""
+        if self._ledger is None or not self._shadow_pending:
+            return
+        pending = self._shadow_pending
+        self._shadow_pending = []
         try:
-            self._ledger.append_trace_event(event)
+            self._ledger.append_batch(pending)
         except Exception as exc:  # noqa: BLE001 - shadowing must never fail a run
             ledger = self._ledger
             self._ledger = None
@@ -173,8 +191,15 @@ class TraceRecorder:
                     _logger.warning("could not close failed shadow ledger: %s", close_exc)
             self._record_ledger_error(exc)
 
+    def flush_shadow(self) -> None:
+        """Persist buffered shadow events now; safe to call at any time."""
+        with self._lock:
+            self._flush_shadow_locked()
+
     def finalize_shadow(self, run_dir: Path) -> dict[str, Any] | None:
         """Verify and compare the shadow ledger without affecting the run."""
+        with self._lock:
+            self._flush_shadow_locked()
         if self._ledger is None:
             return None
         try:

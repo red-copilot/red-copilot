@@ -31,7 +31,10 @@ authoritative, and M2 is not started.
 
 Each Run may have one append-only SQLite ledger beside its v2 artifacts. In M1 the ledger is a
 shadow: `TraceRecorder` writes the v2 trace record first and then mirrors the same event into the
-ledger. World, Context, Result, Progress and Checkpoint reads remain unchanged.
+ledger. World, Context, Result, Progress and Checkpoint reads remain unchanged. Mirror writes are
+batched (bounded buffer, atomic drain at a fixed threshold) and are always flushed before the
+end-of-run comparison; a crash may lose the buffered tail of the non-authoritative shadow, never
+any v2 record.
 
 ### Store contract
 

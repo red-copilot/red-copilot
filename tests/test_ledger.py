@@ -44,6 +44,8 @@ def test_trace_recorder_append_only_chain_and_artifact_refs(tmp_path: Path) -> N
         },
     )
 
+    trace.flush_shadow()
+
     store = LedgerStore(tmp_path / "ledger.db")
     records = store.records()
     store.verify()
@@ -233,6 +235,9 @@ def _write_complete_v2_run(run_dir: Path) -> Path:
         "run.finished",
         data={"status": "finished", "success": True, "score": 100.0},
     )
+    # The shadow ledger buffers; drain it so readers of the store see the
+    # full run (production flushes at finalize).
+    trace.flush_shadow()
     (run_dir / "progress.json").write_text(
         json.dumps(
             {
