@@ -1,13 +1,15 @@
-import json
+import time
 from pathlib import Path
 
 import pytest
 
 from harness.budget import (
     FINALIZE_GRACE_SECONDS,
-    BudgetMonitor,
+    UsageCeiling,
     UsageMetrics,
+    charge_usage_event,
     enforced_budget_limits,
+    exceeded_usage_dimension,
     usage_budget_exceeded,
 )
 from harness.models import BudgetSpec
@@ -46,278 +48,129 @@ def test_usage_budget_exceeded_reports_first_crossed_dimension() -> None:
     )
 
 
-def test_budget_monitor_accounts_usage_under_the_limits(tmp_path: Path) -> None:
-    events = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test")
-    monitor = BudgetMonitor(
-        events,
-        BudgetSpec(max_tokens=100, max_model_calls=5, max_tool_calls=5),
+def test_exceeded_usage_dimension_reads_ledger_keyed_usage() -> None:
+    """The ledger-side scan mirrors the metrics-side scan on the shared table."""
+    limits = enforced_budget_limits(BudgetSpec(wall_time=60, max_tokens=100))
+    assert exceeded_usage_dimension({"tokens": 120.0}, limits) == "max_tokens"
+    assert exceeded_usage_dimension({"tokens": 99.0}, limits) is None
+    # A dimension never charged stays absent and never fires.
+    assert exceeded_usage_dimension({}, limits) is None
+
+
+def test_charge_usage_event_accounts_a_valid_model_usage() -> None:
+    metrics = UsageMetrics()
+    accepted = charge_usage_event(
+        metrics,
+        "model.usage",
+        {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12, "model_calls": 1, "cost_usd": 0.2},
+    )
+    assert accepted is True
+    assert metrics.total_tokens == 12
+    assert metrics.model_calls == 1
+    assert metrics.cost_usd == pytest.approx(0.2)
+
+
+def test_charge_usage_event_fails_closed_on_malformed_or_negative_usage() -> None:
+    metrics = UsageMetrics()
+    # A usage event without model_calls is legal: the tokens still charge
+    # and the call counter stays untouched (the Pi session path relies on
+    # this for provider events that omit the call count).
+    assert charge_usage_event(
+        metrics, "model.usage", {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    ) is True
+    assert metrics.total_tokens == 2
+    assert metrics.model_calls == 0
+    metrics = UsageMetrics()
+    cases = (
+        # Negative counters.
+        {"input_tokens": -1, "output_tokens": 1, "total_tokens": 0, "model_calls": 1},
+        # total below the input+output sum.
+        {"input_tokens": 6, "output_tokens": 5, "total_tokens": 1, "model_calls": 1},
+        # Non-integer counters.
+        {"input_tokens": "8", "output_tokens": 4, "total_tokens": 12, "model_calls": 1},
+        # Boolean counter.
+        {"input_tokens": True, "output_tokens": 1, "total_tokens": 2, "model_calls": 1},
+        # Non-finite or negative cost.
+        {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2, "model_calls": 1, "cost_usd": -0.5},
+    )
+    for data in cases:
+        assert charge_usage_event(metrics, "model.usage", data) is False, data
+    assert metrics.total_tokens == 0
+    assert metrics.model_calls == 0
+
+    # Missing usage telemetry never charges anything.
+    assert charge_usage_event(metrics, "model.usage_missing", {"source": "pi"}) is False
+
+    # Malformed tool and model request counters fail closed too.
+    assert charge_usage_event(metrics, "tool.call", {"count": -5}) is False
+    assert charge_usage_event(metrics, "tool.call", {"count": "many"}) is False
+    assert charge_usage_event(metrics, "model.request", {"count": "many"}) is False
+    assert metrics.tool_calls == 0
+
+
+def test_usage_ceiling_crossing_is_soft_with_a_grace_window(tmp_path: Path) -> None:
+    """Crossing a usage ceiling opens the shared finalize grace window.
+
+    The crossing is traced once and does not stop the run: only the window's
+    edge (the same edge the adapters kill on) ends the session. This is the
+    semantics the Pi RPC session's ``_account`` path drives through this
+    class; the test exercises it directly at the unit level.
+    """
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-ceiling", "task-ceiling")
+    ceiling = UsageCeiling()
+    budgets = BudgetSpec(wall_time=60, max_tokens=10)
+
+    ceiling.observe(UsageMetrics(total_tokens=9), budgets, trace)
+    assert ceiling.dimension is None
+    assert ceiling.elapsed() is False
+
+    ceiling.observe(
+        UsageMetrics(total_tokens=12, model_calls=1, cost_usd=0.0), budgets, trace
+    )
+    assert ceiling.dimension == "max_tokens"
+    assert ceiling.remaining() is not None and ceiling.remaining() > 0
+
+    def crossing_marks() -> int:
+        text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+        return sum(1 for line in text.splitlines() if '"budget.exceeded"' in line)
+
+    assert crossing_marks() == 1
+    # Repeated observations cannot re-arm or re-trace the crossing.
+    ceiling.observe(UsageMetrics(total_tokens=50), budgets, trace)
+    assert crossing_marks() == 1
+
+    # Time-travel past the window: the edge reports elapsed exactly once.
+    assert ceiling.deadline is not None
+    ceiling.deadline -= FINALIZE_GRACE_SECONDS + 1
+    assert ceiling.elapsed() is True
+
+
+def test_usage_ceiling_ignores_undeclared_dimensions(tmp_path: Path) -> None:
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-ceiling", "task-ceiling")
+    ceiling = UsageCeiling()
+    # Only the wall clock is declared; token and call growth never arms it.
+    ceiling.observe(
+        UsageMetrics(total_tokens=10**9, model_calls=10**6),
+        BudgetSpec(wall_time=60),
         trace,
     )
-    events.write_text(
-        json.dumps(
-            {
-                "type": "model.usage",
-                "data": {"input_tokens": 8, "output_tokens": 4, "cost_usd": 0.2, "model_calls": 1},
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert monitor.poll() is None
-    assert monitor.metrics.total_tokens == 12
-    assert monitor.metrics.model_calls == 1
-    assert monitor.usage_exceeded is None
-    assert '"budget.exceeded"' not in (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
-
-
-def test_budget_monitor_usage_crossing_is_soft_with_grace_window(tmp_path: Path) -> None:
-    events = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test")
-    monitor = BudgetMonitor(events, BudgetSpec(wall_time=60, max_tokens=10), trace)
-    events.write_text(
-        json.dumps(
-            {
-                "type": "model.usage",
-                "data": {"input_tokens": 8, "output_tokens": 4, "cost_usd": 0.0, "model_calls": 1},
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    # Crossing a usage ceiling does not stop the supervised process on the
-    # spot: it opens the same finalize grace window the soft wall-clock
-    # deadline uses, and poll() reports the dimension once the window elapsed.
-    assert monitor.poll() is None
-    assert monitor.exceeded is None
-    assert monitor.usage_exceeded == "max_tokens"
-    trace_text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
-    assert '"budget.exceeded"' in trace_text
-    assert '"budget":"max_tokens"' in trace_text
-    assert f'"grace_seconds":{FINALIZE_GRACE_SECONDS}' in trace_text
-
-    monitor.usage.deadline -= FINALIZE_GRACE_SECONDS + 1  # time-travel past the window
-    assert monitor.poll() == "max_tokens"
-    assert monitor.exceeded == "max_tokens"
-
-
-def test_budget_monitor_fails_closed_on_malformed_or_negative_untrusted_usage(
-    tmp_path: Path,
-) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    event_file.write_text(
-        "\n".join(
-            (
-                json.dumps({"type": "model.usage", "data": {"total_tokens": 12}}),
-                json.dumps({"type": "model.usage", "data": {"total_tokens": -100}}),
-            )
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert monitor.poll() == "invalid_telemetry"
-
-    assert monitor.metrics.total_tokens == 12
-    assert monitor.metrics.model_calls == 0
-    assert monitor.metrics.tool_calls == 0
-    trace_events = [json.loads(line) for line in trace.path.read_text().splitlines()]
-    assert any(event["type"] == "agent.telemetry_error" for event in trace_events)
-
-
-def test_budget_monitor_fails_closed_on_malformed_usage_counters(tmp_path: Path) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    event_file.write_text(
-        json.dumps({"type": "model.request", "data": {"count": "many"}}) + "\n",
-        encoding="utf-8",
-    )
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.model_calls == 0
-
-
-def test_budget_monitor_rejects_total_tokens_below_input_output_sum(tmp_path: Path) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(max_tokens=5), trace)
-    event_file.write_text(
-        json.dumps(
-            {
-                "type": "model.usage",
-                "data": {
-                    "input_tokens": 6,
-                    "output_tokens": 5,
-                    "total_tokens": 1,
-                    "cost_usd": 0.01,
-                },
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.total_tokens == 0
-
-
-def test_budget_monitor_fails_closed_on_missing_model_usage(tmp_path: Path) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    event_file.write_text(
-        json.dumps({"type": "model.usage_missing", "data": {"source": "pi"}}) + "\n",
-        encoding="utf-8",
-    )
-
-    assert monitor.poll() == "invalid_telemetry"
-
-
-@pytest.mark.parametrize(
-    "malformed_record",
-    [
-        "{not-json",
-        "[]",
-        json.dumps({"type": "model.usage", "data": []}),
-        '{"type":"other","data":{"value":NaN}}',
-    ],
-)
-def test_budget_monitor_fails_closed_on_malformed_telemetry_records(
-    tmp_path: Path, malformed_record: str
-) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    event_file.write_text(
-        json.dumps({"type": "model.usage", "data": {"total_tokens": 7}})
-        + "\n"
-        + malformed_record
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.total_tokens == 7
-    trace_events = [json.loads(line) for line in trace.path.read_text().splitlines()]
-    assert any(
-        event["type"] == "agent.telemetry_error"
-        and "record is malformed" in event["data"]["message"]
-        for event in trace_events
+    assert ceiling.dimension is None
+    assert not (tmp_path / "trace.jsonl").exists() or (
+        '"budget.exceeded"' not in (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
     )
 
 
-def test_budget_monitor_fails_closed_on_negative_tool_counter(tmp_path: Path) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    event_file.write_text(
-        json.dumps({"type": "tool.call", "data": {"count": -5}}) + "\n",
-        encoding="utf-8",
+def test_usage_ceiling_remaining_is_none_before_armed(tmp_path: Path) -> None:
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-ceiling", "task-ceiling")
+    ceiling = UsageCeiling()
+    assert ceiling.remaining() is None
+    assert ceiling.elapsed() is False
+    ceiling.observe(UsageMetrics(), BudgetSpec(wall_time=1), trace)
+    assert ceiling.dimension is None
+    assert ceiling.remaining() is None
+    # A real crossing arms a deadline slightly in the future.
+    ceiling.observe(
+        UsageMetrics(model_calls=3), BudgetSpec(wall_time=1, max_model_calls=2), trace
     )
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.tool_calls == 0
-
-
-def test_budget_monitor_fails_closed_if_agent_truncates_telemetry_after_poll(
-    tmp_path: Path,
-) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    event_file.write_text(
-        json.dumps({"type": "model.usage", "data": {"total_tokens": 7}}) + "\n",
-        encoding="utf-8",
-    )
-
-    assert monitor.poll() is None
-    assert monitor.metrics.total_tokens == 7
-
-    event_file.write_text("", encoding="utf-8")
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.total_tokens == 7
-    trace_events = [json.loads(line) for line in trace.path.read_text().splitlines()]
-    assert any(
-        event["type"] == "agent.telemetry_error"
-        and "replaced or truncated" in event["data"]["message"]
-        for event in trace_events
-    )
-
-
-def test_budget_monitor_fails_closed_if_agent_replaces_telemetry_file(tmp_path: Path) -> None:
-    event_file = tmp_path / "events.jsonl"
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    event_file.write_text(
-        json.dumps({"type": "model.usage", "data": {"total_tokens": 7}}) + "\n",
-        encoding="utf-8",
-    )
-
-    assert monitor.poll() is None
-    replacement = tmp_path / "replacement.jsonl"
-    replacement.write_text(
-        json.dumps({"type": "model.usage", "data": {"total_tokens": 9}}) + "\n",
-        encoding="utf-8",
-    )
-    replacement.replace(event_file)
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.total_tokens == 7
-
-
-def test_budget_monitor_rejects_oversized_telemetry_file_before_reading(
-    tmp_path: Path, monkeypatch
-) -> None:
-    import harness.budget as budget_module
-
-    event_file = tmp_path / "events.jsonl"
-    event_file.write_bytes(b"x" * 17)
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    monkeypatch.setattr(budget_module, "MAX_AGENT_TELEMETRY_BYTES", 16)
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.total_tokens == 0
-
-
-def test_budget_monitor_rejects_oversized_unterminated_record(
-    tmp_path: Path, monkeypatch
-) -> None:
-    import harness.budget as budget_module
-
-    event_file = tmp_path / "events.jsonl"
-    event_file.write_bytes(b"x" * 17)
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    monkeypatch.setattr(budget_module, "MAX_AGENT_TELEMETRY_EVENT_BYTES", 16)
-
-    assert monitor.poll() == "invalid_telemetry"
-    assert monitor.metrics.total_tokens == 0
-
-
-def test_budget_monitor_streams_telemetry_in_bounded_chunks(
-    tmp_path: Path, monkeypatch
-) -> None:
-    import harness.budget as budget_module
-
-    event_file = tmp_path / "events.jsonl"
-    event_file.write_text(
-        json.dumps({"type": "model.usage", "data": {"total_tokens": 12}}) + "\n",
-        encoding="utf-8",
-    )
-    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-budget", "task-budget")
-    monitor = BudgetMonitor(event_file, BudgetSpec(), trace)
-    monkeypatch.setattr(budget_module, "MAX_AGENT_TELEMETRY_CHUNK_BYTES", 16)
-
-    for _ in range(10):
-        monitor.poll()
-        if monitor.metrics.total_tokens:
-            break
-
-    assert monitor.metrics.total_tokens == 12
+    assert ceiling.dimension == "max_model_calls"
+    assert ceiling.deadline is not None and ceiling.deadline > time.monotonic()
