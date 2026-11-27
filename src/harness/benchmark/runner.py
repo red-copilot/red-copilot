@@ -497,7 +497,8 @@ class BenchmarkRunner:
             await persist_control_state(
                 run_dir=planned.root,
                 session=session,
-                world_revision=world.snapshot.revision,
+                # Cheap single-row read (see orchestrator event loop).
+                world_revision=world.revision,
                 progress=executor.runtime.progress,
                 processed_event_ids=executor.runtime.loop.processed_event_ids,
             )

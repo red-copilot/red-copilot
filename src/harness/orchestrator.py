@@ -547,7 +547,10 @@ class Orchestrator:
                         await persist_control_state(
                             run_dir=run_dir,
                             session=agent_session,
-                            world_revision=world.snapshot.revision,
+                            # Cheap single-row read: the snapshot property
+                            # would reload and revalidate every World record
+                            # on every agent event just for this revision.
+                            world_revision=world.revision,
                             progress=progress,
                             budget_used=_sum_usage(
                                 recovered_usage,
