@@ -8,7 +8,7 @@
  * network capability, cannot sign verdicts, never reads credentials or the run root, and
  * every file it writes is Agent-side output, not evidence.
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import {
 	convertToLlm,
 	isToolCallEventType,
@@ -119,6 +119,28 @@ export default function harnessContext(pi: ExtensionAPI) {
 			firstKeptEntryId,
 			previousSummary,
 		} = event.preparation;
+		// Tell the Harness a compaction is happening (best effort, never
+		// fatal): the mark rides the untrusted agent-event channel so the
+		// run audit can see where the model's context was cut.
+		try {
+			const eventFile = process.env.HARNESS_EVENT_FILE;
+			if (eventFile) {
+				await appendFile(
+					eventFile,
+					`${JSON.stringify({
+						type: "context.compacted",
+						data: {
+							tokens_before: tokensBefore ?? null,
+							first_kept_entry_id: firstKeptEntryId ?? null,
+							summary_messages: (messagesToSummarize ?? []).length,
+						},
+					})}\n`,
+					"utf8",
+				);
+			}
+		} catch {
+			// Telemetry only: compaction proceeds without the mark.
+		}
 		const messages = [...(messagesToSummarize ?? []), ...(turnPrefixMessages ?? [])];
 		if (messages.length === 0) return;
 		const previousContext = previousSummary

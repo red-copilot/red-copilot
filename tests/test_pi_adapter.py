@@ -188,6 +188,10 @@ def test_prepare_agent_dir_installs_the_harness_extension_when_opted_in(
     assert "MAX_TOOL_TIMEOUT_MS = 180000" in text
     assert "event.input.timeout = MAX_TOOL_TIMEOUT_MS" in text
     assert "isToolCallEventType" in text
+    # The compaction hook must leave an audit-visible mark on the untrusted
+    # agent-event channel (mirrored into the trace by the SolverLoop).
+    assert 'type: "context.compacted"' in text
+    assert "HARNESS_EVENT_FILE" in text
 
     disabled = _adapter(monkeypatch, tmp_path)
     other_run = tmp_path / "disabled"
