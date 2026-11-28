@@ -933,7 +933,14 @@ def test_local_result_carries_a_termination_reason(tmp_path: Path) -> None:
     (tmp_path / "a.yaml").write_text("agent", encoding="utf-8")
     build = Orchestrator()._base_result
 
-    def result_for(status: str, failure_class: str) -> dict:
+    success_verification = {
+        "success": True,
+        "score": 100.0,
+        "message": None,
+        "milestones": {},
+    }
+
+    def result_for(status: str, failure_class: str, verification=verification) -> dict:
         return build(
             run_id="run_x",
             task=task,
@@ -949,9 +956,15 @@ def test_local_result_carries_a_termination_reason(tmp_path: Path) -> None:
             gateway_config=None,
         )
 
-    assert result_for("objective_completed", "success")["termination_reason"] == (
-        "objective-complete"
-    )
+    # Local runs never resolve status to objective_completed; success lives
+    # in the verdict and publishes objective-complete directly (verified
+    # end to end: a passing harness run must not report None).
+    assert result_for("finished", "success", success_verification)[
+        "termination_reason"
+    ] == "objective-complete"
+    assert result_for("objective_completed", "success", success_verification)[
+        "termination_reason"
+    ] == "objective-complete"
     assert result_for("timeout", "solver_budget_exhaustion")["termination_reason"] == (
         "timeout"
     )
